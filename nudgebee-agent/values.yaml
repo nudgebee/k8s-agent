@@ -10,8 +10,8 @@ playbookRepos: {}
 sinksConfig:
   - webhook_sink:
       name: nudgebee_webhook_sink
-      url: http://k8s-collector.nudgebee.svc.cluster.local:80/v1/k8s/events
-      authorization: "YTU5ZjY3MTgtNWRiMS00YWY4LWI4MDQtMTliMDQ0Y2E1ZGYxOjllN2U5MGFkMTNhMjc0NDZkNjdkZjBlNmJlNWIxNmNhNDkzMmQxOGI2NzgzZTkxYzI0Y2MyMjZiNjQ4MTRjMzI0MzM2ZTJiNw=="
+      url: ""
+      authorization: ""
 
 # global parameters
 clusterName: ""
