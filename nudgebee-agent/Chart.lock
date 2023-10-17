@@ -1,0 +1,9 @@
+dependencies:
+- name: kube-prometheus-stack
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 47.2.0
+- name: opencost
+  repository: https://opencost.github.io/opencost-helm-chart
+  version: 1.20.0
+digest: sha256:44c4c983d6790a376d483957069809b51a38afb49c0647ad115ce4eb8c2e523a
+generated: "2023-09-27T15:40:46.586856+05:30"
