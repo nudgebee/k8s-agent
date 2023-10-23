@@ -9,9 +9,8 @@ playbookRepos: {}
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
-    url: "https://collector.dev.nudgebee.pollux.in/"
     name: nudgebee_webhook_sink
-    authorization: ""
+    ttl_hours: 4380
 
 # global parameters
 clusterName: ""
