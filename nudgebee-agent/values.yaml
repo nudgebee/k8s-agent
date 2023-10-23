@@ -9,7 +9,7 @@ playbookRepos: {}
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
-    url: ""
+    url: "https://collector.dev.nudgebee.pollux.in/"
     name: nudgebee_webhook_sink
     authorization: ""
 
