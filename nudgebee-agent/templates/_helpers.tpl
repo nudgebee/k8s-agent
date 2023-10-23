@@ -35,10 +35,6 @@ sinks_config:
 {{- end }}
 
 global_config:
-  cluster_name: {{ required "A valid .Values.clusterName entry is required!" .Values.clusterName }}
-  {{- if .Values.clusterZone }}
-  cluster_zone: {{ .Values.clusterZone }}
-  {{- end }}
   {{- if .Values.globalConfig }}
 {{ toYaml .Values.globalConfig | indent 2 }}
   {{- end }}
