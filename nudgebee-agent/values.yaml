@@ -10,7 +10,7 @@ playbookRepos: {}
 sinksConfig:
   - nudge_bee_sink:
     name: nudgebee_webhook_sink
-    ttl_hours: 4380
+    size_limit: 4380
 
 # global parameters
 clusterName: ""
