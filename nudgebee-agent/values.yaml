@@ -8,10 +8,10 @@ playbookRepos: {}
 
 # sinks configurations
 sinksConfig:
-  - webhook_sink:
-      name: nudgebee_webhook_sink
-      url: ""
-      authorization: ""
+  - nudge_bee_sink:
+    url: ""
+    name: nudgebee_webhook_sink
+    authorization: ""
 
 # global parameters
 clusterName: ""
@@ -143,6 +143,16 @@ priorityBuiltinPlaybooks:
 # custom user playbooks
 customPlaybooks:
 - triggers:
+  - on_deployment_all_changes: { }
+  - on_daemonset_all_changes: { }
+  - on_statefulset_all_changes: { }
+  - on_replicaset_all_changes: { }
+  - on_pod_all_changes: { }
+  - on_node_all_changes: { }
+  - on_job_all_changes: { }
+  actions:
+  - resource_events_diff: { }
+- triggers:
   - on_schedule:
       cron_schedule_repeat:
         cron_expression: "0 12 * * 1" # every Monday at 12:00
@@ -186,7 +196,7 @@ customPlaybooks:
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-          cron_expression: "0 * * * *" # every Monday at 12:00
+          cron_expression: "0 12 * * *" # every Monday at 12:00
   actions:
   - krr_scan: {}
   sinks:
