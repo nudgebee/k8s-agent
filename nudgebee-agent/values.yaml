@@ -9,8 +9,8 @@ playbookRepos: {}
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
-    name: nudgebee_webhook_sink
-    size_limit: 4380
+      name: nudgebee_webhook_sink
+      size_limit: 4380
 
 # global parameters
 clusterName: ""
@@ -596,7 +596,7 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   nudgebee:
-    endpoint: http://k8s-collector.nudgebee.svc.cluster.local:80
+    endpoint: https://collector.dev.nudgebee.pollux.in
     publish_window: '900'
     auth_key: ""
     auth_secret_key: ""
