@@ -575,7 +575,7 @@ runnerServiceAccount:
 
 # parameters for the robusta runner
 runner:
-  image: 280501305789.dkr.ecr.us-east-1.amazonaws.com/robusta-runner:latest
+  image: mayankpande/nudgebee-agent:latest
   imagePullPolicy: Always
   log_level: INFO
   sentry_dsn: https://53b627690db14de7b02095407596fa16@o1120648.ingest.sentry.io/6156573
@@ -598,7 +598,6 @@ runner:
   nudgebee:
     endpoint: https://collector.dev.nudgebee.pollux.in
     publish_window: '900'
-    auth_key: ""
     auth_secret_key: ""
 
 kube-prometheus-stack:

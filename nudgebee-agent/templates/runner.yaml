@@ -212,6 +212,5 @@ stringData:
   SENTRY_DSN: {{ .Values.runner.sentry_dsn }}
   {{ end }}
   NUDGEBEE_ENDPOINT: {{ .Values.runner.nudgebee.endpoint }}
-  NUDGEBEE_AUTH_KEY: {{ .Values.runner.nudgebee.auth_key }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
   PUBLISHING_WINDOW: {{ .Values.runner.nudgebee.publish_window | quote }}
