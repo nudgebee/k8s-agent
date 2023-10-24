@@ -18,6 +18,6 @@ entries:
     name: nudgebee-agent
     type: application
     urls:
-    - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.1.tgz
-    version: 0.0.1
+    - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
+    version: 0.0.0
 generated: "2023-10-17T22:47:42.070822+05:30"
