@@ -189,10 +189,10 @@ apiVersion: v1
 metadata:
   name: opencost
   namespace: opencost
+  labels:
+    app: opencost
 spec:
   selector:
-    app: opencost
-  labels:
     app: opencost
   type: ClusterIP
   ports:
