@@ -78,6 +78,7 @@ lightActions:
 - cordon
 - uncordon
 - rollout_restart
+- unused_pv
 
 # install prometheus, alert-manager, and grafana along with Robusta?
 enablePrometheusStack: false
@@ -207,6 +208,14 @@ customPlaybooks:
           cron_expression: "0 12 * * *" # every Monday at 12:00
   actions:
   - kube_bench_scan: {}
+  sinks:
+    - "nudgebee_webhook_sink"
+- triggers:
+  - on_schedule:
+      cron_schedule_repeat:
+          cron_expression: "0 0 * * *" # every Monday at 10:00
+  actions:
+  - unused_pv: {}
   sinks:
     - "nudgebee_webhook_sink"
 - triggers:
