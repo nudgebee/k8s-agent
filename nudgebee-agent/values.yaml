@@ -72,11 +72,13 @@ lightActions:
 - status_enricher
 - popeye_scan
 - krr_scan
+- kube_bench_scan
 - handle_alertmanager_event
 - drain
 - cordon
 - uncordon
 - rollout_restart
+- unused_pv
 
 # install prometheus, alert-manager, and grafana along with Robusta?
 enablePrometheusStack: false
@@ -201,6 +203,30 @@ customPlaybooks:
   sinks:
     - "nudgebee_webhook_sink"
 - triggers:
+  - on_schedule:
+      cron_schedule_repeat:
+          cron_expression: "0 12 * * *" # every Monday at 12:00
+  actions:
+  - kube_bench_scan: {}
+  sinks:
+    - "nudgebee_webhook_sink"
+- triggers:
+  - on_schedule:
+      cron_schedule_repeat:
+          cron_expression: "0 0 * * *" # every Monday at 10:00
+  actions:
+  - unused_pv: {}
+  sinks:
+    - "nudgebee_webhook_sink"
+- triggers:
+  - on_schedule:
+      cron_schedule_repeat:
+          cron_expression: "0 0 * * *" # every Monday at 10:00
+  actions:
+  - volume_analyzer: {}
+  sinks:
+    - "nudgebee_webhook_sink"
+- triggers:
     - on_deployment_all_changes: { }
     - on_daemonset_all_changes: { }
     - on_statefulset_all_changes: { }
@@ -208,7 +234,7 @@ customPlaybooks:
   actions:
     - resource_babysitter:
         omitted_fields: []
-        fields_to_monitor: ["spec.replicas","status","spec.template.spec.containers[0].resources.requests['memory']","spec.template.spec.containers[0].resources.requests['cpu']","spec.template.spec.containers[0].image"]
+        fields_to_monitor: ["status","requests", "limit", "spec.template.spec.containers[0].resources.requests['memory']","spec.template.spec.containers[0].resources.requests['cpu']","spec.template.spec.containers[0].image"]
   sinks:
     - "nudgebee_webhook_sink"
 
