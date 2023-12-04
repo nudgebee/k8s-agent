@@ -79,6 +79,7 @@ lightActions:
 - uncordon
 - rollout_restart
 - unused_pv
+- image_scanner
 
 # install prometheus, alert-manager, and grafana along with Robusta?
 enablePrometheusStack: false
@@ -205,14 +206,6 @@ customPlaybooks:
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-          cron_expression: "0 12 * * *" # every Monday at 12:00
-  actions:
-  - kube_bench_scan: {}
-  sinks:
-    - "nudgebee_webhook_sink"
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
           cron_expression: "0 0 * * *" # every Monday at 10:00
   actions:
   - unused_pv: {}
@@ -246,11 +239,13 @@ builtinPlaybooks:
       restart_reason: "CrashLoopBackOff"
   actions:
   - report_crash_loop: {}
+  - resource_events_enricher: {}
 
 - triggers:
   - on_image_pull_backoff: {}
   actions:
   - image_pull_backoff_reporter: {}
+  - resource_events_enricher: {}
 
 # playbooks for non-prometheus based monitoring that use prometheus for enrichment
 - triggers:
@@ -637,16 +632,16 @@ kube-prometheus-stack:
         group_wait: 1s
         group_interval: 1s
         repeat_interval: 4h
-        receiver: 'robusta'
+        receiver: 'nudgebee'
         routes:
           - match:
               alertname: Watchdog
             receiver: 'null'
       receivers:
         - name: 'null'
-        - name:  'robusta'
+        - name:  'nudgebee'
           webhook_configs:
-            - url: 'http://robusta-runner.{{ .Release.Namespace }}.svc.cluster.local/api/alerts'
+            - url: 'http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local/api/alerts'
               send_resolved: true
     alertmanagerSpec:
       resources:
