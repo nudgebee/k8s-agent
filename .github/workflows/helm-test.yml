@@ -38,6 +38,8 @@ jobs:
         id: list-changed
         run: |
           ## If executed with debug this won't work anymore.
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add opencost https://opencost.github.io/opencost-helm-chart
           changed=$(ct --config ./.github/configs/ct.yaml list-changed)
           charts=$(echo "$changed" | tr '\n' ' ' | xargs)
           if [[ -n "$changed" ]]; then
