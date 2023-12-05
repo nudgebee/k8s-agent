@@ -2,6 +2,26 @@ apiVersion: v1
 entries:
   nudgebee-agent:
   - apiVersion: v2
+    appVersion: 0.0.1
+    created: "2023-12-05T05:27:39.889341942Z"
+    dependencies:
+    - condition: enablePrometheusStack
+      name: kube-prometheus-stack
+      repository: https://prometheus-community.github.io/helm-charts
+      version: 47.2.0
+    - condition: enableOpenCostStack
+      name: opencost
+      repository: https://opencost.github.io/opencost-helm-chart
+      version: 1.20.0
+    description: Nudgebee Helm chart for Kubernetes
+    digest: a6eed25fee0daa34ae24ec6ffc487c66c269c62744f76991a042765954d3a200
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    name: nudgebee-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.0.2/nudgebee-agent-0.0.2.tgz
+    version: 0.0.2
+  - apiVersion: v2
     appVersion: 0.0.0
     created: "2023-10-17T22:47:42.090929+05:30"
     dependencies:
@@ -20,4 +40,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2023-10-17T22:47:42.070822+05:30"
+generated: "2023-12-05T05:27:39.889353864Z"
