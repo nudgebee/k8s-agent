@@ -92,7 +92,7 @@ disableCloudRouting: true
 
 # scale alerts processing.
 # Used to support clusters with high load of alerts. When used, the runner will consume more memory
-scaleAlertsProcessing: False
+scaleAlertsProcessing: false
 
 # Enable loading playbooks to a persistent volume
 playbooksPersistentVolume: false
@@ -121,15 +121,15 @@ priorityBuiltinPlaybooks:
 - triggers:
   - on_prometheus_alert:
       status: "all"
-      k8s_providers: [ "GKE" ]
+      k8s_providers: ["GKE"]
   actions:
   - name_silencer:
-      names: [ "KubeletDown" ]
+      names: ["KubeletDown"]
 
 - triggers:
   - on_prometheus_alert:
       alert_name: CPUThrottlingHigh
-      k8s_providers: [ "DigitalOcean" ]
+      k8s_providers: ["DigitalOcean"]
       pod_name_prefix: "do-node-agent"
   actions:
   - silence_alert:
@@ -145,15 +145,15 @@ priorityBuiltinPlaybooks:
 # custom user playbooks
 customPlaybooks:
 - triggers:
-  - on_deployment_all_changes: { }
-  - on_daemonset_all_changes: { }
-  - on_statefulset_all_changes: { }
-  - on_replicaset_all_changes: { }
-  - on_pod_all_changes: { }
-  - on_node_all_changes: { }
-  - on_job_all_changes: { }
+  - on_deployment_all_changes: {}
+  - on_daemonset_all_changes: {}
+  - on_statefulset_all_changes: {}
+  - on_replicaset_all_changes: {}
+  - on_pod_all_changes: {}
+  - on_node_all_changes: {}
+  - on_job_all_changes: {}
   actions:
-  - resource_events_diff: { }
+  - resource_events_diff: {}
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
@@ -198,7 +198,7 @@ customPlaybooks:
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-          cron_expression: "0 12 * * *" # every Monday at 12:00
+        cron_expression: "0 12 * * *" # every Monday at 12:00
   actions:
   - krr_scan: {}
   sinks:
@@ -206,7 +206,7 @@ customPlaybooks:
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-          cron_expression: "0 0 * * *" # every Monday at 10:00
+        cron_expression: "0 0 * * *" # every Monday at 10:00
   actions:
   - unused_pv: {}
   sinks:
@@ -214,20 +214,20 @@ customPlaybooks:
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-          cron_expression: "0 0 * * *" # every Monday at 10:00
+        cron_expression: "0 0 * * *" # every Monday at 10:00
   actions:
   - volume_analyzer: {}
   sinks:
     - "nudgebee_webhook_sink"
 - triggers:
-    - on_deployment_all_changes: { }
-    - on_daemonset_all_changes: { }
-    - on_statefulset_all_changes: { }
-    - on_ingress_all_changes: { }
+    - on_deployment_all_changes: {}
+    - on_daemonset_all_changes: {}
+    - on_statefulset_all_changes: {}
+    - on_ingress_all_changes: {}
   actions:
     - resource_babysitter:
         omitted_fields: []
-        fields_to_monitor: ["status","requests", "limit", "spec.template.spec.containers[0].resources.requests['memory']","spec.template.spec.containers[0].resources.requests['cpu']","spec.template.spec.containers[0].image"]
+        fields_to_monitor: ["status", "requests", "limit", "spec.template.spec.containers[0].resources.requests['memory']", "spec.template.spec.containers[0].resources.requests['cpu']", "spec.template.spec.containers[0].image"]
   sinks:
     - "nudgebee_webhook_sink"
 
@@ -276,7 +276,7 @@ builtinPlaybooks:
 
 - triggers:
   - on_prometheus_alert:
-        alert_name: PrometheusRuleFailures
+      alert_name: PrometheusRuleFailures
   actions:
   - prometheus_rules_enricher: {}
   - logs_enricher:
@@ -541,7 +541,7 @@ platformPlaybooks:
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
   imagePullPolicy: IfNotPresent
-  pprof: True
+  pprof: true
   resources:
     requests:
       cpu: 10m
@@ -628,7 +628,7 @@ kube-prometheus-stack:
       global:
         resolve_timeout: 5m
       route:
-        group_by: [ '...' ]
+        group_by: ['...']
         group_wait: 1s
         group_interval: 1s
         repeat_interval: 4h
@@ -639,7 +639,7 @@ kube-prometheus-stack:
             receiver: 'null'
       receivers:
         - name: 'null'
-        - name:  'nudgebee'
+        - name: 'nudgebee'
           webhook_configs:
             - url: 'http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local/api/alerts'
               send_resolved: true

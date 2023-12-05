@@ -26,7 +26,27 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v3
 
+      - name: Add dependency chart repos
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add opencost https://opencost.github.io/opencost-helm-chart
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.6.0
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        with:
+          charts_dir: charts
+          config: './.github/configs/cr.yaml'
+      - uses: sigstore/cosign-installer@9becc617647dfa20ae7b1151972e9b3a2c338a2b # tag=v2.8.1
+      - name: Push chart to GHCR
+        env:
+          COSIGN_EXPERIMENTAL: 1
+        run: |
+          shopt -s nullglob
+          for pkg in .cr-release-packages/*; do
+            if [ -z "${pkg:-}" ]; then
+              break
+            fi
+            helm push "${pkg}" oci://ghcr.io/"${GITHUB_REPOSITORY_OWNER}"/charts |& tee .digest
+            cosign sign $(cat .digest | awk -F "[, ]+" '/Pushed/{print $NF}')
+          done
