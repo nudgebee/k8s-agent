@@ -227,7 +227,7 @@ customPlaybooks:
   actions:
     - resource_babysitter:
         omitted_fields: []
-        fields_to_monitor: ["status", "requests", "limit", "spec.template.spec.containers[0].resources.requests['memory']", "spec.template.spec.containers[0].resources.requests['cpu']", "spec.template.spec.containers[0].image"]
+        fields_to_monitor: ["requests", "limit", "image"]
   sinks:
     - "nudgebee_webhook_sink"
 
@@ -240,12 +240,14 @@ builtinPlaybooks:
   actions:
   - report_crash_loop: {}
   - resource_events_enricher: {}
+  - pod_enricher: {}
 
 - triggers:
   - on_image_pull_backoff: {}
   actions:
   - image_pull_backoff_reporter: {}
   - resource_events_enricher: {}
+  - pod_enricher: {}
 
 # playbooks for non-prometheus based monitoring that use prometheus for enrichment
 - triggers:
@@ -254,16 +256,14 @@ builtinPlaybooks:
   actions:
   - pod_oom_killer_enricher: {}
   - logs_enricher: {}
-  - pod_node_graph_enricher:
-      resource_type: Memory
   - oomkilled_container_graph_enricher:
       resource_type: Memory
   - noisy_neighbours_enricher:
       resource_type: Memory
   - oomkilled_container_matrix_enricher:
       resource_type: Memory
-  - pod_node_metrics_enricher:
-      resource_type: Memory
+  - pod_enricher: {}
+  - resource_events_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
@@ -273,6 +273,7 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_events_enricher: {}
+  - pod_enricher: {}
 
 - triggers:
   - on_prometheus_alert:

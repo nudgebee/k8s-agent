@@ -7,7 +7,7 @@ icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
 # we use 0.0.1 as a placeholder for the version` because Helm wont allow `0.0.0` and we want to be able to run
 # `helm install` on development checkouts without updating this file. the version doesn't matter in that case anyway
 version: 0.0.3
-appVersion: 0.0.1
+appVersion: 0.0.3
 dependencies:
 - name: kube-prometheus-stack
   version: 47.2.0
