@@ -80,6 +80,7 @@ lightActions:
 - rollout_restart
 - unused_pv
 - image_scanner
+- pod_enricher
 
 # install prometheus, alert-manager, and grafana along with Robusta?
 enablePrometheusStack: false
@@ -225,9 +226,7 @@ customPlaybooks:
     - on_statefulset_all_changes: {}
     - on_ingress_all_changes: {}
   actions:
-    - resource_babysitter:
-        omitted_fields: []
-        fields_to_monitor: ["requests", "limit", "image"]
+    - resource_babysitter: {}
   sinks:
     - "nudgebee_webhook_sink"
 
@@ -256,11 +255,12 @@ builtinPlaybooks:
   actions:
   - pod_oom_killer_enricher: {}
   - logs_enricher: {}
-  - oomkilled_container_graph_enricher:
-      resource_type: Memory
   - noisy_neighbours_enricher:
       resource_type: Memory
   - oomkilled_container_matrix_enricher:
+      resource_type: Memory
+      delay_graph_s: 60
+  - pod_node_metrics_enricher:
       resource_type: Memory
   - pod_enricher: {}
   - resource_events_enricher: {}
@@ -610,6 +610,7 @@ runner:
     limits:
       cpu: ~
   additional_env_vars: []
+  additional_env_froms: []
   tolerations: []
   annotations: {}
   nodeSelector: ~

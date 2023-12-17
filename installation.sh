@@ -1,13 +1,76 @@
-#!/bin/bash
 set -e  # Enable error handling
 
-# Check if an access key is provided as a command-line argument
-if [ $# -ne 1 ]; then
-    echo "Error: Access key not provided. Please provide an access key as a command-line argument."
-    exit 1
+# Initialize variables with default values
+auth_key=""
+k8s_context=""
+openshift_enable=""
+additional_secret=""
+prometheus_url=""
+opencost_service_url=""
+namespace="nudgebee-agent"
+agent_name="nudgebee-agent"
+
+# Help function
+usage() {
+  echo "Usage: $0 [-a <auth_key>] [-k <k8s_context>] [-o <openshift_enable>] [-p <prometheus_url>] [-s <additional_secret>]"
+  echo ""
+  echo "Options:"
+  echo "  -a <auth_key>           Authentication key (required)"
+  echo "  -k <k8s_context>        Kubernetes context"
+  echo "  -o <openshift_enable>   OpenShift enable option"
+  echo "  -p <prometheus_url>     Prometheus URL"
+  echo "  -s <additional_secret>  Additional secret"
+  echo "  -n <namespace>          namespace"
+  echo "  -z <agent_name>         agent_name"
+  echo "  -h <help>               help"
+  echo ""
+  echo "Example:"
+  echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
+  exit 1
+}
+
+while getopts ":a:k:o:p:s:n:z:h" opt; do
+  case $opt in
+    a)
+      auth_key="$OPTARG"
+      ;;
+    k)
+      k8s_context="$OPTARG"
+      ;;
+    o)
+      openshift_enable="$OPTARG"
+      ;;
+    p)
+      prometheus_url="$OPTARG"
+      ;;
+    s)
+      addition_secret="$OPTARG"
+      ;;
+    n)
+      namespace="$OPTARG"
+      ;;
+    z)
+      name="$OPTARG"
+      ;;
+    h)
+      usage
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      usage
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      usage
+      ;;
+  esac
+done
+
+# Check if an access key is provided
+if [ -z "$auth_key" ]; then
+  echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."
+  exit 1
 fi
-auth_key="$1"
-k8s_context="$2"  # Optionally provided Kubernetes context
 
 # Log the Kubernetes context that will be used
 if [ -n "$k8s_context" ]; then
@@ -54,20 +117,21 @@ if ! command -v helm &> /dev/null; then
     echo "https://helm.sh/docs/intro/install/"
     exit 1
 fi
-prometheus_selectors=(
-        "app=kube-prometheus-stack-prometheus"
-        "app=prometheus,component=server,release!=kubecost"
-        "app=prometheus-server"
-        "app=prometheus-operator-prometheus"
-        "app=prometheus-msteams"
-        "app=rancher-monitoring-prometheus"
-        "app=prometheus-prometheus"
-)
-# Call the function with the array as an argument
-PROMETHEUS_SERVER_ENDPOINT=$(getPrometheusURL "${prometheus_selectors[@]}")
-
+if [ -z "$prometheus_url" ]; then
+    prometheus_selectors=(
+            "app=kube-prometheus-stack-prometheus"
+            "app=prometheus,component=server,release!=kubecost"
+            "app=prometheus-server"
+            "app=prometheus-operator-prometheus"
+            "app=prometheus-msteams"
+            "app=rancher-monitoring-prometheus"
+            "app=prometheus-prometheus"
+    )
+    # Call the function with the array as an argument
+    prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
+fi
 # Check if service_url is empty
-if [ -z "$PROMETHEUS_SERVER_ENDPOINT" ]; then
+if [ -z "$prometheus_url" ]; then
    echo "Prometheus not found..!"
    read -p "Installing Prometheus using helm , do you want to continue? (yes/no): " install_prometheus
     if [ "$install_prometheus" == "yes" ]; then
@@ -77,13 +141,13 @@ if [ -z "$PROMETHEUS_SERVER_ENDPOINT" ]; then
         helm repo update
         helm install prometheus prometheus-community/kube-prometheus-stack -n prometheus --create-namespace -f https://raw.githubusercontent.com/opencost/opencost/develop/kubernetes/prometheus/extraScrapeConfigs.yaml
         # Call the function with the array as an argument
-        PROMETHEUS_SERVER_ENDPOINT=$(getPrometheusURL "${prometheus_selectors[@]}")
+        prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
     else
         echo "Prometheus installation not requested. Exiting."
         exit 0
     fi
 else
-    echo "Discovered Prometheus URL: $PROMETHEUS_SERVER_ENDPOINT"
+    echo "Discovered Prometheus URL: $prometheus_url"
 fi
 
 opencost_selectors=(
@@ -104,7 +168,18 @@ fi
 echo "Installing nudgebee agent using helm"
 helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
 helm repo update
+
+additional_secret=""
+if [ -n "$additional_secret" ]; then
+    addition_secret_command= "--set-string runner.additional_env_froms[0].secretRef.name=$additional_secret --set-string runner.additional_env_froms[0].secretRef.optional=true"
+fi
+
+if [ -n "$openshift_enable" ]; then
+    addition_secret_command= "--set-string openshift.enable=true --set-string openshift.createScc=true"
+fi
+
+
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent --namespace nudgebee-agent --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key"
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" $addition_secret_command $$openshift_enable
 
 echo "Installation/upgrade completed."
