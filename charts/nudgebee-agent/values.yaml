@@ -596,7 +596,7 @@ runnerServiceAccount:
 
 # parameters for the robusta runner
 runner:
-  image: mayankpande/nudgebee-agent:latest
+  image: public.ecr.aws/p0t0i2l3/nudgebee-agent:latest
   imagePullPolicy: Always
   log_level: INFO
   sentry_dsn: https://53b627690db14de7b02095407596fa16@o1120648.ingest.sentry.io/6156573
