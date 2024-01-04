@@ -126,6 +126,7 @@ if [ -z "$prometheus_url" ]; then
             "app=prometheus-msteams"
             "app=rancher-monitoring-prometheus"
             "app=prometheus-prometheus"
+            "app.kubernetes.io/name=prometheus"
     )
     # Call the function with the array as an argument
     prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
@@ -136,10 +137,9 @@ if [ -z "$prometheus_url" ]; then
    read -p "Installing Prometheus using helm , do you want to continue? (yes/no): " install_prometheus
     if [ "$install_prometheus" == "yes" ]; then
         # Add Helm installation command here or instructions
-        echo "Installing prometheus using"
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-        helm install prometheus prometheus-community/kube-prometheus-stack -n prometheus --create-namespace -f https://raw.githubusercontent.com/opencost/opencost/develop/kubernetes/prometheus/extraScrapeConfigs.yaml
+        helm install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace -f https://raw.githubusercontent.com/opencost/opencost/develop/kubernetes/prometheus/extraScrapeConfigs.yaml
         # Call the function with the array as an argument
         prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
     else
@@ -156,11 +156,17 @@ opencost_selectors=(
 # Call the function with the array as an argument
 opencost_service_url=$(getPrometheusURL "${opencost_selectors[@]}")
 if [ -z "$opencost_service_url" ]; then
-    wget https://raw.githubusercontent.com/nudgebee/k8s-agent/main/opencost/opencost.yaml
-    envsubst < opencost.yaml
-    kubectl apply -f opencost.yaml
-    rm opencost.yaml
-    opencost_service_url=$(getPrometheusURL "${opencost_selectors[@]}")
+   read -p "Installing opencost using helm , do you want to continue? (yes/no): " install_opencost
+    if [ "$install_opencost" == "yes" ]; then
+      wget https://raw.githubusercontent.com/nudgebee/k8s-agent/main/opencost/opencost.yaml
+      envsubst < opencost.yaml
+      kubectl apply -f opencost.yaml
+      rm opencost.yaml
+      opencost_service_url=$(getPrometheusURL "${opencost_selectors[@]}")
+    else
+        echo "opencost installation not requested. Exiting."
+        #exit 0
+    fi
 else
    echo "Discovered OpenCost URL: $opencost_service_url"
 fi
@@ -171,15 +177,15 @@ helm repo update
 
 additional_secret=""
 if [ -n "$additional_secret" ]; then
-    addition_secret_command= "--set-string runner.additional_env_froms[0].secretRef.name=$additional_secret --set-string runner.additional_env_froms[0].secretRef.optional=true"
+    addition_secret_command="--set-string runner.additional_env_froms[0].secretRef.name=$additional_secret --set-string runner.additional_env_froms[0].secretRef.optional=true"
 fi
 
 if [ -n "$openshift_enable" ]; then
-    addition_secret_command= "--set-string openshift.enable=true --set-string openshift.createScc=true"
+    addition_secret_command="--set-string openshift.enable=true --set-string openshift.createScc=true"
 fi
 
 
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" $addition_secret_command $$openshift_enable
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" $addition_secret_command
 
 echo "Installation/upgrade completed."
