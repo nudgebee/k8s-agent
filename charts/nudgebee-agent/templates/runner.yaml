@@ -69,7 +69,7 @@ spec:
             value: {{ .Chart.AppVersion }}
           - name: KRR_IMAGE_OVERRIDE
             value: {{ .Values.runner.krr_image_override }}
-          - name: KRR_IMAGE_OVERRIDEWEBSOCKET_RELAY_ADDRESS
+          - name: WEBSOCKET_RELAY_ADDRESS
             value: {{ .Values.runner.relay_address }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}

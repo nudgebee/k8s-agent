@@ -9,11 +9,8 @@ icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
 version: 0.0.4
 appVersion: 0.0.4
 dependencies:
-- name: kube-prometheus-stack
-  version: 45.7.1
-  condition: enablePrometheusStack
-  repository: "https://prometheus-community.github.io/helm-charts"
 - name: opencost
   version: 1.28.0
-  condition: enableOpenCostStack
+  condition: opencost.enabled
   repository: "https://opencost.github.io/opencost-helm-chart"
+  

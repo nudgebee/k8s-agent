@@ -9,6 +9,7 @@ prometheus_url=""
 opencost_service_url=""
 namespace="nudgebee-agent"
 agent_name="nudgebee-agent"
+env="prod"
 
 # Help function
 usage() {
@@ -23,13 +24,13 @@ usage() {
   echo "  -n <namespace>          namespace"
   echo "  -z <agent_name>         agent_name"
   echo "  -h <help>               help"
-  echo ""
+  echo "  -e <env>                environment"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -52,6 +53,9 @@ while getopts ":a:k:o:p:s:n:z:h" opt; do
     z)
       name="$OPTARG"
       ;;
+    e)
+      env="$OPTARG"
+      ;;
     h)
       usage
       ;;
@@ -72,6 +76,26 @@ if [ -z "$auth_key" ]; then
   exit 1
 fi
 
+relay_endpoint="wss://relay.nudgebee.com/register"
+collector_endpoint="https://collector.nudgebee.com"
+case "$env" in
+  "dev")
+    collector_endpoint="https://collector.dev.nudgebee.pollux.in"
+    relay_endpoint="wss://relay.dev.nudgebee.pollux.in/register"
+    ;;
+  "test")
+    collector_endpoint="https://collector.test.nudgebee.pollux.in"
+    relay_endpoint="wss://relay.test.nudgebee.pollux.in/register"
+    ;;
+  "prod")
+    relay_endpoint="wss://relay.nudgebee.com/register"
+    collector_endpoint="https://collector.nudgebee.com"
+    ;;
+  *)
+    echo "Unknown environment. "$env" Please set env to 'dev', 'test', or 'prod'."
+    exit 1
+    ;;
+esac
 # Log the Kubernetes context that will be used
 if [ -n "$k8s_context" ]; then
     echo "Using the specified Kubernetes context: $k8s_context"
@@ -102,7 +126,6 @@ getPrometheusURL() {
     # If no Prometheus service is found, return an empty string
     echo ""
 }
-
 
 # Check if kubectl is installed
 if ! command -v kubectl &> /dev/null; then
@@ -139,37 +162,16 @@ if [ -z "$prometheus_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-        helm install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace -f https://raw.githubusercontent.com/opencost/opencost/develop/kubernetes/prometheus/extraScrapeConfigs.yaml
+        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=false --set kubeStateMetrics.enabled=true --version=45.7.1 -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
         # Call the function with the array as an argument
-        prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
+        prometheus_url="http://nudgebee-prometheus-kube-p-prometheus.$namespace.svc.cluster.local:9090"
     else
         echo "Prometheus installation not requested. Exiting."
         exit 0
     fi
-else
-    echo "Discovered Prometheus URL: $prometheus_url"
 fi
 
-opencost_selectors=(
-        "app=opencost"
-)
-# Call the function with the array as an argument
-opencost_service_url=$(getPrometheusURL "${opencost_selectors[@]}")
-if [ -z "$opencost_service_url" ]; then
-   read -p "Installing opencost using helm , do you want to continue? (yes/no): " install_opencost
-    if [ "$install_opencost" == "yes" ]; then
-      wget https://raw.githubusercontent.com/nudgebee/k8s-agent/main/opencost/opencost.yaml
-      envsubst < opencost.yaml
-      kubectl apply -f opencost.yaml
-      rm opencost.yaml
-      opencost_service_url=$(getPrometheusURL "${opencost_selectors[@]}")
-    else
-        echo "opencost installation not requested. Exiting."
-        #exit 0
-    fi
-else
-   echo "Discovered OpenCost URL: $opencost_service_url"
-fi
+echo "Discovered Prometheus URL: $prometheus_url"
 
 echo "Installing nudgebee agent using helm"
 helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
@@ -186,6 +188,6 @@ fi
 
 
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" $addition_secret_command
-
+command="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" ---set opencost.opencost.prometheus.external.url="$prometheus_url" -set runner.relay_address="$relay_endpoint" --set runner.nudgebee.endpoint="$collector_endpoint"" 
+echo "$command"
 echo "Installation/upgrade completed."
