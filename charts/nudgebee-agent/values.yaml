@@ -1,9 +1,3 @@
-# most of this file is documented at https://docs.robusta.dev/master/user-guide/configuration.html
-# if you have any questions, feel free to ask via github issues or Slack (see link on robusta.dev)
-
-# NOTE: Do not use this file to install Robusta. It has missing values that need to be filled in. See the installation instructions instead https://docs.robusta.dev/master/installation.html
-
-# playbook repositories
 playbookRepos: {}
 
 # sinks configurations
@@ -18,7 +12,6 @@ clusterZone: ""
 
 automountServiceAccountToken: true
 
-# see https://docs.robusta.dev/master/user-guide/configuration.html#global-config
 globalConfig:
   grafana_url: ""
   grafana_api_key: ""
@@ -28,7 +21,6 @@ globalConfig:
   signing_key: ""
   custom_annotations: []
 
-# see https://docs.robusta.dev/master/user-guide/configuration/additional-settings.html#relabel-prometheus-alerts
 alertRelabel: []
 
 # safe actions to enable authenticated users to run
@@ -80,15 +72,14 @@ lightActions:
 - rollout_restart
 - unused_pv
 - image_scanner
+- pod_enricher
+- logs_enricher
+- volume_analyzer
 
-# install prometheus, alert-manager, and grafana along with Robusta?
-enablePrometheusStack: false
+# install opencost , along with nudgebee ?
 enableOpenCostStack: false
-enableServiceMonitors: true
-monitorHelmReleases: true
-
-# disable messages routed by Robusta cloud
-disableCloudRouting: true
+enableServiceMonitors: false
+monitorHelmReleases: false
 
 # scale alerts processing.
 # Used to support clusters with high load of alerts. When used, the runner will consume more memory
@@ -165,16 +156,12 @@ customPlaybooks:
           excludes:
             v1/pods:
               - name: rx:kube-system
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
   - on_kubernetes_warning_event_create:
       exclude: ["NodeSysctlChange"]
   actions:
   - event_report: {}
   - event_resource_events: {}
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
   - on_job_failure: {}
   actions:
@@ -184,52 +171,37 @@ customPlaybooks:
   - job_info_enricher: {}
   - job_events_enricher: {}
   - job_pod_enricher: {}
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
   - on_schedule:
-      fixed_delay_repeat:
-        repeat: 1
-        seconds_delay: 120
+      cron_schedule_repeat:
+        cron_expression: "0 12 * * *"
   actions:
   - popeye_scan: {}
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-        cron_expression: "0 12 * * *" # every Monday at 12:00
+        cron_expression: "0 12 * * *"
   actions:
   - krr_scan: {}
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
-        cron_expression: "0 0 * * *" # every Monday at 10:00
+        cron_expression: "0 0 * * *"
   actions:
   - unused_pv: {}
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
   - on_schedule:
       cron_schedule_repeat:
         cron_expression: "0 0 * * *" # every Monday at 10:00
   actions:
   - volume_analyzer: {}
-  sinks:
-    - "nudgebee_webhook_sink"
 - triggers:
     - on_deployment_all_changes: {}
     - on_daemonset_all_changes: {}
     - on_statefulset_all_changes: {}
     - on_ingress_all_changes: {}
   actions:
-    - resource_babysitter:
-        omitted_fields: []
-        fields_to_monitor: ["status", "requests", "limit", "spec.template.spec.containers[0].resources.requests['memory']", "spec.template.spec.containers[0].resources.requests['cpu']", "spec.template.spec.containers[0].image"]
-  sinks:
-    - "nudgebee_webhook_sink"
+    - resource_babysitter: {}
 
 # builtin playbooks
 builtinPlaybooks:
@@ -240,12 +212,14 @@ builtinPlaybooks:
   actions:
   - report_crash_loop: {}
   - resource_events_enricher: {}
+  - pod_enricher: {}
 
 - triggers:
   - on_image_pull_backoff: {}
   actions:
   - image_pull_backoff_reporter: {}
   - resource_events_enricher: {}
+  - pod_enricher: {}
 
 # playbooks for non-prometheus based monitoring that use prometheus for enrichment
 - triggers:
@@ -254,16 +228,15 @@ builtinPlaybooks:
   actions:
   - pod_oom_killer_enricher: {}
   - logs_enricher: {}
-  - pod_node_graph_enricher:
-      resource_type: Memory
-  - oomkilled_container_graph_enricher:
-      resource_type: Memory
   - noisy_neighbours_enricher:
       resource_type: Memory
   - oomkilled_container_matrix_enricher:
       resource_type: Memory
+      delay_graph_s: 60
   - pod_node_metrics_enricher:
       resource_type: Memory
+  - pod_enricher: {}
+  - resource_events_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
@@ -273,6 +246,7 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_events_enricher: {}
+  - pod_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
@@ -287,18 +261,12 @@ builtinPlaybooks:
       alert_name: KubeCPUOvercommit
   actions:
   - cpu_overcommited_enricher: {}
-  - external_video_enricher:
-      url: https://bit.ly/overcommit-cpu
-      name: CPU Overcommited
 
 - triggers:
   - on_prometheus_alert:
       alert_name: KubeMemoryOvercommit
   actions:
   - memory_overcommited_enricher: {}
-  - external_video_enricher:
-      url: https://bit.ly/memory-overcommit
-      name: Memory Overcommited
 
 - triggers:
   - on_prometheus_alert:
@@ -307,6 +275,7 @@ builtinPlaybooks:
   - logs_enricher: {}
   - pod_events_enricher: {}
   - pod_issue_investigator: {}
+  - pod_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
@@ -467,77 +436,7 @@ builtinPlaybooks:
       alert_explanation: "This alert is fired when the file system is running out of space."
       recommended_resolution: "This is a common issue on local clusters and we recommend increasing the node disk size for your cluster to run optimally."
 
-# additional builtin playbooks to enable when using Robusta UI
-# these are disabled by default without the UI because they are spammy when sent to slack
-
-enablePlatformPlaybooks: false
-
-platformPlaybooks:
-- triggers:
-  - on_kubernetes_warning_event_create:
-      exclude: ["NodeSysctlChange"]
-  actions:
-  - event_report: {}
-  - event_resource_events: {}
-  sinks:
-    - "robusta_ui_sink"
-- triggers:
-    - on_deployment_all_changes: {}
-    - on_daemonset_all_changes: {}
-    - on_statefulset_all_changes: {}
-  actions:
-    - resource_babysitter: {}
-  sinks:
-    - "robusta_ui_sink"
-- triggers:
-    - on_ingress_all_changes: {}
-  actions:
-    - resource_babysitter: {}
-    - customise_finding:
-        title: Ingress Changes
-        aggregation_key: IngressChange
-  sinks:
-    - "robusta_ui_sink"
-- triggers:
-    - on_deployment_all_changes: {}
-    - on_daemonset_all_changes: {}
-    - on_statefulset_all_changes: {}
-    - on_replicaset_all_changes: {}
-    - on_pod_all_changes: {}
-    - on_node_all_changes: {}
-    - on_job_all_changes: {}
-  actions:
-    - resource_events_diff: {}
-- triggers:
-  - on_job_failure: {}
-  actions:
-  - create_finding:
-      aggregation_key: "job_failure"
-      title: "Job Failed"
-  - job_info_enricher: {}
-  - job_events_enricher: {}
-  - job_pod_enricher: {}
-  sinks:
-    - "robusta_ui_sink"
-- triggers:
-  - on_schedule:
-      fixed_delay_repeat:
-        repeat: 1
-        seconds_delay: 120
-  actions:
-  - popeye_scan: {}
-  sinks:
-    - "robusta_ui_sink"
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
-        cron_expression: "0 * * * *" # every Monday at 12:00
-  actions:
-  - krr_scan: {}
-  sinks:
-    - "robusta_ui_sink"
-
-# parameters for the robusta forwarder deployment
+# parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
   imagePullPolicy: IfNotPresent
@@ -577,7 +476,7 @@ kubewatch:
       coreevent: false # added on kubewatch 2.5
       ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
 
-# parameters for the renderer service used in robusta runner to render grafana graphs
+# parameters for the renderer service used in nudgebee runner to render grafana graphs
 grafanaRenderer:
   enableContainer: false
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/grafana-renderer:7
@@ -589,26 +488,23 @@ grafanaRenderer:
     limits:
       cpu: ~
 
-# parameters for the robusta runner service account
+# parameters for the nudgebee runner service account
 runnerServiceAccount:
   # image pull secrets added to the runner service account. Any pod using the service account will get those
   imagePullSecrets: []
 
-# parameters for the robusta runner
+# parameters for the nudgebee runner
 runner:
   image: public.ecr.aws/p0t0i2l3/nudgebee-agent:latest
   imagePullPolicy: Always
   log_level: INFO
-  sentry_dsn: https://53b627690db14de7b02095407596fa16@o1120648.ingest.sentry.io/6156573
-  sendAdditionalTelemetry: false
-  certificate: "" # base64 encoded
   resources:
     requests:
       cpu: 250m
       memory: 1024Mi
     limits:
       cpu: ~
-  additional_env_vars: []
+  additional_env_froms: []
   tolerations: []
   annotations: {}
   nodeSelector: ~
@@ -616,93 +512,61 @@ runner:
   imagePullSecrets: []
   extraVolumes: []
   extraVolumeMounts: []
+  krr_image_override: public.ecr.aws/p0t0i2l3/krr-public:v1.0.0
+  relay_address: wss://relay.nudgebee.com/register
   nudgebee:
-    endpoint: https://collector.dev.nudgebee.pollux.in
+    endpoint: https://collector.nudgebee.com
     publish_window: '900'
     auth_secret_key: ""
 
-kube-prometheus-stack:
-  alertmanager:
-    tplConfig: true
-    config:
-      global:
-        resolve_timeout: 5m
-      route:
-        group_by: ['...']
-        group_wait: 1s
-        group_interval: 1s
-        repeat_interval: 4h
-        receiver: 'nudgebee'
-        routes:
-          - match:
-              alertname: Watchdog
-            receiver: 'null'
-      receivers:
-        - name: 'null'
-        - name: 'nudgebee'
-          webhook_configs:
-            - url: 'http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local/api/alerts'
-              send_resolved: true
-    alertmanagerSpec:
-      resources:
-        requests:
-          cpu: 50m
-      storage:
-        volumeClaimTemplate:
-          spec:
-            accessModes: ["ReadWriteOnce"]
-            resources:
-              requests:
-                storage: 10Gi
-  kubeProxy:
-    enabled: false
-  prometheus:
-    prometheusSpec:
-      resources:
-        requests:
-          cpu: 50m
-      retention: 15d
-      # we set a value slightly lower than the 100Gi below
-      # the retentionSize uses the suffix GB but it is really Gi units
-      # that is, the retentionSize is measured in base2 units just like Gi, Mi, etc
-      retentionSize: "99GB"
+nodeAgent:
+  enabled: true
+  image:
+    repository: ghcr.io/coroot/coroot-node-agent
+    pullPolicy: IfNotPresent
+    tag: "1.15.1"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "50Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
 
-      storageSpec:
-        volumeClaimTemplate:
-          spec:
-            accessModes: ["ReadWriteOnce"]
-            resources:
-              requests:
-                storage: 100Gi
-  prometheus-node-exporter:
-    service:
-      port: 9104
-      targetPort: 9104
-    resources:
-      requests:
-        cpu: 50m
-    # disable node-exporter on fargate because fargate doesn't allow daemonsets
-    affinity:
-      nodeAffinity:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          nodeSelectorTerms:
-            - matchExpressions:
-                - key: eks.amazonaws.com/compute-type
-                  operator: NotIn
-                  values:
-                    - fargate
-  prometheusOperator:
-    resources:
-      requests:
-        cpu: 100m
-    prometheusConfigReloader:
-      resources:
-        limits:
-          cpu: 0
-  kube-state-metrics:
-    resources:
-      requests:
-        cpu: 10m
+  imagePullSecrets: []
+  nameOverride: ""
+  fullnameOverride: ""
+
+  podAnnotations: {}
+
+  priorityClassName: ""
+  env: []
+
+  otel:
+    tracesEndpoint: ""
+    logsEndpoint: ""
+
+  profiling:
+    pyroscopeEndpoint: ""
+
+existingPrometheus:
+  url: prometheus
+
+opencost:
+  enabled: true
+  opencost:
+    prometheus:
+      external:
+        url: ""
+        enabled: true
+      internal:
+        enabled: false
+      services:
+        labels:
+          app: opencost
+    ui:
+      enabled: false
+
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:

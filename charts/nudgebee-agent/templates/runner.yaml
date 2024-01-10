@@ -67,8 +67,10 @@ spec:
           {{- end }}
           - name: RUNNER_VERSION
             value: {{ .Chart.AppVersion }}
-          - name: CERTIFICATE
-            value: {{ .Values.runner.certificate }}
+          - name: KRR_IMAGE_OVERRIDE
+            value: {{ .Values.runner.krr_image_override }}
+          - name: WEBSOCKET_RELAY_ADDRESS
+            value: {{ .Values.runner.relay_address }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
           {{- end }}
@@ -77,7 +79,7 @@ spec:
           {{- end }}
         envFrom:
         - secretRef:
-            name: robusta-runner-secret
+            name: {{ .Release.Name }}-runner-secret
             optional: true
         {{- if .Values.runner.additional_env_froms }}
         {{ toYaml .Values.runner.additional_env_froms | nindent 8 }}
@@ -204,7 +206,7 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: robusta-runner-secret
+  name: {{ .Release.Name }}-runner-secret
   namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:

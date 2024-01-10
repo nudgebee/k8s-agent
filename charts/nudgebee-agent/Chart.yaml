@@ -6,14 +6,10 @@ icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
 # these are set to the right value by .github/workflows/release.yaml
 # we use 0.0.1 as a placeholder for the version` because Helm wont allow `0.0.0` and we want to be able to run
 # `helm install` on development checkouts without updating this file. the version doesn't matter in that case anyway
-version: 0.0.3
-appVersion: 0.0.1
+version: 0.0.4
+appVersion: 0.0.4
 dependencies:
-- name: kube-prometheus-stack
-  version: 47.2.0
-  condition: enablePrometheusStack
-  repository: "https://prometheus-community.github.io/helm-charts"
 - name: opencost
-  version: 1.20.0
-  condition: enableOpenCostStack
+  version: 1.28.0
+  condition: opencost.enabled
   repository: "https://opencost.github.io/opencost-helm-chart"
