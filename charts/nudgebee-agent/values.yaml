@@ -16,7 +16,7 @@ globalConfig:
   grafana_url: ""
   grafana_api_key: ""
   grafana_dashboard_uid: ""
-  prometheus_url: "{{ .Values.existingPrometheus.url }}"
+  prometheus_url: ""
   account_id: ""
   signing_key: ""
   custom_annotations: []
@@ -435,7 +435,7 @@ builtinPlaybooks:
   - alert_explanation_enricher:
       alert_explanation: "This alert is fired when the file system is running out of space."
       recommended_resolution: "This is a common issue on local clusters and we recommend increasing the node disk size for your cluster to run optimally."
-      
+
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
@@ -551,18 +551,18 @@ nodeAgent:
 
 existingPrometheus:
   url: prometheus
-    
-opencost: 
+
+opencost:
   enabled: true
   opencost:
     prometheus:
       external:
-        url: "{{ .Values.existingPrometheus.url }}"
+        url: ""
         enabled: true
       internal:
         enabled: false
       services:
-        labels: 
+        labels:
           app: opencost
     ui:
       enabled: false
@@ -577,4 +577,3 @@ openshift:
   sccName: null
   sccPriority: null
   privilegedSccPriority: null
-

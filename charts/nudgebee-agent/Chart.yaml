@@ -13,4 +13,3 @@ dependencies:
   version: 1.28.0
   condition: opencost.enabled
   repository: "https://opencost.github.io/opencost-helm-chart"
-  
