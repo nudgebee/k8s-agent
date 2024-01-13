@@ -2,6 +2,22 @@ apiVersion: v1
 entries:
   nudgebee-agent:
   - apiVersion: v2
+    appVersion: 0.0.6
+    created: "2024-01-13T18:12:59.769190513Z"
+    dependencies:
+    - condition: opencost.enabled
+      name: opencost
+      repository: https://opencost.github.io/opencost-helm-chart
+      version: 1.28.0
+    description: Nudgebee Helm chart for Kubernetes
+    digest: 9f75b45a52c11b9be0504562878b9777605c5291e8ba3cfc3db93367dbba888a
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    name: nudgebee-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.0.6/nudgebee-agent-0.0.6.tgz
+    version: 0.0.6
+  - apiVersion: v2
     appVersion: 0.0.5
     created: "2024-01-13T14:00:43.11881852Z"
     dependencies:
@@ -92,4 +108,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2024-01-13T14:00:43.118845991Z"
+generated: "2024-01-13T18:12:59.769217313Z"
