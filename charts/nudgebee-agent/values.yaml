@@ -495,7 +495,7 @@ runnerServiceAccount:
 
 # parameters for the nudgebee runner
 runner:
-  image: 
+  image:
     repository: public.ecr.aws/p0t0i2l3/nudgebee-agent
     tag: latest
   imagePullPolicy: Always
@@ -568,6 +568,8 @@ opencost:
           app: opencost
     ui:
       enabled: false
+    labels:
+      app: opencost
 
 rsa: ~
 # custom parameters for OpenShift clusters

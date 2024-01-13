@@ -10,7 +10,7 @@ opencost_service_url=""
 namespace="nudgebee-agent"
 agent_name="nudgebee-agent"
 env="prod"
-
+disable_node_agent=""
 # Help function
 usage() {
   echo "Usage: $0 [-a <auth_key>] [-k <k8s_context>] [-o <openshift_enable>] [-p <prometheus_url>] [-s <additional_secret>]"
@@ -21,16 +21,17 @@ usage() {
   echo "  -o <openshift_enable>   OpenShift enable option"
   echo "  -p <prometheus_url>     Prometheus URL"
   echo "  -s <additional_secret>  Additional secret"
-  echo "  -n <namespace>          namespace"
-  echo "  -z <agent_name>         agent_name"
-  echo "  -h <help>               help"
-  echo "  -e <env>                environment"
+  echo "  -n <namespace>          Namespace"
+  echo "  -z <agent_name>         Agent_name"
+  echo "  -h <help>               Help"
+  echo "  -e <env>                Environment"
+  echo "  -d <disable_node_agent> Disable node agent"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -45,7 +46,7 @@ while getopts ":a:k:o:p:s:n:z:h:e:" opt; do
       prometheus_url="$OPTARG"
       ;;
     s)
-      addition_secret="$OPTARG"
+      additional_secret="$OPTARG"
       ;;
     n)
       namespace="$OPTARG"
@@ -117,7 +118,7 @@ getPrometheusURL() {
             local port=$(echo "$service_info" | awk '{print $3}')
 
             # Generate and return Prometheus URL
-            local service_url="${name}.${namespace}.svc.cluster.local:${port}"
+            local service_url="http://${name}.${namespace}.svc.cluster.local:${port}"
             echo "$service_url"
             return
         fi
@@ -177,16 +178,20 @@ echo "Installing nudgebee agent using helm"
 helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
 helm repo update > /dev/null 2>&1
 
-additional_secret=""
+addition_secret_command=""
 if [ -n "$additional_secret" ]; then
-    addition_secret_command="--set-string runner.additional_env_froms[0].secretRef.name=$additional_secret --set-string runner.additional_env_froms[0].secretRef.optional=true"
+    addition_secret_command=" --set-string runner.additional_env_froms[0].secretRef.name=$additional_secret --set-string runner.additional_env_froms[0].secretRef.optional=true"
 fi
 
+openshift_enable_command=""
 if [ -n "$openshift_enable" ]; then
-    addition_secret_command="--set-string openshift.enable=true --set-string openshift.createScc=true"
+    openshift_enable_command=" --set-string openshift.enable=true --set-string openshift.createScc=true"
 fi
-
+disable_node_agent_command=""
+if [ -n "$disable_node_agent" ]; then
+  disable_node_agent_command=" --set nodeAgent.enabled=false"
+fi
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set opencost.enabled=false --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" --set runner.relay_address="$relay_endpoint" --set runner.nudgebee.endpoint="$collector_endpoint"
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" --set runner.relay_address="$relay_endpoint" --set runner.nudgebee.endpoint="$collector_endpoint" $disable_node_agent_command $openshift_enable_command $addition_secret_command
 
 echo "Installation/upgrade completed."
