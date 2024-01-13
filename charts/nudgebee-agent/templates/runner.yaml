@@ -31,7 +31,7 @@ spec:
       {{- end }}
       containers:
       - name: runner
-        image: {{ .Values.runner.image }}
+        image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -95,7 +95,7 @@ spec:
           {{- end }}
           {{- with .Values.runner.extraVolumeMounts }}
           {{- toYaml . | nindent 10 }}
-          {{- end }}
+          {{- end }}  
         lifecycle:
           preStop:
             exec:
@@ -128,11 +128,11 @@ spec:
       volumes:
         - name: playbooks-config-secret
           secret:
-            secretName: robusta-playbooks-config-secret
+            secretName: {{ .Release.Name }}-playbooks-config-secret
             optional: true
         - name: auth-config-secret
           secret:
-            secretName: robusta-auth-config-secret
+            secretName: {{ .Release.Name }}-auth-config-secret
             optional: true
         {{- if .Values.playbooksPersistentVolume }}
         - name: persistent-playbooks-storage
@@ -187,7 +187,7 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: robusta-runner-service-monitor
+  name: {{ .Release.Name }}-runner-service-monitor
   labels:
     # this label is how the Prometheus installed with Robusta finds ServiceMonitors
     # TODO: we probably need to add custom labels here for a Prometheus installed separately

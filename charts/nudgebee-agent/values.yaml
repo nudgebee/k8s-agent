@@ -495,7 +495,9 @@ runnerServiceAccount:
 
 # parameters for the nudgebee runner
 runner:
-  image: public.ecr.aws/p0t0i2l3/nudgebee-agent:latest
+  image: 
+    repository: public.ecr.aws/p0t0i2l3/nudgebee-agent
+    tag: latest
   imagePullPolicy: Always
   log_level: INFO
   resources:

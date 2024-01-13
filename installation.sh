@@ -51,7 +51,7 @@ while getopts ":a:k:o:p:s:n:z:h:e:" opt; do
       namespace="$OPTARG"
       ;;
     z)
-      name="$OPTARG"
+      agent_name="$OPTARG"
       ;;
     e)
       env="$OPTARG"
@@ -175,7 +175,7 @@ echo "Discovered Prometheus URL: $prometheus_url"
 
 echo "Installing nudgebee agent using helm"
 helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
-helm repo update
+helm repo update > /dev/null 2>&1
 
 additional_secret=""
 if [ -n "$additional_secret" ]; then
@@ -186,8 +186,7 @@ if [ -n "$openshift_enable" ]; then
     addition_secret_command="--set-string openshift.enable=true --set-string openshift.createScc=true"
 fi
 
-
 # Use helm upgrade --install to either install or upgrade the Helm chart
-command="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" ---set opencost.opencost.prometheus.external.url="$prometheus_url" -set runner.relay_address="$relay_endpoint" --set runner.nudgebee.endpoint="$collector_endpoint"" 
-echo "$command"
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set opencost.enabled=false --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" --set runner.relay_address="$relay_endpoint" --set runner.nudgebee.endpoint="$collector_endpoint"
+
 echo "Installation/upgrade completed."
