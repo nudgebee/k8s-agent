@@ -176,12 +176,6 @@ customPlaybooks:
       cron_schedule_repeat:
         cron_expression: "0 12 * * *"
   actions:
-  - popeye_scan: {}
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
-        cron_expression: "0 12 * * *"
-  actions:
   - krr_scan: {}
 - triggers:
   - on_schedule:

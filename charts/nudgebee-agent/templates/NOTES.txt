@@ -9,6 +9,6 @@
 
 Thank you for installing {{ .Chart.Name | title }} {{ .Chart.AppVersion }}
 
-Visit the web UI at: https://nudgebee.pollux.in
+Visit the web UI at: https://app.nudgebee.com
 
 ============================================================================
