@@ -31,7 +31,7 @@ spec:
       {{- end }}
       containers:
       - name: runner
-        image: {{ .Values.runner.image }}
+        image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
         securityContext:
           allowPrivilegeEscalation: false
@@ -67,8 +67,10 @@ spec:
           {{- end }}
           - name: RUNNER_VERSION
             value: {{ .Chart.AppVersion }}
-          - name: CERTIFICATE
-            value: {{ .Values.runner.certificate }}
+          - name: KRR_IMAGE_OVERRIDE
+            value: {{ .Values.runner.krr_image_override }}
+          - name: WEBSOCKET_RELAY_ADDRESS
+            value: {{ .Values.runner.relay_address }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
           {{- end }}
@@ -77,7 +79,7 @@ spec:
           {{- end }}
         envFrom:
         - secretRef:
-            name: robusta-runner-secret
+            name: {{ .Release.Name }}-runner-secret
             optional: true
         {{- if .Values.runner.additional_env_froms }}
         {{ toYaml .Values.runner.additional_env_froms | nindent 8 }}
@@ -93,7 +95,7 @@ spec:
           {{- end }}
           {{- with .Values.runner.extraVolumeMounts }}
           {{- toYaml . | nindent 10 }}
-          {{- end }}
+          {{- end }}  
         lifecycle:
           preStop:
             exec:
@@ -126,11 +128,11 @@ spec:
       volumes:
         - name: playbooks-config-secret
           secret:
-            secretName: robusta-playbooks-config-secret
+            secretName: {{ .Release.Name }}-playbooks-config-secret
             optional: true
         - name: auth-config-secret
           secret:
-            secretName: robusta-auth-config-secret
+            secretName: {{ .Release.Name }}-auth-config-secret
             optional: true
         {{- if .Values.playbooksPersistentVolume }}
         - name: persistent-playbooks-storage
@@ -185,7 +187,7 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: robusta-runner-service-monitor
+  name: {{ .Release.Name }}-runner-service-monitor
   labels:
     # this label is how the Prometheus installed with Robusta finds ServiceMonitors
     # TODO: we probably need to add custom labels here for a Prometheus installed separately
@@ -204,7 +206,7 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: robusta-runner-secret
+  name: {{ .Release.Name }}-runner-secret
   namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
