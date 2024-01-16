@@ -562,8 +562,9 @@ opencost:
           app: opencost
     ui:
       enabled: false
-    labels:
-      app: opencost
+    service:
+      labels:
+        app: opencost
 
 rsa: ~
 # custom parameters for OpenShift clusters
