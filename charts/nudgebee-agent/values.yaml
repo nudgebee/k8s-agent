@@ -75,6 +75,7 @@ lightActions:
 - pod_enricher
 - logs_enricher
 - volume_analyzer
+- replica_rightsizing
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
