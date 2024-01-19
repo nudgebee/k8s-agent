@@ -57,6 +57,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:" opt; do
     e)
       env="$OPTARG"
       ;;
+    d) 
+      disable_node_agent="$OPTARG"
+      ;;
     h)
       usage
       ;;
