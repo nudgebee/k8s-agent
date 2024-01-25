@@ -76,6 +76,9 @@ lightActions:
 - logs_enricher
 - volume_analyzer
 - replica_rightsizing
+- foreign_logs_enricher
+- replace_workload
+- delete_workload
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
