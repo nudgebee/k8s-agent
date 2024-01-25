@@ -75,6 +75,7 @@ lightActions:
 - pod_enricher
 - logs_enricher
 - volume_analyzer
+- replica_rightsizing
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -562,8 +563,9 @@ opencost:
           app: opencost
     ui:
       enabled: false
-    labels:
-      app: opencost
+    service:
+      labels:
+        app: opencost
 
 rsa: ~
 # custom parameters for OpenShift clusters
