@@ -440,7 +440,6 @@ builtinPlaybooks:
       alert_name: HighErrorCriticalLogs
   actions:
   - logs_enricher: {}
-  - pod_events_enricher: {}
   - pod_enricher: {}
 
 # parameters for the nudgebee forwarder deployment
@@ -570,20 +569,17 @@ opencost:
         enabled: true
       internal:
         enabled: false
-      services:
-        labels:
-          app: opencost
-    ui:
-      enabled: false
     service:
       labels:
         app: opencost
+    ui:
+      enabled: false
 
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:
   enabled: false
-  createScc: false
+  createScc: true
   createPrivilegedScc: false
   privilegedSccName: null
   sccName: null
