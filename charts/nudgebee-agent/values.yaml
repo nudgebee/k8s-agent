@@ -442,6 +442,13 @@ builtinPlaybooks:
   - logs_enricher: {}
   - pod_enricher: {}
 
+- triggers:
+  - on_prometheus_alert:
+      alert_name: ApplicationAPIFailures
+  actions:
+  - logs_enricher: {}
+  - pod_enricher: {}
+
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
