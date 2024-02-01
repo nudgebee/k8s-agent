@@ -530,9 +530,9 @@ runner:
 nodeAgent:
   enabled: true
   image:
-    repository: ghcr.io/coroot/coroot-node-agent
+    repository: public.ecr.aws/p0t0i2l3/node-agent
     pullPolicy: IfNotPresent
-    tag: "1.15.1"
+    tag: latest
   resources:
     requests:
       cpu: "100m"
