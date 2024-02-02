@@ -76,6 +76,9 @@ lightActions:
 - logs_enricher
 - volume_analyzer
 - replica_rightsizing
+- foreign_logs_enricher
+- replace_workload
+- delete_workload
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -230,6 +233,7 @@ builtinPlaybooks:
       delay_graph_s: 60
   - pod_node_metrics_enricher:
       resource_type: Memory
+      delay_graph_s: 60
   - pod_enricher: {}
   - resource_events_enricher: {}
   stop: true
@@ -430,6 +434,14 @@ builtinPlaybooks:
   - alert_explanation_enricher:
       alert_explanation: "This alert is fired when the file system is running out of space."
       recommended_resolution: "This is a common issue on local clusters and we recommend increasing the node disk size for your cluster to run optimally."
+
+- triggers:
+  - on_prometheus_alert:
+      alert_name: HighErrorCriticalLogs
+  actions:
+  - logs_enricher: {}
+  - pod_events_enricher: {}
+  - pod_enricher: {}
 
 # parameters for the nudgebee forwarder deployment
 kubewatch:
