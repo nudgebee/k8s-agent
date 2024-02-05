@@ -440,7 +440,13 @@ builtinPlaybooks:
       alert_name: HighErrorCriticalLogs
   actions:
   - logs_enricher: {}
-  - pod_events_enricher: {}
+  - pod_enricher: {}
+
+- triggers:
+  - on_prometheus_alert:
+      alert_name: ApplicationAPIFailures
+  actions:
+  - logs_enricher: {}
   - pod_enricher: {}
 
 # parameters for the nudgebee forwarder deployment
@@ -531,9 +537,9 @@ runner:
 nodeAgent:
   enabled: true
   image:
-    repository: ghcr.io/coroot/coroot-node-agent
+    repository: public.ecr.aws/p0t0i2l3/node-agent
     pullPolicy: IfNotPresent
-    tag: "1.15.1"
+    tag: latest
   resources:
     requests:
       cpu: "100m"
@@ -570,20 +576,17 @@ opencost:
         enabled: true
       internal:
         enabled: false
-      services:
-        labels:
-          app: opencost
-    ui:
-      enabled: false
     service:
       labels:
         app: opencost
+    ui:
+      enabled: false
 
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:
   enabled: false
-  createScc: false
+  createScc: true
   createPrivilegedScc: false
   privilegedSccName: null
   sccName: null
