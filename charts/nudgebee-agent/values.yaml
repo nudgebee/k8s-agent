@@ -81,6 +81,7 @@ lightActions:
 - delete_workload
 - pod_bash_enricher
 - node_bash_enricher
+- pod_script_run_enricher
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
