@@ -150,10 +150,6 @@ if [ -z "$prometheus_url" ]; then
             "app=prometheus,component=server,release!=kubecost"
             "app=prometheus-server"
             "app=prometheus-operator-prometheus"
-            "app=prometheus-msteams"
-            "app=rancher-monitoring-prometheus"
-            "app=prometheus-prometheus"
-            "app.kubernetes.io/name=prometheus"
     )
     # Call the function with the array as an argument
     prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
@@ -166,7 +162,7 @@ if [ -z "$prometheus_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=false --set kubeStateMetrics.enabled=true --version=45.7.1 -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
+        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=false --set kubeStateMetrics.enabled=true --set grafana.enabled=false -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
         # Call the function with the array as an argument
         prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
     else

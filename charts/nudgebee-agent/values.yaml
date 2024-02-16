@@ -79,6 +79,9 @@ lightActions:
 - foreign_logs_enricher
 - replace_workload
 - delete_workload
+- pod_bash_enricher
+- node_bash_enricher
+- pod_script_run_enricher
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -230,10 +233,9 @@ builtinPlaybooks:
       resource_type: Memory
   - oomkilled_container_matrix_enricher:
       resource_type: Memory
-      delay_graph_s: 60
+      delay_graph_s: 30
   - pod_node_metrics_enricher:
       resource_type: Memory
-      delay_graph_s: 60
   - pod_enricher: {}
   - resource_events_enricher: {}
   stop: true
@@ -440,7 +442,13 @@ builtinPlaybooks:
       alert_name: HighErrorCriticalLogs
   actions:
   - logs_enricher: {}
-  - pod_events_enricher: {}
+  - pod_enricher: {}
+
+- triggers:
+  - on_prometheus_alert:
+      alert_name: ApplicationAPIFailures
+  actions:
+  - logs_enricher: {}
   - pod_enricher: {}
 
 # parameters for the nudgebee forwarder deployment
@@ -531,9 +539,9 @@ runner:
 nodeAgent:
   enabled: true
   image:
-    repository: ghcr.io/coroot/coroot-node-agent
+    repository: public.ecr.aws/p0t0i2l3/node-agent
     pullPolicy: IfNotPresent
-    tag: "1.15.1"
+    tag: latest
   resources:
     requests:
       cpu: "100m"
@@ -570,20 +578,17 @@ opencost:
         enabled: true
       internal:
         enabled: false
-      services:
-        labels:
-          app: opencost
-    ui:
-      enabled: false
     service:
       labels:
         app: opencost
+    ui:
+      enabled: false
 
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:
   enabled: false
-  createScc: false
+  createScc: true
   createPrivilegedScc: false
   privilegedSccName: null
   sccName: null
