@@ -474,6 +474,17 @@ builtinPlaybooks:
   - event_resource_events: {}
   - node_running_pods_event_enricher: {}
 
+- triggers:
+  - on_prometheus_alert:
+      alert_name: PodMemoryReachingLimit
+  actions:
+  - logs_enricher: {}
+  - pod_enricher: {}
+  - pod_node_metrics_enricher:
+      resource_type: Memory
+  - pod_metric_enricher:
+      resource_type: Memory
+
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
