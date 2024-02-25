@@ -226,6 +226,7 @@ builtinPlaybooks:
   - report_crash_loop: {}
   - resource_events_enricher: {}
   - pod_enricher: {}
+  - impacted_services_enricher: {}
 
 - triggers:
   - on_image_pull_backoff: {}
@@ -455,6 +456,7 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_enricher: {}
+  - impacted_services_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
@@ -463,6 +465,14 @@ builtinPlaybooks:
   - logs_enricher: {}
   - pod_enricher: {}
   - api_failure_enricher: {}
+
+- triggers:
+  - on_kubernetes_warning_event_create:
+      include: ["SpotInterruption"]
+  actions:
+  - event_report: {}
+  - event_resource_events: {}
+  - node_running_pods_event_enricher: {}
 
 # parameters for the nudgebee forwarder deployment
 kubewatch:
