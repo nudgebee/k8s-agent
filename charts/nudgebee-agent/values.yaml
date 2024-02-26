@@ -30,8 +30,6 @@ globalConfig:
       regex: "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$"
     - name: google-api-key
       regex: "AIza[0-9A-Za-z-_]{35}"
-    - name: google-secret-key
-      regex: "[0-9a-zA-Z-_]{24}"
     - name: google-auth-code
       regex: "1/[0-9A-Za-z-]{43}|1/[0-9A-Za-z-]{64}"
 
@@ -228,6 +226,7 @@ builtinPlaybooks:
   - report_crash_loop: {}
   - resource_events_enricher: {}
   - pod_enricher: {}
+  - impacted_services_enricher: {}
 
 - triggers:
   - on_image_pull_backoff: {}
@@ -457,6 +456,7 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_enricher: {}
+  - impacted_services_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
@@ -464,6 +464,26 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_enricher: {}
+  - api_failure_enricher: {}
+
+- triggers:
+  - on_kubernetes_warning_event_create:
+      include: ["SpotInterruption"]
+  actions:
+  - event_report: {}
+  - event_resource_events: {}
+  - node_running_pods_event_enricher: {}
+
+- triggers:
+  - on_prometheus_alert:
+      alert_name: PodMemoryReachingLimit
+  actions:
+  - logs_enricher: {}
+  - pod_enricher: {}
+  - pod_node_metrics_enricher:
+      resource_type: Memory
+  - pod_metric_enricher:
+      resource_type: Memory
 
 # parameters for the nudgebee forwarder deployment
 kubewatch:
