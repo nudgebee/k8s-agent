@@ -251,6 +251,7 @@ builtinPlaybooks:
       resource_type: Memory
   - pod_enricher: {}
   - resource_events_enricher: {}
+  - impacted_services_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
