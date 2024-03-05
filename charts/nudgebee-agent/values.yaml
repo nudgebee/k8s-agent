@@ -20,6 +20,18 @@ globalConfig:
   account_id: ""
   signing_key: ""
   custom_annotations: []
+  regex_replacement_style: SAME_LENGTH_ASTERISKS
+  regex_replacer_patterns:
+    - name: JWT
+      regex: "^(?:[\\w-]*\\.){2}[\\w-]*$"
+    - name: UUID
+      regex: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    - name: BASE64
+      regex: "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$"
+    - name: google-api-key
+      regex: "AIza[0-9A-Za-z-_]{35}"
+    - name: google-auth-code
+      regex: "1/[0-9A-Za-z-]{43}|1/[0-9A-Za-z-]{64}"
 
 alertRelabel: []
 
@@ -214,6 +226,7 @@ builtinPlaybooks:
   - report_crash_loop: {}
   - resource_events_enricher: {}
   - pod_enricher: {}
+  - impacted_services_enricher: {}
 
 - triggers:
   - on_image_pull_backoff: {}
@@ -238,6 +251,7 @@ builtinPlaybooks:
       resource_type: Memory
   - pod_enricher: {}
   - resource_events_enricher: {}
+  - impacted_services_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
@@ -443,6 +457,7 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_enricher: {}
+  - impacted_services_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
@@ -450,6 +465,26 @@ builtinPlaybooks:
   actions:
   - logs_enricher: {}
   - pod_enricher: {}
+  - api_failure_enricher: {}
+
+- triggers:
+  - on_kubernetes_warning_event_create:
+      include: ["SpotInterruption"]
+  actions:
+  - event_report: {}
+  - event_resource_events: {}
+  - node_running_pods_event_enricher: {}
+
+- triggers:
+  - on_prometheus_alert:
+      alert_name: PodMemoryReachingLimit
+  actions:
+  - logs_enricher: {}
+  - pod_enricher: {}
+  - pod_node_metrics_enricher:
+      resource_type: Memory
+  - pod_metric_enricher:
+      resource_type: Memory
 
 # parameters for the nudgebee forwarder deployment
 kubewatch:
@@ -539,7 +574,7 @@ runner:
 nodeAgent:
   enabled: true
   image:
-    repository: public.ecr.aws/p0t0i2l3/node-agent
+    repository: public.ecr.aws/p0t0i2l3/nudgebee-node-agent
     pullPolicy: IfNotPresent
     tag: latest
   resources:
