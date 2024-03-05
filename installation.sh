@@ -24,7 +24,6 @@ usage() {
   echo "  -n <namespace>          Namespace"
   echo "  -z <agent_name>         Agent_name"
   echo "  -h <help>               Help"
-  echo "  -e <env>                Environment"
   echo "  -d <disable_node_agent> Disable node agent"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
@@ -54,9 +53,6 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:" opt; do
     z)
       agent_name="$OPTARG"
       ;;
-    e)
-      env="$OPTARG"
-      ;;
     d) 
       disable_node_agent="$OPTARG"
       ;;
@@ -80,26 +76,6 @@ if [ -z "$auth_key" ]; then
   exit 1
 fi
 
-relay_endpoint="wss://relay.nudgebee.com/register"
-collector_endpoint="https://collector.nudgebee.com"
-case "$env" in
-  "dev")
-    collector_endpoint="https://collector.dev.nudgebee.pollux.in"
-    relay_endpoint="wss://relay.dev.nudgebee.pollux.in/register"
-    ;;
-  "test")
-    collector_endpoint="https://collector.test.nudgebee.pollux.in"
-    relay_endpoint="wss://relay.test.nudgebee.pollux.in/register"
-    ;;
-  "prod")
-    relay_endpoint="wss://relay.nudgebee.com/register"
-    collector_endpoint="https://collector.nudgebee.com"
-    ;;
-  *)
-    echo "Unknown environment. "$env" Please set env to 'dev', 'test', or 'prod'."
-    exit 1
-    ;;
-esac
 # Log the Kubernetes context that will be used
 if [ -n "$k8s_context" ]; then
     echo "Using the specified Kubernetes context: $k8s_context"
@@ -191,6 +167,6 @@ if [ -n "$disable_node_agent" ]; then
   disable_node_agent_command=" --set nodeAgent.enabled=false"
 fi
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" --set runner.relay_address="$relay_endpoint" --set runner.nudgebee.endpoint="$collector_endpoint" $disable_node_agent_command $openshift_enable_command $addition_secret_command
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command
 
 echo "Installation/upgrade completed."
