@@ -94,6 +94,7 @@ lightActions:
 - pod_bash_enricher
 - node_bash_enricher
 - pod_script_run_enricher
+- python_debugger
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
