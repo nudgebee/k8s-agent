@@ -27,7 +27,7 @@ jobs:
           version: v3.10.0
   
       - name: Update Helm Package for Nudgebee
-        working-directory: ./deploy/kubernetes/nudgebee
+        working-directory: ./charts/nudgebee-agent
         run: |
           nudgebee_app_image=`aws ecr describe-images --repository-name nudgebee-agent --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
           echo "nudgebee_app_image: $nudgebee_app_image"
