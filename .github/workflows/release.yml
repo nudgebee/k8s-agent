@@ -26,6 +26,18 @@ jobs:
         with:
           version: v3.10.0
   
+      - name: Install AWS cli
+        if: github.ref == 'refs/heads/main'
+        uses: unfor19/install-aws-cli-action@master
+
+      - name: Configure AWS Credentials
+        if: github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+    
       - name: Update Helm Package for Nudgebee
         working-directory: ./charts/nudgebee-agent
         run: |
