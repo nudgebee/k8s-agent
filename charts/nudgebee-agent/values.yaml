@@ -89,6 +89,7 @@ lightActions:
 - node_bash_enricher
 - pod_script_run_enricher
 - python_debugger
+- prometheus_labels
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
