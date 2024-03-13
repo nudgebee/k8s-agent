@@ -45,6 +45,10 @@ jobs:
           echo "nudgebee_app_image: $nudgebee_app_image"
           yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
 
+          nudgebee_node_image=`aws ecr describe-images --repository-name nudgebee-node-agent --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_node_image: $nudgebee_node_image"
+          yq -i ".nodeAgent.image.tag=\"$nudgebee_app_image\"" values.yaml
+          
       - name: Add dependency chart repos
         run: |
           helm repo add opencost https://opencost.github.io/opencost-helm-chart

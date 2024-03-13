@@ -32,7 +32,7 @@ usage() {
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
