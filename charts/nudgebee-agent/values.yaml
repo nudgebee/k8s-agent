@@ -89,6 +89,7 @@ lightActions:
 - python_debugger
 - prometheus_labels
 - create_or_replace_alert_rule
+- pod_node_event_enricher
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -235,8 +236,11 @@ builtinPlaybooks:
       delay_graph_s: 30
   - pod_node_metrics_enricher:
       resource_type: Memory
+  - pod_node_metrics_enricher:
+      resource_type: MemoryRequest
   - pod_enricher: {}
   - resource_events_enricher: {}
+  - pod_node_event_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
