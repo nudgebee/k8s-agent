@@ -11,6 +11,7 @@ namespace="nudgebee-agent"
 agent_name="nudgebee-agent"
 env="prod"
 disable_node_agent=""
+values=""
 # Help function
 usage() {
   echo "Usage: $0 [-a <auth_key>] [-k <k8s_context>] [-o <openshift_enable>] [-p <prometheus_url>] [-s <additional_secret>]"
@@ -25,12 +26,13 @@ usage() {
   echo "  -z <agent_name>         Agent_name"
   echo "  -h <help>               Help"
   echo "  -d <disable_node_agent> Disable node agent"
+  echo "  -f <values> values yaml"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -55,6 +57,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:" opt; do
       ;;
     d) 
       disable_node_agent="$OPTARG"
+      ;;
+    f) 
+      values="$OPTARG"
       ;;
     h)
       usage
@@ -166,7 +171,13 @@ disable_node_agent_command=""
 if [ -n "$disable_node_agent" ]; then
   disable_node_agent_command=" --set nodeAgent.enabled=false"
 fi
+
+values_command=""
+if [ -n "$values" ]; then
+  values_command=" -f $values"
+fi
+
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command
 
 echo "Installation/upgrade completed."

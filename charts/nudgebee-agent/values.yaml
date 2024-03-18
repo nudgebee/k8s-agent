@@ -20,8 +20,6 @@ globalConfig:
   regex_replacer_patterns:
     - name: JWT
       regex: "^(?:[\\w-]*\\.){2}[\\w-]*$"
-    - name: UUID
-      regex: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     - name: BASE64
       regex: "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$"
     - name: google-api-key
@@ -89,6 +87,9 @@ lightActions:
 - node_bash_enricher
 - pod_script_run_enricher
 - python_debugger
+- prometheus_labels
+- create_or_replace_alert_rule
+- pod_node_event_enricher
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -235,8 +236,11 @@ builtinPlaybooks:
       delay_graph_s: 30
   - pod_node_metrics_enricher:
       resource_type: Memory
+  - pod_node_metrics_enricher:
+      resource_type: MemoryRequest
   - pod_enricher: {}
   - resource_events_enricher: {}
+  - pod_node_event_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
