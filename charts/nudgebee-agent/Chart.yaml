@@ -6,8 +6,8 @@ icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
 # these are set to the right value by .github/workflows/release.yaml
 # we use 0.0.1 as a placeholder for the version` because Helm wont allow `0.0.0` and we want to be able to run
 # `helm install` on development checkouts without updating this file. the version doesn't matter in that case anyway
-version: 0.0.33
-appVersion: 0.0.33
+version: 0.0.34
+appVersion: 0.0.34
 dependencies:
 - name: opencost
   version: 1.28.0
