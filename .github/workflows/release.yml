@@ -25,7 +25,30 @@ jobs:
         uses: azure/setup-helm@v3
         with:
           version: v3.10.0
+  
+      - name: Install AWS cli
+        if: github.ref == 'refs/heads/main'
+        uses: unfor19/install-aws-cli-action@master
 
+      - name: Configure AWS Credentials
+        if: github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+    
+      - name: Update Helm Package for Nudgebee
+        working-directory: ./charts/nudgebee-agent
+        run: |
+          nudgebee_app_image=`aws ecr describe-images --repository-name nudgebee-agent --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_app_image: $nudgebee_app_image"
+          yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
+
+          nudgebee_node_image=`aws ecr describe-images --repository-name nudgebee-node-agent --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_node_image: $nudgebee_node_image"
+          yq -i ".nodeAgent.image.tag=\"$nudgebee_app_image\"" values.yaml
+          
       - name: Add dependency chart repos
         run: |
           helm repo add opencost https://opencost.github.io/opencost-helm-chart

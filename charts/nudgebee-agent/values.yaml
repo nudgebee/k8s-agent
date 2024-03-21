@@ -1,17 +1,13 @@
 playbookRepos: {}
-
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
       name: nudgebee_webhook_sink
       size_limit: 4380
-
 # global parameters
 clusterName: ""
 clusterZone: ""
-
 automountServiceAccountToken: true
-
 globalConfig:
   grafana_url: ""
   grafana_api_key: ""
@@ -24,17 +20,13 @@ globalConfig:
   regex_replacer_patterns:
     - name: JWT
       regex: "^(?:[\\w-]*\\.){2}[\\w-]*$"
-    - name: UUID
-      regex: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     - name: BASE64
       regex: "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$"
     - name: google-api-key
       regex: "AIza[0-9A-Za-z-_]{35}"
     - name: google-auth-code
       regex: "1/[0-9A-Za-z-]{43}|1/[0-9A-Za-z-]{64}"
-
 alertRelabel: []
-
 # safe actions to enable authenticated users to run
 lightActions:
 - related_pods
@@ -94,128 +86,123 @@ lightActions:
 - pod_bash_enricher
 - node_bash_enricher
 - pod_script_run_enricher
+- python_debugger
+- prometheus_labels
+- create_or_replace_alert_rule
+- pod_node_event_enricher
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
 monitorHelmReleases: false
-
 # scale alerts processing.
 # Used to support clusters with high load of alerts. When used, the runner will consume more memory
 scaleAlertsProcessing: false
-
 # Enable loading playbooks to a persistent volume
 playbooksPersistentVolume: false
 playbooksPersistentVolumeSize: 4Gi
-
 # priority builtin playbooks for running before all playbooks
 priorityBuiltinPlaybooks:
-# playbooks for prometheus silencing
-- triggers:
-  - on_prometheus_alert:
-      status: "all"
-  actions:
-  - name_silencer:
-      names: ["Watchdog", "KubeSchedulerDown", "KubeControllerManagerDown", "InfoInhibitor"]
-
-# Silences for small/local clusters
-- triggers:
-  - on_prometheus_alert:
-      status: "all"
-      k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
-  actions:
-  - name_silencer:
-      names: ["etcdInsufficientMembers", "etcdMembersDown", "NodeClockNotSynchronising", "PrometheusTSDBCompactionsFailing"]
-
-# Silences for specific providers
-- triggers:
-  - on_prometheus_alert:
-      status: "all"
-      k8s_providers: ["GKE"]
-  actions:
-  - name_silencer:
-      names: ["KubeletDown"]
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: CPUThrottlingHigh
-      k8s_providers: ["DigitalOcean"]
-      pod_name_prefix: "do-node-agent"
-  actions:
-  - silence_alert:
-      log_silence: true
-
-# Smart Silences
-- triggers:
-  - on_prometheus_alert:
-      alert_name: TargetDown
-  actions:
-  - target_down_dns_silencer: {}
-
+  # playbooks for prometheus silencing
+  - triggers:
+      - on_prometheus_alert:
+          status: "all"
+    actions:
+      - name_silencer:
+          names: ["Watchdog", "KubeSchedulerDown", "KubeControllerManagerDown", "InfoInhibitor"]
+  # Silences for small/local clusters
+  - triggers:
+      - on_prometheus_alert:
+          status: "all"
+          k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
+    actions:
+      - name_silencer:
+          names: ["etcdInsufficientMembers", "etcdMembersDown", "NodeClockNotSynchronising", "PrometheusTSDBCompactionsFailing"]
+  # Silences for specific providers
+  - triggers:
+      - on_prometheus_alert:
+          status: "all"
+          k8s_providers: ["GKE"]
+    actions:
+      - name_silencer:
+          names: ["KubeletDown"]
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: CPUThrottlingHigh
+          k8s_providers: ["DigitalOcean"]
+          pod_name_prefix: "do-node-agent"
+    actions:
+      - silence_alert:
+          log_silence: true
+  # Smart Silences
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: TargetDown
+    actions:
+      - target_down_dns_silencer: {}
 # custom user playbooks
 customPlaybooks:
-- triggers:
-  - on_deployment_all_changes: {}
-  - on_daemonset_all_changes: {}
-  - on_statefulset_all_changes: {}
-  - on_replicaset_all_changes: {}
-  - on_pod_all_changes: {}
-  - on_node_all_changes: {}
-  - on_job_all_changes: {}
-  actions:
-  - resource_events_diff: {}
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
-        cron_expression: "0 12 * * 1" # every Monday at 12:00
-  actions:
-  - popeye_scan:
-      spinach: |
-        popeye:
-          excludes:
-            v1/pods:
-              - name: rx:kube-system
-- triggers:
-  - on_kubernetes_warning_event_create:
-      exclude: ["NodeSysctlChange"]
-  actions:
-  - event_report: {}
-  - event_resource_events: {}
-- triggers:
-  - on_job_failure: {}
-  actions:
-  - create_finding:
-      aggregation_key: "job_failure"
-      title: "Job Failed"
-  - job_info_enricher: {}
-  - job_events_enricher: {}
-  - job_pod_enricher: {}
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
-        cron_expression: "0 12 * * *"
-  actions:
-  - krr_scan: {}
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
-        cron_expression: "0 0 * * *"
-  actions:
-  - unused_pv: {}
-- triggers:
-  - on_schedule:
-      cron_schedule_repeat:
-        cron_expression: "0 0 * * *" # every Monday at 10:00
-  actions:
-  - volume_analyzer: {}
-- triggers:
-    - on_deployment_all_changes: {}
-    - on_daemonset_all_changes: {}
-    - on_statefulset_all_changes: {}
-    - on_ingress_all_changes: {}
-  actions:
-    - resource_babysitter: {}
-
+  - triggers:
+      - on_deployment_all_changes: {}
+      - on_daemonset_all_changes: {}
+      - on_statefulset_all_changes: {}
+      - on_replicaset_all_changes: {}
+      - on_pod_all_changes: {}
+      - on_node_all_changes: {}
+      - on_job_all_changes: {}
+    actions:
+      - resource_events_diff: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 12 * * 1" # every Monday at 12:00
+    actions:
+      - popeye_scan:
+          spinach: |
+            popeye:
+              excludes:
+                v1/pods:
+                  - name: rx:kube-system
+  - triggers:
+      - on_kubernetes_warning_event_create:
+          exclude: ["NodeSysctlChange"]
+    actions:
+      - event_report: {}
+      - event_resource_events: {}
+  - triggers:
+      - on_job_failure: {}
+    actions:
+      - create_finding:
+          aggregation_key: "job_failure"
+          title: "Job Failed"
+      - job_info_enricher: {}
+      - job_events_enricher: {}
+      - job_pod_enricher: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 12 * * *"
+    actions:
+      - krr_scan: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 0 * * *"
+    actions:
+      - unused_pv: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 0 * * *" # every Monday at 10:00
+    actions:
+      - volume_analyzer: {}
+  - triggers:
+      - on_deployment_all_changes: {}
+      - on_daemonset_all_changes: {}
+      - on_statefulset_all_changes: {}
+      - on_ingress_all_changes: {}
+    actions:
+      - resource_babysitter: {}
 # builtin playbooks
 builtinPlaybooks:
 # playbooks for non-prometheus based monitoring
@@ -249,9 +236,11 @@ builtinPlaybooks:
       delay_graph_s: 30
   - pod_node_metrics_enricher:
       resource_type: Memory
+  - pod_node_metrics_enricher:
+      resource_type: MemoryRequest
   - pod_enricher: {}
   - resource_events_enricher: {}
-  - impacted_services_enricher: {}
+  - pod_node_event_enricher: {}
   stop: true
 
 # playbooks for prometheus alerts enrichment
@@ -506,7 +495,7 @@ kubewatch:
     namespace: ""
     resource:
       deployment: true
-      replicationcontroller: false  # 0.10.12 disabled because not supported on the runner
+      replicationcontroller: false # 0.10.12 disabled because not supported on the runner
       replicaset: true
       daemonset: true
       statefulset: true
@@ -521,11 +510,10 @@ kubewatch:
       persistentvolume: true
       namespace: true
       configmap: true # 0.9.17
-      secret: false       # disabled for security reasons
-      event: true  # updated on kubewatch 2.5
+      secret: false # disabled for security reasons
+      event: true # updated on kubewatch 2.5
       coreevent: false # added on kubewatch 2.5
       ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
-
 # parameters for the renderer service used in nudgebee runner to render grafana graphs
 grafanaRenderer:
   enableContainer: false
@@ -537,18 +525,16 @@ grafanaRenderer:
       memory: 512Mi
     limits:
       cpu: ~
-
 # parameters for the nudgebee runner service account
 runnerServiceAccount:
   # image pull secrets added to the runner service account. Any pod using the service account will get those
   imagePullSecrets: []
-
 # parameters for the nudgebee runner
 runner:
   image:
-    repository: public.ecr.aws/p0t0i2l3/nudgebee-agent
-    tag: latest
-  imagePullPolicy: Always
+    repository: registry.nudgebee.com/nudgebee-agent
+    tag: 1.0.2-snapshot
+  imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
     requests:
@@ -564,17 +550,17 @@ runner:
   imagePullSecrets: []
   extraVolumes: []
   extraVolumeMounts: []
-  krr_image_override: public.ecr.aws/p0t0i2l3/krr-public:v1.0.0
+  image_registry: registry.nudgebee.com
+  krr_image_override: krr-public:v1.0.0
   relay_address: wss://relay.nudgebee.com/register
   nudgebee:
     endpoint: https://collector.nudgebee.com
-    publish_window: '900'
+    publish_window: '3600'
     auth_secret_key: ""
-
 nodeAgent:
   enabled: true
   image:
-    repository: public.ecr.aws/p0t0i2l3/nudgebee-node-agent
+    repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
     tag: latest
   resources:
@@ -584,26 +570,19 @@ nodeAgent:
     limits:
       cpu: "1"
       memory: "1Gi"
-
   imagePullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
-
   podAnnotations: {}
-
   priorityClassName: ""
   env: []
-
   otel:
     tracesEndpoint: ""
     logsEndpoint: ""
-
   profiling:
     pyroscopeEndpoint: ""
-
 existingPrometheus:
   url: prometheus
-
 opencost:
   enabled: true
   opencost:
@@ -618,7 +597,6 @@ opencost:
         app: opencost
     ui:
       enabled: false
-
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:

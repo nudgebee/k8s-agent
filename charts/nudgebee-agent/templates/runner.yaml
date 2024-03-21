@@ -69,6 +69,8 @@ spec:
             value: {{ .Chart.AppVersion }}
           - name: KRR_IMAGE_OVERRIDE
             value: {{ .Values.runner.krr_image_override }}
+          - name: IMAGE_REGISTRY
+            value: {{ .Values.runner.image_registry }}
           - name: WEBSOCKET_RELAY_ADDRESS
             value: {{ .Values.runner.relay_address }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
