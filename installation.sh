@@ -102,7 +102,7 @@ getPrometheusURL() {
             local port=$(echo "$service_info" | awk '{print $3}')
 
             # Generate and return Prometheus URL
-            local service_url="http://${name}.${namespace}.svc.cluster.local:${port}"
+            local service_url="http://${name}.${namespace}.svc:${port}"
             echo "$service_url"
             return
         fi
@@ -132,7 +132,6 @@ if [ -z "$prometheus_url" ]; then
             "app=prometheus-server"
             "app=prometheus-operator-prometheus"
     )
-    # Call the function with the array as an argument
     prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
 fi
 # Check if service_url is empty
@@ -143,8 +142,7 @@ if [ -z "$prometheus_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=false --set kubeStateMetrics.enabled=true --set grafana.enabled=false -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
-        # Call the function with the array as an argument
+        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=true --set kubeStateMetrics.enabled=true --set grafana.enabled=false -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
         prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
     else
         echo "Prometheus installation not requested. Exiting."

@@ -94,4 +94,31 @@ prometheus:
           - source_labels: [__meta_kubernetes_pod_node_name]
             target_label: instance
             action: replace
-        
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: [ 'namespace' ]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'null'
+      routes:
+        - receiver: 'null'
+          matchers:
+            - alertname =~ "InfoInhibitor|Watchdog"
+        - receiver: 'nudgebee-agent'
+          group_by: [ '...' ]
+          group_wait: 1s
+          group_interval: 1s
+          matchers:
+            - severity =~ ".*"
+          repeat_interval: 4h
+          continue: true #
+    receivers:
+      - name: 'null'
+      - name: 'nudgebee-agent'
+        webhook_configs:
+          - url: 'http://nudgebee-agent-runner.nudgebee-agent.svc/api/alerts' # 
+            send_resolved: true 

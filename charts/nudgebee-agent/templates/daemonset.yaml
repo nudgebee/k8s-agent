@@ -18,6 +18,7 @@ spec:
         prometheus.io/scrape: 'true'
         prometheus.io/port: '80'
     spec:
+      serviceAccountName: {{ .Release.Name }}-runner-service-account
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -34,17 +35,32 @@ spec:
           resources:
             {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
           env:
-          {{- if .Values.nodeAgent.otel.tracesEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-              value: "{{ .Values.nodeAgent.otel.tracesEndpoint }}"
+          {{- if .Values.tracesEndpoint }}
+            - name: TRACES_ENDPOINT
+              value: "{{ .Values.nodeAgent.tracesEndpoint }}"
           {{- end }}
-          {{- if .Values.nodeAgent.otel.logsEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-              value: "{{ .Values.nodeAgent.otel.logsEndpoint }}"
+          {{- if .Values.logsEndpoint }}
+            - name: LOGS_ENDPOINT
+              value: "{{ .Values.nodeAgent.logsEndpoint }}"
           {{- end }}
-          {{- if .Values.nodeAgent.profiling.pyroscopeEndpoint }}
+          {{- if .Values.profilesEndpoint }}
             - name: PROFILES_ENDPOINT
-              value: "{{ .Values.nodeAgent.profiling.pyroscopeEndpoint }}"
+              value: "{{ .Values.nodeAgent.profilesEndpoint }}"
+          {{- end }}
+          {{- if .Values.metricsEndpoint }}
+            - name: METRICS_ENDPOINT
+              value: "{{ .Values.nodeAgent.metricsEndpoint }}"
+          {{- end }}
+          {{- if .Values.scrapeInterval }}
+            - name: SCRAPE_INTERVAL
+              value: "{{ .Values.nodeAgent.scrapeInterval }}"
+          {{- end }}
+          {{- if .Values.apiKey }}
+            - name: API_KEY
+              value: "{{ .Values.apiKey }}"
+          {{- end }}
+          {{- with .Values.env }}
+          {{- . | toYaml | nindent 12 }}
           {{- end }}
           ports:
             - containerPort: 80
