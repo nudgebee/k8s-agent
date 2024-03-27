@@ -90,6 +90,8 @@ lightActions:
 - prometheus_labels
 - create_or_replace_alert_rule
 - pod_node_event_enricher
+- pod_profiler
+- delete_alert_rule
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -155,14 +157,13 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 12 * * 1" # every Monday at 12:00
+            cron_expression: "0 12 * * 1" # every week on monday at 02:00
     actions:
-      - popeye_scan:
-          spinach: |
-            popeye:
-              excludes:
-                v1/pods:
-                  - name: rx:kube-system
+      - popeye_scan: |
+          popeye:
+            excludes:
+              global:
+                fqns: [rx:^kube-]
   - triggers:
       - on_kubernetes_warning_event_create:
           exclude: ["NodeSysctlChange"]
@@ -178,23 +179,22 @@ customPlaybooks:
       - job_info_enricher: {}
       - job_events_enricher: {}
       - job_pod_enricher: {}
-      - logs_enricher: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 12 * * *"
+            cron_expression: "0 12 * * *" # every day at 12:00
     actions:
       - krr_scan: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 0 * * *"
+            cron_expression: "0 0 * * *" # every day at 00:00
     actions:
       - unused_pv: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 0 * * *" # every Monday at 10:00
+            cron_expression: "0 * * * *" # every hour
     actions:
       - volume_analyzer: {}
   - triggers:
@@ -306,7 +306,6 @@ builtinPlaybooks:
   - job_info_enricher: {}
   - job_events_enricher: {}
   - job_pod_enricher: {}
-  - logs_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
@@ -411,6 +410,11 @@ builtinPlaybooks:
   - alert_graph_enricher:
       resource_type: CPU
       item_type: Pod
+  - pod_profiler:
+      seconds: 60
+      timeout: 120
+  - pod_graph_enricher:
+      resource_type: CPU
 - triggers:
   - on_prometheus_alert:
       alert_name: KubernetesDeploymentReplicasMismatch
@@ -476,6 +480,9 @@ builtinPlaybooks:
       resource_type: Memory
   - pod_metric_enricher:
       resource_type: Memory
+  - pod_profiler:
+      seconds: 60
+      timeout: 120
 
 # parameters for the nudgebee forwarder deployment
 kubewatch:
