@@ -14,7 +14,7 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-runner
-        robustaComponent: "runner"
+        nudgebeeComponent: "runner"
       {{- if or .Values.runner.annotations .Values.globalConfig.custom_annotations }}
       annotations:
         {{- if .Values.runner.annotations}} {{ toYaml .Values.runner.annotations | nindent 8 }}
@@ -175,7 +175,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Release.Name }}-runner
-    target: robusta-runner
+    target: {{ .Release.Name }}-runner
 spec:
   selector:
     app: {{ .Release.Name }}-runner

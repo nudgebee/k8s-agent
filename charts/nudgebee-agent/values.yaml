@@ -178,6 +178,7 @@ customPlaybooks:
       - job_info_enricher: {}
       - job_events_enricher: {}
       - job_pod_enricher: {}
+      - logs_enricher: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
@@ -305,6 +306,7 @@ builtinPlaybooks:
   - job_info_enricher: {}
   - job_events_enricher: {}
   - job_pod_enricher: {}
+  - logs_enricher: {}
 
 - triggers:
   - on_prometheus_alert:
