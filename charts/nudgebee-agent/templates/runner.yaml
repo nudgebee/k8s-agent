@@ -73,6 +73,8 @@ spec:
             value: {{ .Values.runner.image_registry }}
           - name: WEBSOCKET_RELAY_ADDRESS
             value: {{ .Values.runner.relay_address }}
+          - name: PROFILE_IMAGE_TAG_OVERRIDE
+            value: {{ .Values.runner.profiler_image_override }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
           {{- end }}
