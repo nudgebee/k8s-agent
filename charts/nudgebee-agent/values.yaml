@@ -29,70 +29,69 @@ globalConfig:
 alertRelabel: []
 # safe actions to enable authenticated users to run
 lightActions:
-- related_pods
-- prometheus_enricher
-- add_silence
-- delete_pod
-- delete_silence
-- get_silences
-- logs_enricher
-- pod_events_enricher
-- deployment_events_enricher
-- job_events_enricher
-- job_pod_enricher
-- get_resource_yaml
-- node_cpu_enricher
-- node_disk_analyzer
-- node_running_pods_enricher
-- node_allocatable_resources_enricher
-- node_status_enricher
-- node_graph_enricher
-- oomkilled_container_graph_enricher
-- pod_oom_killer_enricher
-- oomkilled_container_matrix_enricher
-- pod_node_metrics_enricher
-- noisy_neighbours_enricher
-- oom_killer_enricher
-- volume_analysis
-- python_profiler
-- pod_ps
-- python_memory
-- debugger_stack_trace
-- python_process_inspector
-- prometheus_alert
-- create_pvc_snapshot
-- resource_events_enricher
-- delete_job
-- list_resource_names
-- node_dmesg_enricher
-- status_enricher
-- popeye_scan
-- krr_scan
-- kube_bench_scan
-- handle_alertmanager_event
-- drain
-- cordon
-- uncordon
-- rollout_restart
-- unused_pv
-- image_scanner
-- pod_enricher
-- logs_enricher
-- volume_analyzer
-- replica_rightsizing
-- foreign_logs_enricher
-- replace_workload
-- delete_workload
-- pod_bash_enricher
-- node_bash_enricher
-- pod_script_run_enricher
-- python_debugger
-- prometheus_labels
-- create_or_replace_alert_rule
-- pod_node_event_enricher
-- pod_profiler
-- delete_alert_rule
-
+  - related_pods
+  - prometheus_enricher
+  - add_silence
+  - delete_pod
+  - delete_silence
+  - get_silences
+  - logs_enricher
+  - pod_events_enricher
+  - deployment_events_enricher
+  - job_events_enricher
+  - job_pod_enricher
+  - get_resource_yaml
+  - node_cpu_enricher
+  - node_disk_analyzer
+  - node_running_pods_enricher
+  - node_allocatable_resources_enricher
+  - node_status_enricher
+  - node_graph_enricher
+  - oomkilled_container_graph_enricher
+  - pod_oom_killer_enricher
+  - oomkilled_container_matrix_enricher
+  - pod_node_metrics_enricher
+  - noisy_neighbours_enricher
+  - oom_killer_enricher
+  - volume_analysis
+  - python_profiler
+  - pod_ps
+  - python_memory
+  - debugger_stack_trace
+  - python_process_inspector
+  - prometheus_alert
+  - create_pvc_snapshot
+  - resource_events_enricher
+  - delete_job
+  - list_resource_names
+  - node_dmesg_enricher
+  - status_enricher
+  - popeye_scan
+  - krr_scan
+  - kube_bench_scan
+  - handle_alertmanager_event
+  - drain
+  - cordon
+  - uncordon
+  - rollout_restart
+  - unused_pv
+  - image_scanner
+  - pod_enricher
+  - logs_enricher
+  - volume_analyzer
+  - replica_rightsizing
+  - foreign_logs_enricher
+  - replace_workload
+  - delete_workload
+  - pod_bash_enricher
+  - node_bash_enricher
+  - pod_script_run_enricher
+  - python_debugger
+  - prometheus_labels
+  - create_or_replace_alert_rule
+  - pod_node_event_enricher
+  - pod_profiler
+  - delete_alert_rule
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -206,284 +205,257 @@ customPlaybooks:
       - resource_babysitter: {}
 # builtin playbooks
 builtinPlaybooks:
-# playbooks for non-prometheus based monitoring
-- triggers:
-  - on_pod_crash_loop:
-      restart_reason: "CrashLoopBackOff"
-  actions:
-  - report_crash_loop: {}
-  - resource_events_enricher: {}
-  - pod_enricher: {}
-  - impacted_services_enricher: {}
-
-- triggers:
-  - on_image_pull_backoff: {}
-  actions:
-  - image_pull_backoff_reporter: {}
-  - resource_events_enricher: {}
-  - pod_enricher: {}
-
-# playbooks for non-prometheus based monitoring that use prometheus for enrichment
-- triggers:
-  - on_pod_oom_killed:
-      rate_limit: 3600
-  actions:
-  - pod_oom_killer_enricher: {}
-  - logs_enricher: {}
-  - noisy_neighbours_enricher:
-      resource_type: Memory
-  - oomkilled_container_matrix_enricher:
-      resource_type: Memory
-      delay_graph_s: 30
-  - pod_node_metrics_enricher:
-      resource_type: Memory
-  - pod_node_metrics_enricher:
-      resource_type: MemoryRequest
-  - pod_enricher: {}
-  - resource_events_enricher: {}
-  - pod_node_event_enricher: {}
-  stop: true
-
-# playbooks for prometheus alerts enrichment
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubePodCrashLooping
-  actions:
-  - logs_enricher: {}
-  - pod_events_enricher: {}
-  - pod_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: PrometheusRuleFailures
-  actions:
-  - prometheus_rules_enricher: {}
-  - logs_enricher:
-      filter_regex: ".*Evaluating rule failed.*"
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeCPUOvercommit
-  actions:
-  - cpu_overcommited_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeMemoryOvercommit
-  actions:
-  - memory_overcommited_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubePodNotReady
-  actions:
-  - logs_enricher: {}
-  - pod_events_enricher: {}
-  - pod_issue_investigator: {}
-  - pod_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeContainerWaiting
-  actions:
-  - pod_issue_investigator: {}
-  - pod_events_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeHpaReplicasMismatch
-  actions:
-  - hpa_mismatch_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeJobFailed
-  - on_prometheus_alert:
-      alert_name: KubeJobCompletion
-  - on_prometheus_alert:
-      alert_name: KubeJobNotCompleted
-  actions:
-  - job_info_enricher: {}
-  - job_events_enricher: {}
-  - job_pod_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeAggregatedAPIDown
-  actions:
-  - api_service_status_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeletTooManyPods
-  actions:
-  - node_pods_capacity_enricher: {}
-  - alert_explanation_enricher:
-      alert_explanation: "The node is approaching the maximum number of scheduled pods."
-      recommended_resolution: "Verify that you defined proper resource requests for your workloads. If pods cannot be scheduled, add more nodes to your cluster."
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeNodeNotReady
-  actions:
-  - node_allocatable_resources_enricher: {}
-  - node_running_pods_enricher: {}
-  - status_enricher:
-      show_details: true
-  - node_dmesg_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeNodeUnreachable
-  actions:
-  - resource_events_enricher: {}
-  - node_status_enricher: {}
-
-# Prometheus Statefulset playbooks
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeStatefulSetReplicasMismatch
-  actions:
-  - resource_events_enricher:
-      dependent_pod_mode: true
-  - statefulset_replicas_enricher: {}
-  - pod_issue_investigator: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeStatefulSetUpdateNotRolledOut
-  actions:
-  - related_pods: {}
-  - statefulset_replicas_enricher: {}
-
-
-# Prometheus Daemonset playbooks
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubeDaemonSetRolloutStuck
-  actions:
-  - resource_events_enricher: {}
-  - related_pods: {}
-  - daemonset_status_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubernetesDaemonsetMisscheduled
-  - on_prometheus_alert:
-      alert_name: KubeDaemonSetMisScheduled
-  actions:
-  - daemonset_status_enricher: {}
-  - daemonset_misscheduled_analysis_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: HostHighCpuLoad
-  actions:
-  - node_cpu_enricher: {}
-  - alert_graph_enricher:
-      resource_type: CPU
-      item_type: Node
-- triggers:
-  - on_prometheus_alert:
-      alert_name: HostOomKillDetected
-  actions:
-  - oom_killer_enricher: {}
-  - alert_graph_enricher:
-      resource_type: Memory
-      item_type: Node
-- triggers:
-  - on_prometheus_alert:
-      alert_name: NodeFilesystemSpaceFillingUp
-  - on_prometheus_alert:
-      alert_name: NodeFilesystemAlmostOutOfSpace
-  actions:
-  - node_disk_analyzer: {}
-  - alert_graph_enricher:
-      resource_type: Disk
-      item_type: Node
-- triggers:
-  - on_prometheus_alert:
-      alert_name: CPUThrottlingHigh
-      status: "all" # sometimes this enricher silences the alert, so we need to silence it regardless of status
-  actions:
-  - cpu_throttling_analysis_enricher: {}
-  - alert_graph_enricher:
-      resource_type: CPU
-      item_type: Pod
-  - pod_profiler:
-      seconds: 60
-      timeout: 120
-  - pod_graph_enricher:
-      resource_type: CPU
-- triggers:
-  - on_prometheus_alert:
-      alert_name: KubernetesDeploymentReplicasMismatch
-  - on_prometheus_alert:
-      alert_name: KubeDeploymentReplicasMismatch
-  actions:
-  - pod_issue_investigator: {}
-  - deployment_events_enricher:
-      included_types: ["Warning"]
-  - deployment_events_enricher:
-      included_types: ["Warning", "Normal"]
-      dependent_pod_mode: true
-
-- triggers:
-  - on_prometheus_alert:
-      status: "all"
-  actions:
-  - default_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: NodeFilesystemSpaceFillingUp
-      k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
-  - on_prometheus_alert:
-      alert_name: NodeFilesystemAlmostOutOfSpace
-      k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
-  actions:
-  - alert_explanation_enricher:
-      alert_explanation: "This alert is fired when the file system is running out of space."
-      recommended_resolution: "This is a common issue on local clusters and we recommend increasing the node disk size for your cluster to run optimally."
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: HighErrorCriticalLogs
-  actions:
-  - logs_enricher: {}
-  - pod_enricher: {}
-  - impacted_services_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: ApplicationAPIFailures
-  actions:
-  - logs_enricher: {}
-  - pod_enricher: {}
-  - api_failure_enricher: {}
-
-- triggers:
-  - on_kubernetes_warning_event_create:
-      include: ["SpotInterruption"]
-  actions:
-  - event_report: {}
-  - event_resource_events: {}
-  - node_running_pods_event_enricher: {}
-
-- triggers:
-  - on_prometheus_alert:
-      alert_name: PodMemoryReachingLimit
-  actions:
-  - logs_enricher: {}
-  - pod_enricher: {}
-  - pod_node_metrics_enricher:
-      resource_type: Memory
-  - pod_metric_enricher:
-      resource_type: Memory
-  - pod_profiler:
-      seconds: 60
-      timeout: 120
-
+  # playbooks for non-prometheus based monitoring
+  - triggers:
+      - on_pod_crash_loop:
+          restart_reason: "CrashLoopBackOff"
+    actions:
+      - report_crash_loop: {}
+      - resource_events_enricher: {}
+      - pod_enricher: {}
+      - impacted_services_enricher: {}
+  - triggers:
+      - on_image_pull_backoff: {}
+    actions:
+      - image_pull_backoff_reporter: {}
+      - resource_events_enricher: {}
+      - pod_enricher: {}
+  # playbooks for non-prometheus based monitoring that use prometheus for enrichment
+  - triggers:
+      - on_pod_oom_killed:
+          rate_limit: 3600
+    actions:
+      - pod_oom_killer_enricher: {}
+      - logs_enricher: {}
+      - noisy_neighbours_enricher:
+          resource_type: Memory
+      - oomkilled_container_matrix_enricher:
+          resource_type: Memory
+          delay_graph_s: 30
+      - pod_node_metrics_enricher:
+          resource_type: Memory
+      - pod_node_metrics_enricher:
+          resource_type: MemoryRequest
+      - pod_enricher: {}
+      - resource_events_enricher: {}
+      - pod_node_event_enricher: {}
+    stop: true
+  # playbooks for prometheus alerts enrichment
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubePodCrashLooping
+    actions:
+      - logs_enricher: {}
+      - pod_events_enricher: {}
+      - pod_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: PrometheusRuleFailures
+    actions:
+      - prometheus_rules_enricher: {}
+      - logs_enricher:
+          filter_regex: ".*Evaluating rule failed.*"
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeCPUOvercommit
+    actions:
+      - cpu_overcommited_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeMemoryOvercommit
+    actions:
+      - memory_overcommited_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubePodNotReady
+    actions:
+      - logs_enricher: {}
+      - pod_events_enricher: {}
+      - pod_issue_investigator: {}
+      - pod_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeContainerWaiting
+    actions:
+      - pod_issue_investigator: {}
+      - pod_events_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeHpaReplicasMismatch
+    actions:
+      - hpa_mismatch_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeJobFailed
+      - on_prometheus_alert:
+          alert_name: KubeJobCompletion
+      - on_prometheus_alert:
+          alert_name: KubeJobNotCompleted
+    actions:
+      - job_info_enricher: {}
+      - job_events_enricher: {}
+      - job_pod_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeAggregatedAPIDown
+    actions:
+      - api_service_status_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeletTooManyPods
+    actions:
+      - node_pods_capacity_enricher: {}
+      - alert_explanation_enricher:
+          alert_explanation: "The node is approaching the maximum number of scheduled pods."
+          recommended_resolution: "Verify that you defined proper resource requests for your workloads. If pods cannot be scheduled, add more nodes to your cluster."
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeNodeNotReady
+    actions:
+      - node_allocatable_resources_enricher: {}
+      - node_running_pods_enricher: {}
+      - status_enricher:
+          show_details: true
+      - node_dmesg_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeNodeUnreachable
+    actions:
+      - resource_events_enricher: {}
+      - node_status_enricher: {}
+  # Prometheus Statefulset playbooks
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeStatefulSetReplicasMismatch
+    actions:
+      - resource_events_enricher:
+          dependent_pod_mode: true
+      - statefulset_replicas_enricher: {}
+      - pod_issue_investigator: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeStatefulSetUpdateNotRolledOut
+    actions:
+      - related_pods: {}
+      - statefulset_replicas_enricher: {}
+  # Prometheus Daemonset playbooks
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeDaemonSetRolloutStuck
+    actions:
+      - resource_events_enricher: {}
+      - related_pods: {}
+      - daemonset_status_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubernetesDaemonsetMisscheduled
+      - on_prometheus_alert:
+          alert_name: KubeDaemonSetMisScheduled
+    actions:
+      - daemonset_status_enricher: {}
+      - daemonset_misscheduled_analysis_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: HostHighCpuLoad
+    actions:
+      - node_cpu_enricher: {}
+      - alert_graph_enricher:
+          resource_type: CPU
+          item_type: Node
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: HostOomKillDetected
+    actions:
+      - oom_killer_enricher: {}
+      - alert_graph_enricher:
+          resource_type: Memory
+          item_type: Node
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: NodeFilesystemSpaceFillingUp
+      - on_prometheus_alert:
+          alert_name: NodeFilesystemAlmostOutOfSpace
+    actions:
+      - node_disk_analyzer: {}
+      - alert_graph_enricher:
+          resource_type: Disk
+          item_type: Node
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: CPUThrottlingHigh
+          status: "all" # sometimes this enricher silences the alert, so we need to silence it regardless of status
+    actions:
+      - cpu_throttling_analysis_enricher: {}
+      - alert_graph_enricher:
+          resource_type: CPU
+          item_type: Pod
+      - pod_profiler:
+          seconds: 60
+          timeout: 120
+      - pod_graph_enricher:
+          resource_type: CPU
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubernetesDeploymentReplicasMismatch
+      - on_prometheus_alert:
+          alert_name: KubeDeploymentReplicasMismatch
+    actions:
+      - pod_issue_investigator: {}
+      - deployment_events_enricher:
+          included_types: ["Warning"]
+      - deployment_events_enricher:
+          included_types: ["Warning", "Normal"]
+          dependent_pod_mode: true
+  - triggers:
+      - on_prometheus_alert:
+          status: "all"
+    actions:
+      - default_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: NodeFilesystemSpaceFillingUp
+          k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
+      - on_prometheus_alert:
+          alert_name: NodeFilesystemAlmostOutOfSpace
+          k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
+    actions:
+      - alert_explanation_enricher:
+          alert_explanation: "This alert is fired when the file system is running out of space."
+          recommended_resolution: "This is a common issue on local clusters and we recommend increasing the node disk size for your cluster to run optimally."
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: HighErrorCriticalLogs
+    actions:
+      - logs_enricher: {}
+      - pod_enricher: {}
+      - impacted_services_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: ApplicationAPIFailures
+    actions:
+      - logs_enricher: {}
+      - pod_enricher: {}
+      - api_failure_enricher: {}
+  - triggers:
+      - on_kubernetes_warning_event_create:
+          include: ["SpotInterruption"]
+    actions:
+      - event_report: {}
+      - event_resource_events: {}
+      - node_running_pods_event_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: PodMemoryReachingLimit
+    actions:
+      - logs_enricher: {}
+      - pod_enricher: {}
+      - pod_node_metrics_enricher:
+          resource_type: Memory
+      - pod_metric_enricher:
+          resource_type: Memory
+      - pod_profiler:
+          seconds: 60
+          timeout: 120
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
@@ -548,7 +520,7 @@ runner:
   resources:
     requests:
       cpu: 250m
-      memory: 1024Mi
+      memory: 1500Mi
     limits:
       cpu: ~
   additional_env_froms: []
@@ -560,8 +532,9 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:v1.0.0
+  krr_image_override: krr-public:v1.0.1-snapshot
   relay_address: wss://relay.nudgebee.com/register
+  profiler_image_override: v1.0.0
   nudgebee:
     endpoint: https://collector.nudgebee.com
     publish_window: '3600'
@@ -591,7 +564,7 @@ nodeAgent:
   profiling:
     pyroscopeEndpoint: ""
 existingPrometheus:
-  url: prometheus
+  url: ""
 opencost:
   enabled: true
   opencost:
