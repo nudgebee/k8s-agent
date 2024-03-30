@@ -28,11 +28,9 @@ jobs:
           version: v3.10.0
   
       - name: Install AWS cli
-        if: github.ref == 'refs/heads/main'
         uses: unfor19/install-aws-cli-action@master
 
       - name: Configure AWS Credentials
-        if: github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
