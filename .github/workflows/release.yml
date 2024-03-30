@@ -1,9 +1,10 @@
 name: Release Charts
 
 on:
-  push:
-    branches:
-      - prod
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - prod
 
 jobs:
   release:
