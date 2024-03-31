@@ -158,11 +158,12 @@ customPlaybooks:
           cron_schedule_repeat:
             cron_expression: "0 12 * * 1" # every week on monday at 02:00
     actions:
-      - popeye_scan: |
-          popeye:
-            excludes:
-              global:
-                fqns: [rx:^kube-]
+      - popeye_scan:
+          spinach: |
+            popeye:
+              excludes:
+                global:
+                  fqns: [rx:^kube-]
   - triggers:
       - on_kubernetes_warning_event_create:
           exclude: ["NodeSysctlChange"]
