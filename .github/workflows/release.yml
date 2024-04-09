@@ -52,7 +52,7 @@ jobs:
           echo "nudgebee_profile_image: $nudgebee_profile_image"
           yq -i ".runner.profiler_image_override=\"$nudgebee_profile_image\"" values.yaml
 
-          nudgebee_krr_image=`aws ecr describe-images --repository-name krr-public --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          nudgebee_krr_image=`aws ecr describe-images --repository-name krr-public --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
           echo "nudgebee_krr_image: $nudgebee_krr_image"
           yq -i ".runner.krr_image_override=\"krr-public:$nudgebee_krr_image\"" values.yaml
           
