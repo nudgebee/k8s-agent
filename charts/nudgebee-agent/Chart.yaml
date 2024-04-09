@@ -13,3 +13,11 @@ dependencies:
   version: 1.28.0
   condition: opencost.enabled
   repository: "https://opencost.github.io/opencost-helm-chart"
+- name: clickhouse
+  version: 3.1.*
+  repository: https://charts.bitnami.com/bitnami
+  condition: opentelemetry-collector.enabled
+- name: opentelemetry-collector
+  version: 0.52.*
+  repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+  condition: opentelemetry-collector.enabled
