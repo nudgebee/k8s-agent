@@ -536,6 +536,9 @@ runner:
   krr_image_override: krr-public:v1.0.1-snapshot
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: v1.0.0
+  additional_env_vars: 
+    - name: POPEYE_IMAGE_OVERRIDE
+      value: "popeye:v0.11.1"
   nudgebee:
     endpoint: https://collector.nudgebee.com
     publish_window: '3600'
