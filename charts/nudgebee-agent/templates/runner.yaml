@@ -75,6 +75,8 @@ spec:
             value: {{ .Values.runner.relay_address }}
           - name: PROFILE_IMAGE_TAG_OVERRIDE
             value: {{ .Values.runner.profiler_image_override }}
+          - name: CLICKHOUSE_ENABLED
+            value: "{{ if .Values.opentelemetry-collector.enabled }}True{{ else if .Values.runner.clickhouse-enabled }}True{{ else }}False{{ end }}"
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
           {{- end }}
