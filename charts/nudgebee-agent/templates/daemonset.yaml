@@ -35,31 +35,29 @@ spec:
           resources:
             {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
           env:
-          {{- if .Values.tracesEndpoint }}
             - name: TRACES_ENDPOINT
-              value: "{{ .Values.nodeAgent.tracesEndpoint }}"
-          {{- end }}
-          {{- if .Values.logsEndpoint }}
+              value: {{ include "nudgebee-agent.tracesEndpoint" . }}
+          {{- if .Values.nodeAgent.logsEndpoint }}
             - name: LOGS_ENDPOINT
               value: "{{ .Values.nodeAgent.logsEndpoint }}"
           {{- end }}
-          {{- if .Values.profilesEndpoint }}
+          {{- if and .Values.nodeAgent.profilesEndpoint .Values.opentelemetry-collector.enabled }}
             - name: PROFILES_ENDPOINT
               value: "{{ .Values.nodeAgent.profilesEndpoint }}"
           {{- end }}
-          {{- if .Values.metricsEndpoint }}
+          {{- if .Values.nodeAgent.metricsEndpoint }}
             - name: METRICS_ENDPOINT
               value: "{{ .Values.nodeAgent.metricsEndpoint }}"
           {{- end }}
-          {{- if .Values.scrapeInterval }}
+          {{- if .Values.nodeAgent.scrapeInterval }}
             - name: SCRAPE_INTERVAL
               value: "{{ .Values.nodeAgent.scrapeInterval }}"
           {{- end }}
-          {{- if .Values.apiKey }}
+          {{- if .Values.nodeAgent.apiKey }}
             - name: API_KEY
               value: "{{ .Values.apiKey }}"
           {{- end }}
-          {{- with .Values.env }}
+          {{- with .Values.nodeAgent.env }}
           {{- . | toYaml | nindent 12 }}
           {{- end }}
           ports:
