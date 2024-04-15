@@ -163,8 +163,8 @@ customPlaybooks:
           spinach: |
             popeye:
               excludes:
-                global:
-                  fqns: [rx:^kube-]
+                v1/pods:
+                  - name: rx:kube-system
   - triggers:
       - on_kubernetes_warning_event_create:
           exclude: ["NodeSysctlChange"]
@@ -456,8 +456,8 @@ builtinPlaybooks:
       - pod_metric_enricher:
           resource_type: Memory
       - pod_profiler:
-          seconds: 60
-          timeout: 120
+          seconds: 20
+          timeout: 40
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
@@ -516,8 +516,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 1.0.2-snapshot
-
+    tag: 2024-04-12T19-29-20_32b7e3bd4b8e0ec4c5d1a00408945675c9e6cbd5
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -534,10 +533,12 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:v1.0.1-snapshot
+  krr_image_override: krr-public:2024-04-04T09-10-41_95900bd12662309ddeb0767d4ca4353d6d1bd3fb
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: v1.0.0
-  clickhouse-enabled: false
+  profiler_image_override: 2024-03-30T14-28-13_540b6ffa8b81eb5f5dfaefa731c2e9dd28ce5355
+  clickhouse_enabled: false
+  clickhouse_secret: "nudgebee-agent-clickhouse"
+  victoria_metrics_enabled: false
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
@@ -549,11 +550,6 @@ runner:
       value: default
     - name: CLICKHOUSE_DB
       value: default
-    - name: CLICKHOUSE_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          name: nudgebee-agent-clickhouse
-          key: admin-password
   nudgebee:
     endpoint: https://collector.nudgebee.com
     publish_window: '3600'
@@ -563,7 +559,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2024-03-30T15-27-37_5ce8eefffd98e47b4a72879e7209b7e1dd646534
+    tag: 2024-04-11T12-14-36_d70ec9cecc6d09aee7b7ab26638765be622f16ac
   resources:
     requests:
       cpu: "50m"
@@ -578,10 +574,11 @@ nodeAgent:
   priorityClassName: ""
   logsEndpoint: ""
   profilesEndpoint: ""
+  tracesEndpoint: "http://nudgebee-agent-opentelemetry-collector:4318/v1/traces"
 existingPrometheus:
   url: ""
 opencost:
-  enabled: true
+  enabled: false
   opencost:
     prometheus:
       external:
@@ -605,7 +602,7 @@ openshift:
   sccPriority: null
   privilegedSccPriority: null
 opentelemetry-collector:
-  enabled: false
+  enabled: true
   mode: deployment
   extraEnvs:
     - name: CLICKHOUSE_PASSWORD
