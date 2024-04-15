@@ -35,13 +35,15 @@ spec:
           resources:
             {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
           env:
+          {{- if index .Values "opentelemetry-collector" "enabled" }}
             - name: TRACES_ENDPOINT
-              value: {{ include "nudgebee-agent.tracesEndpoint" . }}
+              value: "{{ .Values.nodeAgent.tracesEndpoint }}"
+          {{- end }}
           {{- if .Values.nodeAgent.logsEndpoint }}
             - name: LOGS_ENDPOINT
               value: "{{ .Values.nodeAgent.logsEndpoint }}"
           {{- end }}
-          {{- if and .Values.nodeAgent.profilesEndpoint .Values.opentelemetry-collector.enabled }}
+          {{- if and .Values.nodeAgent.profilesEndpoint }}
             - name: PROFILES_ENDPOINT
               value: "{{ .Values.nodeAgent.profilesEndpoint }}"
           {{- end }}
