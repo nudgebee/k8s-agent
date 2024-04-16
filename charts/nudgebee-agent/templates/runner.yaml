@@ -75,6 +75,22 @@ spec:
             value: {{ .Values.runner.relay_address }}
           - name: PROFILE_IMAGE_TAG_OVERRIDE
             value: {{ .Values.runner.profiler_image_override }}
+          - name: CLICKHOUSE_ENABLED
+            value: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
+          {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_secret }}
+          - name: CLICKHOUSE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Release.Name }}-clickhouse
+                key: admin-password
+          {{- else if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
+          - name: CLICKHOUSE_PASSWORD
+            value: {{ .Values.runner.clickhouse_password }}
+          {{- end }}
+          {{- if .Values.runner.victoria_metrics_enabled }}
+          - name: VICTORIA_METRICS_CONFIGURED
+            value: "True"
+          {{- end }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
           {{- end }}
@@ -86,7 +102,7 @@ spec:
             name: {{ .Release.Name }}-runner-secret
             optional: true
         {{- if .Values.runner.additional_env_froms }}
-        {{ toYaml .Values.runner.additional_env_froms | nindent 8 }}
+        {{ toYaml .Values.runner.additional_env_froms | nindent  }}
         {{- end }}
         volumeMounts:
           - name: auth-config-secret
