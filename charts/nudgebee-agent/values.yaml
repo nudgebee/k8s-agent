@@ -93,6 +93,7 @@ lightActions:
   - pod_profiler
   - delete_alert_rule
   - pod_ephemeral_enricher
+  - get_resource
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -163,8 +164,8 @@ customPlaybooks:
           spinach: |
             popeye:
               excludes:
-                global:
-                  fqns: [rx:^kube-]
+                v1/pods:
+                  - name: rx:kube-system
   - triggers:
       - on_kubernetes_warning_event_create:
           exclude: ["NodeSysctlChange"]
@@ -456,8 +457,8 @@ builtinPlaybooks:
       - pod_metric_enricher:
           resource_type: Memory
       - pod_profiler:
-          seconds: 60
-          timeout: 120
+          seconds: 20
+          timeout: 40
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
@@ -516,7 +517,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 1.0.2-snapshot
+    tag: 2024-04-12T19-29-20_32b7e3bd4b8e0ec4c5d1a00408945675c9e6cbd5
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -525,7 +526,6 @@ runner:
       memory: 1500Mi
     limits:
       cpu: ~
-  additional_env_froms: []
   tolerations: []
   annotations: {}
   nodeSelector: ~
@@ -534,9 +534,23 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:v1.0.1-snapshot
+  krr_image_override: krr-public:2024-04-04T09-10-41_95900bd12662309ddeb0767d4ca4353d6d1bd3fb
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: v1.0.0
+  profiler_image_override: 2024-03-30T14-28-13_540b6ffa8b81eb5f5dfaefa731c2e9dd28ce5355
+  clickhouse_enabled: false
+  clickhouse_secret: "nudgebee-agent-clickhouse"
+  victoria_metrics_enabled: false
+  additional_env_vars:
+    - name: POPEYE_IMAGE_OVERRIDE
+      value: "popeye:v0.11.1"
+    - name: CLICKHOUSE_HOST
+      value: nudgebee-agent-clickhouse
+    - name: CLICKHOUSE_PORT
+      value: '8123'
+    - name: CLICKHOUSE_USER
+      value: default
+    - name: CLICKHOUSE_DB
+      value: default
   nudgebee:
     endpoint: https://collector.nudgebee.com
     publish_window: '3600'
@@ -546,10 +560,10 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: latest
+    tag: 2024-04-11T12-14-36_d70ec9cecc6d09aee7b7ab26638765be622f16ac
   resources:
     requests:
-      cpu: "100m"
+      cpu: "50m"
       memory: "50Mi"
     limits:
       cpu: "1"
@@ -559,16 +573,13 @@ nodeAgent:
   fullnameOverride: ""
   podAnnotations: {}
   priorityClassName: ""
-  env: []
-  otel:
-    tracesEndpoint: ""
-    logsEndpoint: ""
-  profiling:
-    pyroscopeEndpoint: ""
+  logsEndpoint: ""
+  profilesEndpoint: ""
+  tracesEndpoint: "http://nudgebee-agent-opentelemetry-collector:4318/v1/traces"
 existingPrometheus:
   url: ""
 opencost:
-  enabled: true
+  enabled: false
   opencost:
     prometheus:
       external:
@@ -591,3 +602,63 @@ openshift:
   sccName: null
   sccPriority: null
   privilegedSccPriority: null
+opentelemetry-collector:
+  enabled: false
+  mode: deployment
+  extraEnvs:
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: nudgebee-agent-clickhouse
+          key: admin-password
+  ports:
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+  config:
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 100000
+    exporters:
+      clickhouse:
+        endpoint: tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4
+        database: default
+        ttl_days: 7
+        username: default
+        password: ${env:CLICKHOUSE_PASSWORD}
+        logs_table_name: otel_logs
+        traces_table_name: otel_traces
+        metrics_table_name: otel_metrics
+        timeout: 5s
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+    service:
+      pipelines:
+        traces:
+          processors: [batch]
+          exporters: [clickhouse]
+          receivers: [otlp]
+        logs:
+          processors: [batch]
+          exporters: [clickhouse]
+          receivers: [otlp]
+clickhouse:
+  persistence:
+    size: 50Gi
+  replicaCount: 1
+  shards: 1
+  zookeeper:
+    enabled: false
+  auth:
+    username: default
+    password: "Nudgebee@123"
+  extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log remove=\"1\" />\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
