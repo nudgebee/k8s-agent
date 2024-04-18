@@ -92,6 +92,7 @@ lightActions:
   - pod_node_event_enricher
   - pod_profiler
   - delete_alert_rule
+  - pod_ephemeral_enricher
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
