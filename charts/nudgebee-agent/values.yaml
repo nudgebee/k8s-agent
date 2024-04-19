@@ -580,7 +580,7 @@ nodeAgent:
 existingPrometheus:
   url: ""
 opencost:
-  enabled: false
+  enabled: true
   opencost:
     prometheus:
       external:
