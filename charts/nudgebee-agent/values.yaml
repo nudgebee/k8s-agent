@@ -92,6 +92,7 @@ lightActions:
   - pod_node_event_enricher
   - pod_profiler
   - delete_alert_rule
+  - pod_ephemeral_enricher
   - get_resource
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -578,10 +579,13 @@ nodeAgent:
   logsEndpoint: ""
   profilesEndpoint: ""
   tracesEndpoint: "http://nudgebee-agent-opentelemetry-collector:4318/v1/traces"
+  env:
+    - name: SENSITIVE_HEADERS
+      value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Request-ID,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
 existingPrometheus:
   url: ""
 opencost:
-  enabled: true
+  enabled: false
   opencost:
     prometheus:
       external:
