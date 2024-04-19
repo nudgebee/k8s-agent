@@ -91,6 +91,18 @@ spec:
           - name: VICTORIA_METRICS_CONFIGURED
             value: "True"
           {{- end }}
+          {{- if .Values.runner.loki_url }}
+            - name: LOKI_URL
+              value: "{{ .Values.runner.loki_url }}"
+          {{- end }}
+          {{- if .Values.runner.loki_username }}
+            - name: LOKI_USERNAME
+              value: "{{ .Values.runner.loki_username }}"
+          {{- end }}
+          {{- if .Values.runner.loki_password }}
+            - name: LOKI_PASSWORD
+              value: "{{ .Values.runner.loki_password }}"
+          {{- end }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
           {{- end }}
