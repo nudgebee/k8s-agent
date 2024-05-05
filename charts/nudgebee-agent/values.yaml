@@ -540,9 +540,11 @@ runner:
   clickhouse_enabled: false
   clickhouse_secret: "nudgebee-agent-clickhouse"
   victoria_metrics_enabled: false
-  loki_url: ""
-  loki_username: ""
-  loki_password: ""
+  loki:
+    url: ""
+    username: ""
+    password: ""
+    headers: ""
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
