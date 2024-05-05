@@ -197,7 +197,7 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 * * * *" # every hour
+            cron_expression: "0 12 * * 1" # every hour
     actions:
       - volume_analyzer: {}
   - triggers:
@@ -207,6 +207,12 @@ customPlaybooks:
       - on_ingress_all_changes: {}
     actions:
       - resource_babysitter: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 12 * * *" # every day at 12:00
+    actions:
+      - kube_bench_scan: {}
 # builtin playbooks
 builtinPlaybooks:
   # playbooks for non-prometheus based monitoring
@@ -460,9 +466,14 @@ builtinPlaybooks:
       - pod_profiler:
           seconds: 20
           timeout: 40
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeVersionMismatch
+    actions:
+      - node_semantic_version_mismatch_enricher: {}
 # parameters for the nudgebee forwarder deployment
 kubewatch:
-  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
+  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.6
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -517,7 +528,7 @@ runnerServiceAccount:
 # parameters for the nudgebee runner
 runner:
   image:
-    repository: registry.nudgebee.com/nudgebee-agent
+    repository: registry.dev.nudgebee.pollux.in/nudgebee-agent
     tag: 2024-04-12T19-29-20_32b7e3bd4b8e0ec4c5d1a00408945675c9e6cbd5
   imagePullPolicy: IfNotPresent
   log_level: INFO
@@ -542,9 +553,14 @@ runner:
   clickhouse_secret: "nudgebee-agent-clickhouse"
   victoria_metrics_enabled: false
   loki:
-    url: ""
-    username: ""
-    password: ""
+    url: "http://loki-gateway.grafana.svc"
+    username: "loki"
+    password: "loki@123"
+    headers: ""
+  es:
+    enabled: false
+    url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
+    apiKey: ""
     headers: ""
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
@@ -564,7 +580,7 @@ runner:
 nodeAgent:
   enabled: true
   image:
-    repository: registry.nudgebee.com/nudgebee-node-agent
+    repository: registry.dev.nudgebee.pollux.in/nudgebee-node-agent
     pullPolicy: IfNotPresent
     tag: 2024-04-11T12-14-36_d70ec9cecc6d09aee7b7ab26638765be622f16ac
   resources:
@@ -657,6 +673,10 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
+          processors: [batch]
+          exporters: [clickhouse]
+          receivers: [otlp]
+        metrics:
           processors: [batch]
           exporters: [clickhouse]
           receivers: [otlp]
