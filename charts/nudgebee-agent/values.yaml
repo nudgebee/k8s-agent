@@ -541,6 +541,11 @@ runner:
   clickhouse_enabled: false
   clickhouse_secret: "nudgebee-agent-clickhouse"
   victoria_metrics_enabled: false
+  loki:
+    url: ""
+    username: ""
+    password: ""
+    headers: ""
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
@@ -577,6 +582,9 @@ nodeAgent:
   logsEndpoint: ""
   profilesEndpoint: ""
   tracesEndpoint: "http://nudgebee-agent-opentelemetry-collector:4318/v1/traces"
+  env:
+    - name: SENSITIVE_HEADERS
+      value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Request-ID,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
 existingPrometheus:
   url: ""
 opencost:
