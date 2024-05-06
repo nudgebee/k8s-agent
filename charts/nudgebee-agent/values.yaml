@@ -94,6 +94,7 @@ lightActions:
   - delete_alert_rule
   - pod_ephemeral_enricher
   - get_resource
+  - prometheus_queries_enricher
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -196,7 +197,7 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 * * * *" # every hour
+            cron_expression: "0 12 * * 1" # every hour
     actions:
       - volume_analyzer: {}
   - triggers:
@@ -206,6 +207,12 @@ customPlaybooks:
       - on_ingress_all_changes: {}
     actions:
       - resource_babysitter: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 12 * * *" # every day at 12:00
+    actions:
+      - kube_bench_scan: {}
 # builtin playbooks
 builtinPlaybooks:
   # playbooks for non-prometheus based monitoring
@@ -459,9 +466,14 @@ builtinPlaybooks:
       - pod_profiler:
           seconds: 20
           timeout: 40
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeVersionMismatch
+    actions:
+      - node_semantic_version_mismatch_enricher: {}
 # parameters for the nudgebee forwarder deployment
 kubewatch:
-  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.5
+  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.6
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -545,6 +557,11 @@ runner:
     username: ""
     password: ""
     headers: ""
+  es:
+    enabled: false
+    url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
+    apiKey: ""
+    headers: ""
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
@@ -587,7 +604,7 @@ nodeAgent:
 existingPrometheus:
   url: ""
 opencost:
-  enabled: false
+  enabled: true
   opencost:
     prometheus:
       external:
@@ -656,6 +673,10 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
+          processors: [batch]
+          exporters: [clickhouse]
+          receivers: [otlp]
+        metrics:
           processors: [batch]
           exporters: [clickhouse]
           receivers: [otlp]
