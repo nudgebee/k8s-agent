@@ -471,6 +471,19 @@ builtinPlaybooks:
           alert_name: KubeVersionMismatch
     actions:
       - node_semantic_version_mismatch_enricher: {}
+  - triggers:
+      - on_kubernetes_warning_event_create:
+          include: ["Liveness", "Readiness"]
+    actions:
+      - pod_enricher: {}
+      - logs_enricher: {}
+      - pod_events_enricher: {}
+      - pod_node_metrics_enricher:
+          resource_type: Memory
+      - pod_metric_enricher:
+          resource_type: Memory
+      - pod_metric_enricher:
+          resource_type: CPU
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.6
