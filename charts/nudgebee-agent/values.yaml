@@ -191,6 +191,18 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
+            cron_expression: "0 12 * * *" # every day at 12:00
+    actions:
+      - certificate_scanner: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 0 1 * *" # At 00:00 on 1st day of month
+    actions:
+      - k8s_version_upgrade: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
             cron_expression: "0 0 * * *" # every day at 00:00
     actions:
       - unused_pv: {}
