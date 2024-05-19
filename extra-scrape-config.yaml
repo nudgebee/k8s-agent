@@ -16,7 +16,7 @@ prometheus:
               description: HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler  }} has been running at max replicas for longer than 15 minutes.
               summary: HPA is running at max replicas
           - alert: HighErrorCriticalLogs
-            expr: sum(container_log_messages_total{level=~"error|critical", container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda).*"}) by (container_id, sample) > 1
+            expr: sum_over_time(container_log_messages_total{level=~"error|critical", container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1).*"}[5m]) > 1
             for: 5m
             annotations:
               summary: "High error and critical log messages"
@@ -28,7 +28,7 @@ prometheus:
             labels:
               severity: critical
           - alert: ApplicationAPIFailures
-            expr: sum(container_http_requests_total{container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter).*", status=~"5..|4.."}) by (container_id, path, method, status, destination, actual_destination) > 1
+            expr: sum_over_time(container_http_requests_total{container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*", status=~"5..|4.."}[5m]) > 1
             for: 5m
             annotations:
               summary: "High API Failures"
