@@ -191,6 +191,18 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
+            cron_expression: "0 12 * * *" # every day at 12:00
+    actions:
+      - certificate_scanner: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 0 1 * *" # At 00:00 on 1st day of month
+    actions:
+      - k8s_version_upgrade: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
             cron_expression: "0 0 * * *" # every day at 00:00
     actions:
       - unused_pv: {}
@@ -471,6 +483,16 @@ builtinPlaybooks:
           alert_name: KubeVersionMismatch
     actions:
       - node_semantic_version_mismatch_enricher: {}
+  - triggers:
+      - on_kubernetes_warning_event_create:
+          include: ["Liveness", "Readiness"]
+    actions:
+      - event_resource_enricher: {}
+      - event_logs_enricher: {}
+      - event_metric_enricher:
+          resource_type: Memory
+      - event_metric_enricher:
+          resource_type: CPU
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.6
