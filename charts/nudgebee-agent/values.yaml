@@ -95,6 +95,8 @@ lightActions:
   - pod_ephemeral_enricher
   - get_resource
   - prometheus_queries_enricher
+  - k8s_version_upgrade
+  - certificate_scanner
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
