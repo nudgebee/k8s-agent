@@ -238,7 +238,7 @@ builtinPlaybooks:
       - resource_events_enricher: {}
       - pod_enricher: {}
       - logs_enricher: {}
-      - impacted_services_enricher: 
+      - impacted_services_enricher: {}
   - triggers:
       - on_image_pull_backoff: {}
     actions:
