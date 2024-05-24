@@ -95,6 +95,8 @@ lightActions:
   - pod_ephemeral_enricher
   - get_resource
   - prometheus_queries_enricher
+  - k8s_version_upgrade
+  - certificate_scanner
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -235,6 +237,7 @@ builtinPlaybooks:
       - report_crash_loop: {}
       - resource_events_enricher: {}
       - pod_enricher: {}
+      - logs_enricher: {}
       - impacted_services_enricher: {}
   - triggers:
       - on_image_pull_backoff: {}
