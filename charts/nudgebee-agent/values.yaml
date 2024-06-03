@@ -574,7 +574,7 @@ runner:
   krr_image_override: krr-public:2024-04-04T09-10-41_95900bd12662309ddeb0767d4ca4353d6d1bd3fb
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2024-03-30T14-28-13_540b6ffa8b81eb5f5dfaefa731c2e9dd28ce5355
-  clickhouse_enabled: false
+  clickhouse_enabled: true
   clickhouse_secret: "nudgebee-agent-clickhouse"
   victoria_metrics_enabled: false
   loki:
@@ -653,7 +653,7 @@ openshift:
   sccPriority: null
   privilegedSccPriority: null
 opentelemetry-collector:
-  enabled: false
+  enabled: true
   mode: deployment
   extraEnvs:
     - name: CLICKHOUSE_PASSWORD
