@@ -96,6 +96,7 @@ lightActions:
   - get_resource
   - prometheus_queries_enricher
   - k8s_version_upgrade
+  - helm_chart_upgrade
   - certificate_scanner
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -202,6 +203,12 @@ customPlaybooks:
             cron_expression: "0 0 1 * *" # At 00:00 on 1st day of month
     actions:
       - k8s_version_upgrade: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 12 * * *" # every day at 12:00
+    actions:
+      - helm_chart_upgrade: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
