@@ -75,6 +75,10 @@ spec:
             value: {{ .Values.runner.relay_address }}
           - name: PROFILE_IMAGE_TAG_OVERRIDE
             value: {{ .Values.runner.profiler_image_override }}
+          - name: KUBEPUG_IMAGE_OVERRIDE
+            value: { { .Values.runner.kubepug_image_override } }
+          - name: NOVA_IMAGE_OVERRIDE
+            value: { { .Values.runner.nova_image_override } }
           - name: CLICKHOUSE_ENABLED
             value: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
           {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_secret }}
