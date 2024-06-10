@@ -1,3 +1,4 @@
+#!/bin/sh
 set -e  # Enable error handling
 
 # Initialize variables with default values
