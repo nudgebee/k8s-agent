@@ -729,7 +729,7 @@ clickhouse:
   initContainers:
     - name: volume-init
       image: bitnami/bitnami-shell:11-debian-11-r109
-      command: 
+      command:
         - /bin/sh
         - -ec
         - |
