@@ -56,6 +56,14 @@ jobs:
           echo "nudgebee_krr_image: $nudgebee_krr_image"
           yq -i ".runner.krr_image_override=\"krr-public:$nudgebee_krr_image\"" values.yaml
           
+          nudgebee_kubepug_image=`aws ecr describe-images --repository-name kubepug --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_kubepug_image: $nudgebee_kubepug_image"
+          yq -i ".runner.kubepug_image_override=\"kubepug:$nudgebee_kubepug_image\"" values.yaml
+          
+          nudgebee_nova_image=`aws ecr describe-images --repository-name nova --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_nova_image: $nudgebee_nova_image"
+          yq -i ".runner.nova_image_override=\"nova:$nudgebee_nova_image\"" values.yaml
+          
       - name: Add dependency chart repos
         run: |
           helm repo add opencost https://opencost.github.io/opencost-helm-chart
