@@ -726,3 +726,27 @@ clickhouse:
     username: default
     password: "Nudgebee@123"
   extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log remove=\"1\" />\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  initContainers:
+    - name: volume-init
+      image: bitnami/bitnami-shell:11-debian-11-r109
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          mkdir -p /bitnami/clickhouse/data
+          chmod 700 /bitnami/clickhouse/data
+          chown 1001:1001 /bitnami/clickhouse
+          find /bitnami/clickhouse -mindepth 1 -maxdepth 1 -not -name ".snapshot" -not -name "lost+found" | \
+          xargs -r chown -R 1001:1001
+          echo "ClickHouse data directory initialized"
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: data
+          mountPath: /bitnami/clickhouse
+        - name: empty-dir
+          mountPath: /tmp
+          subPath: tmp-dir
+  extraVolumes:
+    - name: empty-dir
+      emptyDir: {}
