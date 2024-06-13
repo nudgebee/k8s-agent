@@ -238,7 +238,7 @@ builtinPlaybooks:
       - resource_events_enricher: {}
       - pod_enricher: {}
       - logs_enricher: {}
-      - impacted_services_enricher: 
+      - impacted_services_enricher: {}
   - triggers:
       - on_image_pull_backoff: {}
     actions:
@@ -575,6 +575,8 @@ runner:
   krr_image_override: krr-public:2024-04-04T09-10-41_95900bd12662309ddeb0767d4ca4353d6d1bd3fb
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2024-03-30T14-28-13_540b6ffa8b81eb5f5dfaefa731c2e9dd28ce5355
+  kubepug_image_override: kubepug:latest
+  nova_image_override: nova:2024-06-07T04-19-24_4df4062d95de8b4d41140a614779397c9fccc07a
   clickhouse_enabled: true
   clickhouse_secret: "nudgebee-agent-clickhouse"
   victoria_metrics_enabled: false
