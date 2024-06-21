@@ -597,6 +597,12 @@ runner:
     url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
     apiKey: ""
     headers: ""
+  grafana:
+    enabled: false
+    url: ""
+    apiKey: ""
+    username: ""
+    password: ""
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
