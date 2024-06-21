@@ -562,7 +562,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2024-04-12T19-29-20_32b7e3bd4b8e0ec4c5d1a00408945675c9e6cbd5
+    tag: 2024-06-24T12-35-44_cc7b53eb959d702bcb7d416cdd2ede7ca9cf317f
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -579,11 +579,11 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2024-04-04T09-10-41_95900bd12662309ddeb0767d4ca4353d6d1bd3fb
+  krr_image_override: krr-public:2024-06-25T16-55-11_d60df6f4b5fe1b2c4663a12f6225b61a3bf4d2a4
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2024-03-30T14-28-13_540b6ffa8b81eb5f5dfaefa731c2e9dd28ce5355
+  profiler_image_override: 2024-05-22T03-07-11_7019993679f65dbacf941d2cf8b58f38cf45c090
   kubepug_image_override: kubepug:latest
-  nova_image_override: nova:2024-06-07T04-19-24_4df4062d95de8b4d41140a614779397c9fccc07a
+  nova_image_override: nova:2024-06-17T04-06-18_3b4b4f77a9d64117d14e4dff1faffc680b14dc5c
   clickhouse_enabled: true
   clickhouse_secret: "nudgebee-agent-clickhouse"
   victoria_metrics_enabled: false
@@ -597,6 +597,12 @@ runner:
     url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
     apiKey: ""
     headers: ""
+  grafana:
+    enabled: false
+    url: ""
+    apiKey: ""
+    username: ""
+    password: ""
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
@@ -617,7 +623,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2024-04-11T12-14-36_d70ec9cecc6d09aee7b7ab26638765be622f16ac
+    tag: 2024-06-26T09-58-00_66f877ca9c5a2e5a49807b493a6ecbe9b6fd351c
   resources:
     requests:
       cpu: "50m"
