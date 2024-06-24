@@ -79,61 +79,16 @@ spec:
             value: {{ .Values.runner.kubepug_image_override }}
           - name: NOVA_IMAGE_OVERRIDE
             value: {{ .Values.runner.nova_image_override }}
-          - name: CLICKHOUSE_ENABLED
-            value: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
+          {{- if .Values.runner.victoria_metrics_enabled }}
+          - name: VICTORIA_METRICS_CONFIGURED
+            value: "True"
+          {{- end }}
           {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_secret }}
           - name: CLICKHOUSE_PASSWORD
             valueFrom:
               secretKeyRef:
                 name: {{ .Release.Name }}-clickhouse
                 key: admin-password
-          {{- else if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
-          - name: CLICKHOUSE_PASSWORD
-            value: {{ .Values.runner.clickhouse_password }}
-          {{- end }}
-          {{- if .Values.runner.victoria_metrics_enabled }}
-          - name: VICTORIA_METRICS_CONFIGURED
-            value: "True"
-          {{- end }}
-          {{- if .Values.runner.loki.url }}
-          - name: LOKI_URL
-            value: {{ .Values.runner.loki.url }}
-          {{- end }}
-          {{- if .Values.runner.loki.username }}
-          - name: LOKI_USERNAME
-            value: {{ .Values.runner.loki.username }}
-          {{- end }}
-          {{- if .Values.runner.loki.password }}
-          - name: LOKI_PASSWORD
-            value: {{ .Values.runner.loki.password }}
-          {{- end }}
-          {{- if .Values.runner.loki.headers }}
-          - name: LOKI_EXTRA_HEADER
-            value: {{ .Values.runner.loki.headers }}
-          {{- end }}
-          {{- if .Values.runner.es.url }}
-          - name: ELASTICSEARCH_URL
-            value: {{ .Values.runner.es.url }}
-          {{- end }}
-          {{- if .Values.runner.es.username }}
-          - name: ELASTICSEARCH_USERNAME
-            value: {{ .Values.runner.es.username }}
-          {{- end }}
-          {{- if .Values.runner.es.password }}
-          - name: ELASTICSEARCH_PASSWORD
-            value: {{ .Values.runner.es.password }}
-          {{- end }}
-          {{- if .Values.runner.es.headers }}
-          - name: ELASTICSEARCH_HEADER
-            value: {{ .Values.runner.es.headers }}
-          {{- end }}
-          {{- if .Values.runner.es.apiKey }}
-          - name: ELASTICSEARCH_APIKEY
-            value: {{ .Values.runner.es.apiKey }}
-          {{- end }}
-          {{- if .Values.runner.es.enabled }}
-          - name: ELASTICSEARCH_ENABLED
-            value: "{{ .Values.runner.es.enabled }}"
           {{- end }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
           {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
@@ -280,3 +235,54 @@ stringData:
   NUDGEBEE_ENDPOINT: {{ .Values.runner.nudgebee.endpoint }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
   PUBLISHING_WINDOW: {{ .Values.runner.nudgebee.publish_window | quote }}
+  {{ if .Values.runner.grafana.password }}
+  GRAFANA_PASSWORD: {{ .Values.runner.grafana.password | quote }}
+  {{ end }}
+  {{ if .Values.runner.grafana.apikey }}
+  GRAFANA_APIKEY: {{ .Values.runner.grafana.apikey | quote }}
+  {{ end }}
+  {{ if .Values.runner.grafana.user }}
+  GRAFANA_USERNAME: {{ .Values.runner.grafana.user | quote }}
+  {{ end }}
+  {{ if .Values.runner.grafana.url }}
+  GRAFANA_URL: {{ .Values.runner.grafana.url | quote }}
+  GRAFANA_ENABLED: "True"
+  {{ end }}
+  {{ if .Values.runner.grafana.extra_headers }}
+  GRAFANA_EXTRA_HEADER: {{ .Values.runner.grafana.extra_headers | quote }}
+  {{ end }}
+  {{- if .Values.runner.loki.url }}
+  LOKI_URL: {{ .Values.runner.loki.url }}
+  {{- end }}
+  {{- if .Values.runner.loki.username }}
+  LOKI_USERNAME: {{ .Values.runner.loki.username }}
+  {{- end }}
+  {{- if .Values.runner.loki.password }}
+  LOKI_PASSWORD: {{ .Values.runner.loki.password }}
+  {{- end }}
+  {{- if .Values.runner.loki.headers }}
+  LOKI_EXTRA_HEADER: {{ .Values.runner.loki.headers }}
+  {{- end }}
+  {{- if .Values.runner.es.url }}
+  ELASTICSEARCH_URL: {{ .Values.runner.es.url }}
+  ELASTICSEARCH_ENABLED: "True"
+  {{- end }}
+  {{- if .Values.runner.es.password }}
+  ELASTICSEARCH_PASSWORD: {{ .Values.runner.es.password }}
+  {{- end }}
+  {{- if .Values.runner.es.username }}
+  ELASTICSEARCH_USERNAME: {{ .Values.runner.es.username }}
+  {{- end }}
+  {{- if .Values.runner.es.headers }}
+  ELASTICSEARCH_HEADER: {{ .Values.runner.es.headers }}
+  {{- end }}
+  {{- if .Values.runner.es.apiKey }}
+  ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
+  {{- end }}
+  {{- if .Values.runner.es.enabled }}
+  ELASTICSEARCH_ENABLED: {{ .Values.runner.es.enabled }}
+  {{- end }}
+  CLICKHOUSE_ENABLED: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
+  {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
+  CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}
+  {{- end }}
