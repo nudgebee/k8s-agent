@@ -135,6 +135,7 @@ if [ -z "$prometheus_url" ]; then
     )
     prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
 fi
+existingPrometheus=false
 # Check if service_url is empty
 if [ -z "$prometheus_url" ]; then
    echo "Prometheus not found..!"
@@ -149,6 +150,8 @@ if [ -z "$prometheus_url" ]; then
         echo "Prometheus installation not requested. Exiting."
         exit 0
     fi
+else
+    existingPrometheus=true
 fi
 
 echo "Discovered Prometheus URL: $prometheus_url"
@@ -179,4 +182,21 @@ fi
 # Use helm upgrade --install to either install or upgrade the Helm chart
 helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command
 
-echo "Installation/upgrade completed."
+# discover loki as log server if not found then provide link to nudgebee doc to configure log provider
+loki_selectors=(
+        "app=loki"
+        "app.kubernetes.io/instance=loki"
+)
+
+RED='\033[0;31m'
+NC='\033[0m'
+loki_url=$(getPrometheusURL "${loki_selectors[@]}")
+if [ -z "$loki_url" ]; then
+    echo "Log provider not found..!"
+    echo "${RED}Please configure Loki/ELK as log provider by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/logging/${NC}"
+fi
+
+# if existing prometheus then provide link to configure alert manager, scrape config and additionalRulesMap
+if [ "$existingPrometheus" = true ]; then
+    echo "${RED}Please configure alert manager, scrape config and alert rules by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/existing-prometheus/${NC}"
+fi
