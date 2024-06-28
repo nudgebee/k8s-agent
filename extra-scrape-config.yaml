@@ -139,3 +139,10 @@ alertmanager:
         webhook_configs:
           - url: 'http://nudgebee-agent-runner.nudgebee-agent.svc/api/alerts' # 
             send_resolved: true 
+grafana:
+  enabled: true
+  adminPassword: 'admin'
+  adminUser: 'admin'
+  grafana.ini:
+    security:
+      allow_embedding: true
