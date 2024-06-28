@@ -136,6 +136,7 @@ if [ -z "$prometheus_url" ]; then
     prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
 fi
 existingPrometheus=false
+grafana_command=""
 # Check if service_url is empty
 if [ -z "$prometheus_url" ]; then
    echo "Prometheus not found..!"
@@ -144,8 +145,9 @@ if [ -z "$prometheus_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=true --set kubeStateMetrics.enabled=true --set grafana.enabled=false -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
+        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=true --set kubeStateMetrics.enabled=true --set grafana.enabled=true -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
         prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
+        grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana:3000 --set runner.grafana.username=admin --set runner.grafana.password=admin "
     else
         echo "Prometheus installation not requested. Exiting."
         exit 0
@@ -180,7 +182,7 @@ if [ -n "$values" ]; then
 fi
 
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command
 
 # discover loki as log server if not found then provide link to nudgebee doc to configure log provider
 loki_selectors=(
