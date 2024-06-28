@@ -15,8 +15,9 @@ spec:
       labels:
         app: {{ .Release.Name }}-runner
         nudgebeeComponent: "runner"
-      {{- if or .Values.runner.annotations .Values.globalConfig.custom_annotations }}
       annotations:
+        rollme: {{ randAlphaNum 5 | quote }}
+      {{- if or .Values.runner.annotations .Values.globalConfig.custom_annotations }}
         {{- if .Values.runner.annotations}} {{ toYaml .Values.runner.annotations | nindent 8 }}
         {{- end }}
         {{- if .Values.globalConfig.custom_annotations }} {{ toYaml .Values.globalConfig.custom_annotations | nindent 8 }}
@@ -241,11 +242,13 @@ stringData:
   {{ if .Values.runner.grafana.apikey }}
   GRAFANA_APIKEY: {{ .Values.runner.grafana.apikey | quote }}
   {{ end }}
-  {{ if .Values.runner.grafana.user }}
-  GRAFANA_USERNAME: {{ .Values.runner.grafana.user | quote }}
+  {{ if .Values.runner.grafana.username }}
+  GRAFANA_USERNAME: {{ .Values.runner.grafana.username | quote }}
   {{ end }}
   {{ if .Values.runner.grafana.url }}
   GRAFANA_URL: {{ .Values.runner.grafana.url | quote }}
+  {{ end }}
+  {{ if .Values.runner.grafana.enabled }}
   GRAFANA_ENABLED: "True"
   {{ end }}
   {{ if .Values.runner.grafana.extra_headers }}
@@ -265,7 +268,6 @@ stringData:
   {{- end }}
   {{- if .Values.runner.es.url }}
   ELASTICSEARCH_URL: {{ .Values.runner.es.url }}
-  ELASTICSEARCH_ENABLED: "True"
   {{- end }}
   {{- if .Values.runner.es.password }}
   ELASTICSEARCH_PASSWORD: {{ .Values.runner.es.password }}
@@ -280,7 +282,7 @@ stringData:
   ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
   {{- end }}
   {{- if .Values.runner.es.enabled }}
-  ELASTICSEARCH_ENABLED: {{ .Values.runner.es.enabled }}
+  ELASTICSEARCH_ENABLED: "True"
   {{- end }}
   CLICKHOUSE_ENABLED: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
   {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
