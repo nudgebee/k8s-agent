@@ -147,7 +147,7 @@ if [ -z "$prometheus_url" ]; then
         helm repo update
         helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=false --set pushgateway.enabled=false --set alertmanager.enabled=true --set kubeStateMetrics.enabled=true --set grafana.enabled=true -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
         prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
-        grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
+        grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
     else
         echo "Prometheus installation not requested. Exiting."
         exit 0
