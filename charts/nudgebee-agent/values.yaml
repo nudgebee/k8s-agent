@@ -98,6 +98,7 @@ lightActions:
   - k8s_version_upgrade
   - helm_chart_upgrade
   - certificate_scanner
+  - trivy_cis_scan
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -231,9 +232,9 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 12 * * *" # every day at 12:00
+            cron_expression: "0 8 * * 1" # every monday at 8:00
     actions:
-      - kube_bench_scan: {}
+      - trivy_cis_scan: {}
 # builtin playbooks
 builtinPlaybooks:
   # playbooks for non-prometheus based monitoring
@@ -421,9 +422,6 @@ builtinPlaybooks:
       - alert_graph_enricher:
           resource_type: CPU
           item_type: Pod
-      - pod_profiler:
-          seconds: 60
-          timeout: 120
       - pod_graph_enricher:
           resource_type: CPU
       - pod_enricher: {}
@@ -486,9 +484,6 @@ builtinPlaybooks:
           resource_type: Memory
       - pod_metric_enricher:
           resource_type: Memory
-      - pod_profiler:
-          seconds: 20
-          timeout: 40
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeVersionMismatch
@@ -732,6 +727,12 @@ clickhouse:
     username: default
     password: "Nudgebee@123"
   extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log remove=\"1\" />\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 2000Mi
+    limits:
+      memory: 2000Mi
   initContainers:
     - name: volume-init
       image: bitnami/bitnami-shell:11-debian-11-r109
