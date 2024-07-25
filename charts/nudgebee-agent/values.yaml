@@ -615,6 +615,8 @@ runner:
     auth_secret_key: ""
 nodeAgent:
   enabled: true
+  podmonitor:
+    enabled: true
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
