@@ -349,7 +349,6 @@ builtinPlaybooks:
       - node_running_pods_enricher: {}
       - status_enricher:
           show_details: true
-      - node_dmesg_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeNodeUnreachable
