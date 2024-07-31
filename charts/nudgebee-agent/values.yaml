@@ -99,6 +99,8 @@ lightActions:
   - helm_chart_upgrade
   - certificate_scanner
   - trivy_cis_scan
+  - create_workload
+
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
