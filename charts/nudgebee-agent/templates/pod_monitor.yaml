@@ -1,0 +1,12 @@
+{{- if (and .Values.nodeAgent.enabled .Values.nodeAgent.podmonitor.enabled) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: nudgebee-node-agent
+spec:
+  selector:
+    matchLabels:
+      app: nudgebee-node-agent
+  podMetricsEndpoints:
+    - port: http
+{{- end -}}
