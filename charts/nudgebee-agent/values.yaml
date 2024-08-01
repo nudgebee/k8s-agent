@@ -351,7 +351,6 @@ builtinPlaybooks:
       - node_running_pods_enricher: {}
       - status_enricher:
           show_details: true
-      - node_dmesg_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeNodeUnreachable
@@ -617,6 +616,8 @@ runner:
     auth_secret_key: ""
 nodeAgent:
   enabled: true
+  podmonitor:
+    enabled: true
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
