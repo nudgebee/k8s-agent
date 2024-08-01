@@ -19,7 +19,7 @@ additionalPrometheusRulesMap:
               summary: HPA is running at max replicas
           - alert: HighErrorCriticalLogs
             expr: >-
-              sum_over_time(container_log_messages_total{level=~"error|critical",
+              increase(container_log_messages_total{level=~"error|critical",
               container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1).*"}[5m])
               > 1
             for: 5m
@@ -38,7 +38,7 @@ additionalPrometheusRulesMap:
               severity: critical
           - alert: ApplicationAPIFailures
             expr: >-
-              sum_over_time(container_http_requests_total{container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*",
+              increase(container_http_requests_total{container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*",
               status=~"5..|4.."}[5m]) > 1
             for: 5m
             annotations:
@@ -66,6 +66,12 @@ additionalPrometheusRulesMap:
                 state."
 prometheus:
   prometheusSpec:
+    storageSpec: 
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 50Gi
     additionalScrapeConfigs: |
       - job_name: opencost
         honor_labels: true
@@ -125,6 +131,7 @@ alertmanager:
         - receiver: 'null'
           matchers:
             - alertname =~ "InfoInhibitor|Watchdog"
+          continue: true
         - receiver: 'nudgebee-agent'
           group_by: [ '...' ]
           group_wait: 1s
@@ -137,7 +144,7 @@ alertmanager:
       - name: 'null'
       - name: 'nudgebee-agent'
         webhook_configs:
-          - url: 'http://nudgebee-agent-runner.nudgebee-agent.svc/api/alerts' # 
+          - url: 'http://nudgebee-agent-runner.nudgebee-agent.svc/api/alerts' 
             send_resolved: true 
 grafana:
   enabled: true
