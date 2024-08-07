@@ -100,7 +100,7 @@ lightActions:
   - certificate_scanner
   - trivy_cis_scan
   - create_workload
-
+  - rightsize_pvc
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
