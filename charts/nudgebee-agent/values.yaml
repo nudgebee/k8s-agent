@@ -101,6 +101,7 @@ lightActions:
   - trivy_cis_scan
   - create_workload
   - rightsize_pvc
+  - continuous_rightsizing
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
