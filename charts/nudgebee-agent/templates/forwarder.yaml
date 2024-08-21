@@ -28,7 +28,7 @@ spec:
       containers:
       - name: kubewatch
         # this is a custom version of kubewatch built from https://github.com/aantn/kubewatch
-        image: {{ .Values.kubewatch.image }}
+        image: {{ .Values.kubewatch.image.repository }}:{{ .Values.kubewatch.image.tag | default "latest" }}
         imagePullPolicy: {{ .Values.kubewatch.imagePullPolicy }}
         env:
           - name: KW_CONFIG

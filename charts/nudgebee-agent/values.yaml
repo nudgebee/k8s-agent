@@ -161,6 +161,7 @@ customPlaybooks:
       - on_pod_all_changes: {}
       - on_node_all_changes: {}
       - on_job_all_changes: {}
+      - on_rollout_all_changes: {}
     actions:
       - resource_events_diff: {}
   - triggers:
@@ -230,6 +231,7 @@ customPlaybooks:
       - on_daemonset_all_changes: {}
       - on_statefulset_all_changes: {}
       - on_ingress_all_changes: {}
+      - on_rollout_all_changes: {}
     actions:
       - resource_babysitter: {}
   - triggers:
@@ -503,7 +505,9 @@ builtinPlaybooks:
           resource_type: CPU
 # parameters for the nudgebee forwarder deployment
 kubewatch:
-  image: us-central1-docker.pkg.dev/genuine-flight-317411/devel/kubewatch:v2.6
+  image:
+    repository: registry.nudgebee.com/kubewatch
+    tag: 2024-06-24T12-35-44_cc7b53eb959d702bcb7d416cdd2ede7ca9cf317f
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
