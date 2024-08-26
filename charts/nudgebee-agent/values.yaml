@@ -423,10 +423,9 @@ builtinPlaybooks:
           status: "all" # sometimes this enricher silences the alert, so we need to silence it regardless of status
     actions:
       - cpu_throttling_analysis_enricher: {}
-      - alert_graph_enricher:
+      - pod_metric_enricher:
           resource_type: CPU
-          item_type: Pod
-      - pod_graph_enricher:
+      - pod_node_metrics_enricher:
           resource_type: CPU
       - pod_enricher: {}
   - triggers:
