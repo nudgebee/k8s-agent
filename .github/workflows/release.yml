@@ -64,6 +64,10 @@ jobs:
           echo "nudgebee_nova_image: $nudgebee_nova_image"
           yq -i ".runner.nova_image_override=\"nova:$nudgebee_nova_image\"" values.yaml
           
+          nudgebee_kubewatch_image=`aws ecr describe-images --repository-name kubewatch --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_kubewatch_image: $nudgebee_kubewatch_image"
+          yq -i ".kubewatch.image.tag=\"$nudgebee_kubewatch_image\"" values.yaml
+          
       - name: Add dependency chart repos
         run: |
           helm repo add opencost https://opencost.github.io/opencost-helm-chart
