@@ -80,6 +80,8 @@ spec:
             value: {{ .Values.runner.kubepug_image_override }}
           - name: NOVA_IMAGE_OVERRIDE
             value: {{ .Values.runner.nova_image_override }}
+          - name: RUNBOOK_SIDECAR_IMAGE
+            value: {{ .Values.runner.image_registry }}/nudgebee_runbook_sidecar_agent:{{ .Values.runner.runbook_sidecar_image_tag }}
           {{- if .Values.runner.victoria_metrics_enabled }}
           - name: VICTORIA_METRICS_CONFIGURED
             value: "True"
