@@ -586,6 +586,7 @@ runner:
   nova_image_override: nova:2024-06-17T04-06-18_3b4b4f77a9d64117d14e4dff1faffc680b14dc5c
   clickhouse_enabled: true
   clickhouse_secret: "nudgebee-agent-clickhouse"
+  runbook_sidecar_image_tag: latest
   victoria_metrics_enabled: false
   loki:
     url: ""
