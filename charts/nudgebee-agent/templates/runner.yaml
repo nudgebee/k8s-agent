@@ -283,6 +283,12 @@ stringData:
   {{- if .Values.runner.es.apiKey }}
   ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
   {{- end }}
+  {{- if .Values.runner.es.use_ssl }}
+  ELASTICSEARCH_SSL_ENABLED: "True"
+  {{- end }}
+  {{- if .Values.runner.es.verify_cert }}
+  ELASTICSEARCH_SSL_VERIFY: "True"
+  {{- end }}
   {{- if .Values.runner.es.enabled }}
   ELASTICSEARCH_ENABLED: "True"
   {{- end }}
