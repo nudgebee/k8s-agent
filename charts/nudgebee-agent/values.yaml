@@ -281,13 +281,6 @@ builtinPlaybooks:
   # playbooks for prometheus alerts enrichment
   - triggers:
       - on_prometheus_alert:
-          alert_name: KubePodCrashLooping
-    actions:
-      - logs_enricher: {}
-      - pod_events_enricher: {}
-      - pod_enricher: {}
-  - triggers:
-      - on_prometheus_alert:
           alert_name: PrometheusRuleFailures
     actions:
       - prometheus_rules_enricher: {}
@@ -502,6 +495,12 @@ builtinPlaybooks:
           resource_type: Memory
       - event_metric_enricher:
           resource_type: CPU
+  - triggers:
+      - on_kubernetes_normal_event_create:
+          exclude: ["NodeSysctlChange"]
+    actions:
+      - event_report: {}
+      - event_resource_events: {}
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image:
