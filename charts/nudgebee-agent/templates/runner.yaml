@@ -127,7 +127,8 @@ spec:
             cpu: {{ .Values.runner.resources.requests.cpu }}
             memory: {{ if .Values.isSmallCluster }}"512Mi"{{ else }}{{ .Values.runner.resources.requests.memory | quote }}{{ end }}
           limits:
-            memory: {{ if .Values.isSmallCluster }}"512Mi"{{ else if .Values.runner.resources.limits.memory }}{{ .Values.runner.resources.limits.memory | quote }}{{ else }}{{ .Values.runner.resources.requests.memory | quote }}{{ end }}
+            {{ if .Values.runner.resources.limits.memory }}memory: {{ if .Values.isSmallCluster }}"512Mi"{{ else if .Values.runner.resources.limits.memory }}{{ .Values.runner.resources.limits.memory | quote }}{{ else }}{{ .Values.runner.resources.requests.memory | quote }}{{ end }}
+            {{ end }}
             {{ if .Values.runner.resources.limits.cpu }}cpu: {{ .Values.runner.resources.limits.cpu | quote }}{{ end }}
       {{- if .Values.grafanaRenderer.enableContainer }}
       - name: grafana-renderer
@@ -282,6 +283,12 @@ stringData:
   {{- end }}
   {{- if .Values.runner.es.apiKey }}
   ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
+  {{- end }}
+  {{- if .Values.runner.es.use_ssl }}
+  ELASTICSEARCH_SSL_ENABLED: "True"
+  {{- end }}
+  {{- if .Values.runner.es.verify_cert }}
+  ELASTICSEARCH_SSL_VERIFY: "True"
   {{- end }}
   {{- if .Values.runner.es.enabled }}
   ELASTICSEARCH_ENABLED: "True"
