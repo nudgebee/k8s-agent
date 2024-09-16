@@ -182,7 +182,7 @@ if [ -n "$values" ]; then
 fi
 
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command
+helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command
 
 # discover loki as log server if not found then provide link to nudgebee doc to configure log provider
 loki_selectors=(
