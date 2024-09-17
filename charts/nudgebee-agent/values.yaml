@@ -102,6 +102,10 @@ lightActions:
   - create_workload
   - rightsize_pvc
   - continuous_rightsizing
+  - cpu_overcommited_enricher
+  - memory_overcommited_enricher
+  - hpa_events_enricher
+
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -190,6 +194,7 @@ customPlaybooks:
       - job_info_enricher: {}
       - job_events_enricher: {}
       - job_pod_enricher: {}
+      - logs_enricher: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
@@ -232,6 +237,7 @@ customPlaybooks:
       - on_statefulset_all_changes: {}
       - on_ingress_all_changes: {}
       - on_rollout_all_changes: {}
+      - on_job_all_changes: {}
     actions:
       - resource_babysitter: {}
   - triggers:
@@ -252,12 +258,14 @@ builtinPlaybooks:
       - pod_enricher: {}
       - logs_enricher: {}
       - impacted_services_enricher: {}
+      - resource_babysitter: {}
   - triggers:
       - on_image_pull_backoff: {}
     actions:
       - image_pull_backoff_reporter: {}
       - resource_events_enricher: {}
       - pod_enricher: {}
+      - resource_babysitter: {}
   # playbooks for non-prometheus based monitoring that use prometheus for enrichment
   - triggers:
       - on_pod_oom_killed:
@@ -304,17 +312,20 @@ builtinPlaybooks:
       - pod_events_enricher: {}
       - pod_issue_investigator: {}
       - pod_enricher: {}
+      - resource_babysitter: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeContainerWaiting
     actions:
       - pod_issue_investigator: {}
       - pod_events_enricher: {}
+      - resource_babysitter: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeHpaReplicasMismatch
     actions:
       - hpa_mismatch_enricher: {}
+      - hpa_events_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeJobFailed
@@ -326,6 +337,7 @@ builtinPlaybooks:
       - job_info_enricher: {}
       - job_events_enricher: {}
       - job_pod_enricher: {}
+      - logs_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeAggregatedAPIDown
@@ -389,6 +401,8 @@ builtinPlaybooks:
           alert_name: HostHighCpuLoad
     actions:
       - node_cpu_enricher: {}
+      - noisy_neighbours_enricher:
+          resource_type: CPU
       - alert_graph_enricher:
           resource_type: CPU
           item_type: Node
@@ -397,6 +411,8 @@ builtinPlaybooks:
           alert_name: HostOomKillDetected
     actions:
       - oom_killer_enricher: {}
+      - noisy_neighbours_enricher:
+          resource_type: Memory
       - alert_graph_enricher:
           resource_type: Memory
           item_type: Node
