@@ -13,6 +13,8 @@ agent_name="nudgebee-agent"
 env="prod"
 disable_node_agent=""
 values=""
+alert_manager_url=""
+prometheus_org_id=""
 # Help function
 usage() {
   echo "Usage: $0 [-a <auth_key>] [-k <k8s_context>] [-o <openshift_enable>] [-p <prometheus_url>] [-s <additional_secret>]"
@@ -28,12 +30,14 @@ usage() {
   echo "  -h <help>               Help"
   echo "  -d <disable_node_agent> Disable node agent"
   echo "  -f <values> values yaml"
+  echo "  -m <alert_manager_url> Alert manager URL"
+  echo "  -r <prometheus-org-id> Prometheus org id"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -61,6 +65,12 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:" opt; do
       ;;
     f) 
       values="$OPTARG"
+      ;;
+    m)
+      alert_manager_url="$OPTARG"
+      ;;
+    r)
+      prometheus_org_id="$OPTARG"
       ;;
     h)
       usage
@@ -181,8 +191,22 @@ if [ -n "$values" ]; then
   values_command=" -f $values"
 fi
 
+alert_manager_url_command=""
+if [ -n "$alert_manager_url" ]; then
+  alert_manager_url_command=" --set globalConfig.alertmanager_url=$alert_manager_url"
+fi
+
+prometheus_org_id_command=""
+echo "Prometheus org id: $prometheus_org_id"
+if [ -n "$prometheus_org_id" ]; then
+  prometheus_org_id_command=" --set globalConfig.prometheus_headers='X-Scope-OrgID: $prometheus_org_id' --set globalConfig.alertmanager_headers='X-Scope-OrgID: $prometheus_org_id' --set opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
+fi
+
 # Use helm upgrade --install to either install or upgrade the Helm chart
-helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set existingPrometheus.url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command
+a="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command $alert_manager_url_command $prometheus_org_id_command"
+
+echo "Running command: $a"
+eval $a
 
 # discover loki as log server if not found then provide link to nudgebee doc to configure log provider
 loki_selectors=(
