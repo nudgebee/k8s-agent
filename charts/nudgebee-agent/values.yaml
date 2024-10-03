@@ -102,6 +102,8 @@ lightActions:
   - create_workload
   - rightsize_pvc
   - continuous_rightsizing
+  - kubectl_command_executor
+
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: false
@@ -291,11 +293,13 @@ builtinPlaybooks:
           alert_name: KubeCPUOvercommit
     actions:
       - cpu_overcommited_enricher: {}
+      - cluster_cpu_requests_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubeMemoryOvercommit
     actions:
       - memory_overcommited_enricher: {}
+      - cluster_memory_requests_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubePodNotReady
@@ -373,7 +377,8 @@ builtinPlaybooks:
       - on_prometheus_alert:
           alert_name: KubeDaemonSetRolloutStuck
     actions:
-      - resource_events_enricher: {}
+      - resource_events_enricher:
+          dependent_pod_mode: true
       - related_pods: {}
       - daemonset_status_enricher: {}
   - triggers:
@@ -428,16 +433,22 @@ builtinPlaybooks:
           alert_name: KubeDeploymentReplicasMismatch
     actions:
       - pod_issue_investigator: {}
+      - deployment_events_enricher: {}
       - deployment_events_enricher:
-          included_types: ["Warning"]
-      - deployment_events_enricher:
-          included_types: ["Warning", "Normal"]
           dependent_pod_mode: true
   - triggers:
       - on_prometheus_alert:
           status: "all"
     actions:
       - default_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubeDeploymentRolloutStuck
+    actions:
+      - deployment_events_enricher: {}
+      - deployment_events_enricher:
+          dependent_pod_mode: true
+      - pod_issue_investigator: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: NodeFilesystemSpaceFillingUp
@@ -501,6 +512,44 @@ builtinPlaybooks:
     actions:
       - event_report: {}
       - event_resource_events: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubePersistentVolumeFillingUp
+    actions:
+      - prometheus_pvc_event_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubernetesVolumeOutOfDiskSpace
+    actions:
+      - prometheus_pvc_event_enricher: {}
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: PostgreSQLCacheHitRatio
+    actions:
+      - pg_health_enricher:
+          secret_name: pg-secret
+          secret_namespace: nudgebee-agent
+      - pg_run_queries:
+          secret_name: pg-secret
+          secret_namespace: nudgebee-agent
+          queries:
+            - "SELECT relname AS table_name, heap_blks_read, heap_blks_hit, (heap_blks_hit::float / (heap_blks_hit + heap_blks_read + 1)) * 100 AS cache_hit_ratio FROM pg_statio_user_tables where heap_blks_read > 0 ORDER BY cache_hit_ratio asc limit 50"
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: NodeMemoryHighUtilization
+    actions:
+      - node_allocatable_resources_enricher: {}
+      - node_running_pods_enricher: {}
+      - status_enricher:
+          show_details: true
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: NodeCPUHighUsage
+    actions:
+      - node_allocatable_resources_enricher: {}
+      - node_running_pods_enricher: {}
+      - status_enricher:
+          show_details: true
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image:
