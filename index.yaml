@@ -2,6 +2,30 @@ apiVersion: v1
 entries:
   nudgebee-agent:
   - apiVersion: v2
+    appVersion: 0.0.72
+    created: "2024-10-10T13:35:21.869450814Z"
+    dependencies:
+    - condition: opencost.enabled
+      name: opencost
+      repository: https://opencost.github.io/opencost-helm-chart
+      version: 1.41.0
+    - condition: opentelemetry-collector.enabled
+      name: clickhouse
+      repository: https://charts.bitnami.com/bitnami
+      version: 3.1.*
+    - condition: opentelemetry-collector.enabled
+      name: opentelemetry-collector
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.52.*
+    description: Nudgebee Helm chart for Kubernetes
+    digest: 2ccdb5b518de0f65e35f5ba3808a5ad8ca5c7f0691cc9f9161b8f2e06c5dc4a3
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    name: nudgebee-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.0.72/nudgebee-agent-0.0.72.tgz
+    version: 0.0.72
+  - apiVersion: v2
     appVersion: 0.0.71
     created: "2024-09-17T07:44:11.659304813Z"
     dependencies:
@@ -1300,4 +1324,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2024-09-17T07:44:11.659559658Z"
+generated: "2024-10-10T13:35:21.869694349Z"
