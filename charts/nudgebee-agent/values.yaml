@@ -554,7 +554,7 @@ builtinPlaybooks:
 kubewatch:
   image:
     repository: registry.nudgebee.com/kubewatch
-    tag: 2024-06-24T12-35-44_cc7b53eb959d702bcb7d416cdd2ede7ca9cf317f
+    tag: 2024-08-28T07-28-49_b5953b7ede531fe295d68d67fc69c4d4668d211a
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -610,7 +610,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2024-06-24T12-35-44_cc7b53eb959d702bcb7d416cdd2ede7ca9cf317f
+    tag: 2024-10-10T11-05-50_0607b6d173ea01c561ba137eb5550ffcb6bf176b
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -627,11 +627,11 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2024-06-25T16-55-11_d60df6f4b5fe1b2c4663a12f6225b61a3bf4d2a4
+  krr_image_override: krr-public:2024-10-10T10-52-22_0a69563a1d545e1a511c89f56db530cd420a3853
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2024-05-22T03-07-11_7019993679f65dbacf941d2cf8b58f38cf45c090
+  profiler_image_override: 2024-05-21T04-58-42_3b8eaf503ce4fdf32fb2c78885f9f14a6ad8cf82
   kubepug_image_override: kubepug:latest
-  nova_image_override: nova:2024-06-17T04-06-18_3b4b4f77a9d64117d14e4dff1faffc680b14dc5c
+  nova_image_override: nova:2024-06-13T12-50-45_fb0085fcaa8fd034b482ed1acd5ba26b145a4017
   clickhouse_enabled: true
   clickhouse_secret: "nudgebee-agent-clickhouse"
   runbook_sidecar_image_tag: prod
@@ -674,7 +674,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2024-06-26T09-58-00_66f877ca9c5a2e5a49807b493a6ecbe9b6fd351c
+    tag: 2024-08-28T08-47-49_ed065a712c7d7ab1f1b4b463f483de26d62d5556
   resources:
     requests:
       cpu: "50m"
