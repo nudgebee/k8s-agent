@@ -667,6 +667,8 @@ runner:
     endpoint: https://collector.nudgebee.com
     publish_window: '3600'
     auth_secret_key: ""
+  serviceAccount:
+    annotations: {}
 nodeAgent:
   enabled: true
   podmonitor:
