@@ -103,6 +103,7 @@ lightActions:
   - rightsize_pvc
   - continuous_rightsizing
   - kubectl_command_executor
+  - list_k8s_pdb
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
