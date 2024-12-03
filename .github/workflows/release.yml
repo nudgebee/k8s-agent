@@ -72,6 +72,10 @@ jobs:
           echo "runbook_sidecar_image_tag: $runbook_sidecar_image_tag"
           yq -i ".runner.runbook_sidecar_image_tag=\"$runbook_sidecar_image_tag\"" values.yaml
           
+          trivy_image_tag=`aws ecr describe-images --repository-name trivy-nb --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "trivy_image_override: $trivy_image_tag"
+          yq -i ".runner.trivy_image_override=\"trivy-nb:$trivy_image_tag\"" values-dev.yaml
+
       - name: Add dependency chart repos
         run: |
           helm repo add opencost https://opencost.github.io/opencost-helm-chart
