@@ -633,6 +633,7 @@ runner:
   profiler_image_override: 2024-05-21T04-58-42_3b8eaf503ce4fdf32fb2c78885f9f14a6ad8cf82
   kubepug_image_override: kubepug:latest
   nova_image_override: nova:2024-06-13T12-50-45_fb0085fcaa8fd034b482ed1acd5ba26b145a4017
+  trivy_image_override: trivy-nb:latest
   clickhouse_enabled: true
   clickhouse_secret: "nudgebee-agent-clickhouse"
   runbook_sidecar_image_tag: prod
