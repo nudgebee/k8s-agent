@@ -82,8 +82,6 @@ spec:
             value: {{ .Values.runner.nova_image_override }}
           - name: RUNBOOK_SIDECAR_IMAGE
             value: {{ .Values.runner.image_registry }}/nudgebee_runbook_sidecar_agent:{{ .Values.runner.runbook_sidecar_image_tag }}
-          - name: TRIVY_IMAGE_OVERRIDE
-            value: {{ .Values.runner.trivy_image_override }}
           {{- if .Values.runner.victoria_metrics_enabled }}
           - name: VICTORIA_METRICS_CONFIGURED
             value: "True"
