@@ -217,7 +217,7 @@ customPlaybooks:
           cron_schedule_repeat:
             cron_expression: "0 0 * * 1" # At 00:00 on every monday
     actions:
-      - k8s_helm_compatibility_check: { }
+      - k8s_helm_compatibility_check: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
