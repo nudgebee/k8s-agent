@@ -104,6 +104,7 @@ lightActions:
   - continuous_rightsizing
   - kubectl_command_executor
   - list_k8s_pdb
+  - k8s_helm_compatibility_check
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -208,9 +209,15 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 0 1 * *" # At 00:00 on 1st day of month
+            cron_expression: "0 0 * * 1" # At 00:00 on every monday
     actions:
       - k8s_version_upgrade: {}
+  - triggers:
+      - on_schedule:
+          cron_schedule_repeat:
+            cron_expression: "0 0 * * 1" # At 00:00 on every monday
+    actions:
+      - k8s_helm_compatibility_check: {}
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
