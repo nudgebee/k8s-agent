@@ -124,7 +124,13 @@ priorityBuiltinPlaybooks:
           status: "all"
     actions:
       - name_silencer:
-          names: ["Watchdog", "KubeSchedulerDown", "KubeControllerManagerDown", "InfoInhibitor"]
+          names:
+            [
+              "Watchdog",
+              "KubeSchedulerDown",
+              "KubeControllerManagerDown",
+              "InfoInhibitor",
+            ]
   # Silences for small/local clusters
   - triggers:
       - on_prometheus_alert:
@@ -132,7 +138,13 @@ priorityBuiltinPlaybooks:
           k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
     actions:
       - name_silencer:
-          names: ["etcdInsufficientMembers", "etcdMembersDown", "NodeClockNotSynchronising", "PrometheusTSDBCompactionsFailing"]
+          names:
+            [
+              "etcdInsufficientMembers",
+              "etcdMembersDown",
+              "NodeClockNotSynchronising",
+              "PrometheusTSDBCompactionsFailing",
+            ]
   # Silences for specific providers
   - triggers:
       - on_prometheus_alert:
@@ -415,14 +427,19 @@ builtinPlaybooks:
           item_type: Node
   - triggers:
       - on_prometheus_alert:
-          alert_name: NodeFilesystemSpaceFillingUp
-      - on_prometheus_alert:
-          alert_name: NodeFilesystemAlmostOutOfSpace
+          alert_name: KubePersistentVolumeFillingUp
     actions:
-      - node_disk_analyzer: {}
-      - alert_graph_enricher:
-          resource_type: Disk
-          item_type: Node
+      - prometheus_pvc_event_enricher: {}
+    sinks:
+      - "nudgebee_webhook_sink"
+
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubernetesVolumeOutOfDiskSpace
+    actions:
+      - prometheus_pvc_event_enricher: {}
+    sinks:
+      - "nudgebee_webhook_sink"
   - triggers:
       - on_prometheus_alert:
           alert_name: CPUThrottlingHigh
@@ -667,14 +684,14 @@ runner:
     - name: CLICKHOUSE_HOST
       value: nudgebee-agent-clickhouse
     - name: CLICKHOUSE_PORT
-      value: '8123'
+      value: "8123"
     - name: CLICKHOUSE_USER
       value: default
     - name: CLICKHOUSE_DB
       value: default
   nudgebee:
     endpoint: https://collector.nudgebee.com
-    publish_window: '3600'
+    publish_window: "3600"
     auth_secret_key: ""
   serviceAccount:
     annotations: {}
