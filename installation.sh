@@ -221,8 +221,3 @@ if [ -z "$loki_url" ]; then
     echo "Log provider not found..!"
     echo "${RED}Please configure Loki/ELK as log provider by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/logging/${NC}"
 fi
-
-# if existing prometheus then provide link to configure alert manager, scrape config and additionalRulesMap
-if [ "$existingPrometheus" = true ]; then
-    echo "${RED}Please configure alert manager, scrape config and alert rules by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/existing-prometheus/${NC}"
-fi

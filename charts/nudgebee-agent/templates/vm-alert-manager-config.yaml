@@ -1,0 +1,19 @@
+{{- if (and (default false .Values.runner.victoria_metrics_enabled) (default false .Values.alertmanager.create_nb_alert_config)) }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAlertmanagerConfig
+metadata:
+  name: {{ .Release.Name }}-alert-config
+  namespace: {{ .Release.Namespace }}
+spec:
+  receivers:
+    - name: "nudgebee-agent"
+      webhook_configs:
+        - url: "http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc/api/alerts"
+          send_resolved: true
+  route:
+    receiver: "nudgebee-agent"
+    matchers:
+      - severity=~".*"
+    group_by: ["..."]  # Consider ["severity"] if needed
+    repeat_interval: 1h
+{{- end }}
