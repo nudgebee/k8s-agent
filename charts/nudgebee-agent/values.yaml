@@ -758,13 +758,13 @@ opentelemetry-collector:
           key: admin-password
   ports:
     jaeger-compact:
-      enabled: false
+      enabled: true
     jaeger-thrift:
-      enabled: false
+      enabled: true
     jaeger-grpc:
-      enabled: false
+      enabled: true
     zipkin:
-      enabled: false
+      enabled: true
   config:
     processors:
       batch:
@@ -791,7 +791,7 @@ opentelemetry-collector:
         traces:
           processors: [batch]
           exporters: [clickhouse]
-          receivers: [otlp]
+          receivers: [jaeger, zipkin, otlp]
         logs:
           processors: [batch]
           exporters: [clickhouse]
@@ -799,7 +799,7 @@ opentelemetry-collector:
         metrics:
           processors: [batch]
           exporters: [clickhouse]
-          receivers: [otlp]
+          receivers: [prometheus, otlp]
 clickhouse:
   persistence:
     size: 50Gi
