@@ -1,0 +1,19 @@
+{{- if (and (not .Values.runner.victoria_metrics_enabled) (.Values.alertmanager.create_nb_alert_config)) }}
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: {{ .Release.Name }}-alert-config
+  namespace: {{ .Release.Namespace }}
+spec:
+  route:
+    groupBy: []
+    repeatInterval: 1h
+    receiver: 'nudgebee-agent'
+  receivers:
+  - name: 'nudgebee-agent'
+    matchers:
+    - severity=~".*"
+    webhookConfigs:
+    - url: 'http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc/api/alerts'
+      sendResolved: true
+{{- end }}

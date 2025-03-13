@@ -1,0 +1,68 @@
+{{- if (and (not (default false .Values.runner.victoria_metrics_enabled)) (default false .Values.alertmanager.create_nb_default_rules)) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}.rules
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: kubernetes-apps
+      rules:
+        - alert: KubeHpaMaxedOut
+          expr: >-
+            kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics"} 
+              == 
+            kube_horizontalpodautoscaler_spec_max_replicas{job="kube-state-metrics"}
+            > 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            description: >-
+              HPA {{`{{ $labels.namespace }}`}}/{{`{{ $labels.horizontalpodautoscaler }}`}} 
+              has been running at max replicas for longer than 15 minutes.
+            summary: HPA is running at max replicas
+        - alert: HighErrorCriticalLogs
+          expr: >-
+            increase(container_log_messages_total{level=~"error|critical",
+            container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1).*"}[5m])
+            > 1
+          for: 5m
+          annotations:
+            summary: High error and critical log messages
+            description: >-
+              The total count of container log messages with error or critical
+              level is higher for the past 5 minutes, grouped by container_id.
+              Container ID: {{`{{ $labels.container_id }}`}}
+              Log Sample: {{`{{ $labels.sample }}`}}
+              Failure Count: {{`{{ printf "%.0f" $value }}`}}
+          labels:
+            severity: critical
+        - alert: ApplicationAPIFailures
+          expr: >-
+            increase(container_http_requests_total{container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*",
+            status=~"5..|4.."}[5m]) > 1
+          for: 5m
+          annotations:
+            summary: High API Failures
+            description: |
+              Application reported API failure 
+              Container ID: {{`{{ $labels.container_id }}`}}
+              Request Path: {{`{{ $labels.path }}`}}
+              Request Method: {{`{{ $labels.method }}`}}
+              Failure Count: {{`{{ printf "%.0f" $value }}`}}
+          labels:
+            severity: critical
+        - alert: KubePodStuckTerminating
+          expr: >-
+            count(kube_pod_deletion_timestamp) by (namespace, pod) *
+            count(kube_pod_status_reason{reason="NodeLost"} == 0) by
+            (namespace, pod) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Pod stuck in terminating state
+            description: >-
+              Pod {{`{{$labels.namespace}}`}}/{{`{{$labels.pod}}`}} blocked in Terminating state.
+{{- end }}
