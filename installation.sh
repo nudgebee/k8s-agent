@@ -202,15 +202,7 @@ if [ -z "$prometheus_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-
-        # Check if the rohit-monitoring namespace already exists
-        if kubectl get namespace rohit-monitoring &> /dev/null; then
-            echo "ℹ️ Using existing 'rohit-monitoring' namespace."
-        else
-            echo "ℹ️ Creating 'rohit-monitoring' namespace."
-            kubectl create namespace rohit-monitoring
-        fi
-
+        
         helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n rohit-monitoring --set nodeExporter.enabled=true --set pushgateway.enabled=false --set alertmanager.enabled=true --set kubeStateMetrics.enabled=true --set grafana.enabled=true -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
         prometheus_url="http://nudgebee-prometheus-kube-p-prometheus.rohit-monitoring.svc:9090"
         grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.rohit-monitoring.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
