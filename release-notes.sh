@@ -13,7 +13,7 @@ ECR_REPOS=(
   "krr-public:.runner.krr_image_override"
   "nova:.runner.nova_image_override"
   "kubewatch:.kubewatch.image.tag"
-  "nudgebee_runbook_sidecar_agent:.runner.runbook_sidecar_image_tag"w
+  "nudgebee_runbook_sidecar_agent:.runner.runbook_sidecar_image_tag"
 )
 
 # Matching GitHub repositories (index-based mapping)
