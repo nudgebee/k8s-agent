@@ -105,6 +105,7 @@ lightActions:
   - kubectl_command_executor
   - list_k8s_pdb
   - k8s_helm_compatibility_check
+  - pod_node_metrics_enricher
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
