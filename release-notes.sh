@@ -72,7 +72,7 @@ for i in "${!IMAGE_REPOS[@]}"; do
 
   echo "Fetching commits for $GITHUB_REPO..."
 
-  echo "curl -s -H \"Authorization: token $GITHUB_TOKEN\" \
+  echo "curl -s -H \"Authorization: token <REDACTED>\" \
                      -H \"Accept: application/vnd.github.v3+json\" \
                      \"https://api.github.com/repos/$GITHUB_REPO/commits?sha=$COMMIT_HASH&per_page=5\""
                      
