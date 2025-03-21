@@ -8,13 +8,14 @@ openshift_enable=""
 additional_secret=""
 prometheus_url=""
 opencost_service_url=""
-namespace="nudgebee-agent"
+namespace="nudgebee-agent" 
 agent_name="nudgebee-agent"
 env="prod"
 disable_node_agent=""
 values=""
 alert_manager_url=""
 prometheus_org_id=""
+
 # Help function
 usage() {
   echo "Usage: $0 [-a <auth_key>] [-k <k8s_context>] [-o <openshift_enable>] [-p <prometheus_url>] [-s <additional_secret>]"
@@ -123,6 +124,21 @@ getPrometheusURL() {
     echo ""
 }
 
+# Check Kubernetes node kernel versions
+echo "Checking Kubernetes node kernel versions..."
+NODE_KERNEL_VERSIONS=$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kernelVersion}')
+MIN_KERNEL_VERSION="4.16"
+
+for kernel_version in $NODE_KERNEL_VERSIONS; do
+    KERNEL_MAJOR_MINOR=$(echo "$kernel_version" | cut -d. -f1-2)
+    if (( $(echo "$KERNEL_MAJOR_MINOR < $MIN_KERNEL_VERSION" | bc -l) )); then
+        echo "Error: Node with kernel version $kernel_version is less than $MIN_KERNEL_VERSION. Node Agent will not be installed on this node."
+        disable_node_agent="true"
+    else
+        echo "Node kernel version $kernel_version is compatible."
+    fi
+done
+
 # Check if kubectl is installed
 if ! command -v kubectl &> /dev/null; then
     echo "Error: kubectl is not installed. You can install it by following the instructions at:"
@@ -136,6 +152,8 @@ if ! command -v helm &> /dev/null; then
     echo "https://helm.sh/docs/intro/install/"
     exit 1
 fi
+
+# Check for existing Prometheus
 if [ -z "$prometheus_url" ]; then
     prometheus_selectors=(
             "app=kube-prometheus-stack-prometheus"
@@ -145,18 +163,27 @@ if [ -z "$prometheus_url" ]; then
     )
     prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
 fi
+
 existingPrometheus=false
 grafana_command=""
 # Check if service_url is empty
 if [ -z "$prometheus_url" ]; then
    echo "Prometheus not found..!"
-   read -p "Installing Prometheus using helm , do you want to continue? (yes/no): " install_prometheus
+   read -p "Installing Prometheus using helm, do you want to continue? (yes/no): " install_prometheus
     if [ "$install_prometheus" == "yes" ]; then
         # Add Helm installation command here or instructions
         helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
         helm repo update
-        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack -n $namespace --create-namespace --set nodeExporter.enabled=true --set pushgateway.enabled=false --set alertmanager.enabled=true --set kubeStateMetrics.enabled=true --set grafana.enabled=true -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
-        prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
+        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
+            -n $namespace --create-namespace \
+            --set nodeExporter.enabled=true \
+            --set nodeExporter.service.targetPort=9101 \
+            --set pushgateway.enabled=false \
+            --set alertmanager.enabled=true \
+            --set kubeStateMetrics.enabled=true \
+            --set grafana.enabled=true \
+            -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
+        prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"  # Prometheus uses default port 9090
         grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
     else
         echo "Prometheus installation not requested. Exiting."
@@ -197,18 +224,17 @@ if [ -n "$alert_manager_url" ]; then
 fi
 
 prometheus_org_id_command=""
-echo "Prometheus org id: $prometheus_org_id"
 if [ -n "$prometheus_org_id" ]; then
   prometheus_org_id_command=" --set globalConfig.prometheus_headers='X-Scope-OrgID: $prometheus_org_id' --set globalConfig.alertmanager_headers='X-Scope-OrgID: $prometheus_org_id' --set opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
 fi
 
 # Use helm upgrade --install to either install or upgrade the Helm chart
-a="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key="$auth_key" --set globalConfig.prometheus_url="$prometheus_url" --set opencost.opencost.prometheus.external.url="$prometheus_url" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command $alert_manager_url_command $prometheus_org_id_command"
+a="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key=\"$auth_key\" --set globalConfig.prometheus_url=\"$prometheus_url\" --set opencost.opencost.prometheus.external.url=\"$prometheus_url\" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command $alert_manager_url_command $prometheus_org_id_command"
 
 echo "Running command: $a"
 eval $a
 
-# discover loki as log server if not found then provide link to nudgebee doc to configure log provider
+# Discover Loki as log server if not found, then provide link to nudgebee doc to configure log provider
 loki_selectors=(
         "app=loki"
         "app.kubernetes.io/instance=loki"
@@ -219,5 +245,35 @@ NC='\033[0m'
 loki_url=$(getPrometheusURL "${loki_selectors[@]}")
 if [ -z "$loki_url" ]; then
     echo "Log provider not found..!"
-    echo "${RED}Please configure Loki/ELK as log provider by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/logging/${NC}"
+    read -p "Installing Loki using helm, do you want to continue? (yes/no): " install_loki
+    if [ "$install_loki" == "yes" ]; then
+        # Add Helm installation command here or instructions
+        helm repo add grafana https://grafana.github.io/helm-charts
+        helm repo update
+        helm upgrade --install nudgebee-loki grafana/loki-stack -n $namespace --create-namespace --set loki.persistence.enabled=true --set loki.persistence.size=10Gi --set promtail.enabled=true
+        loki_url="http://nudgebee-loki:3100"
+    else
+        echo "Loki installation not requested. Node Agent will still be installed."
+    fi
+else
+    echo "Please configure NudgeBee to connect to your existing Loki instance by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/logging/"
 fi
+
+# Check for ClickHouse PVC requirements
+echo "NudgeBee requires PVCs for ClickHouse. If your environment does not support automatic PVC creation, you will need to create them manually."
+
+# Check installation status of each component
+echo "Checking installation status..."
+components=("prometheus" "loki" "clickhouse" "$agent_name")
+for component in "${components[@]}"; do
+    if kubectl get pods -n $namespace | grep -q "$component"; then
+        echo "$component installed successfully."
+    else
+        echo "$component installation failed."
+        echo "Possible reasons for failure:"
+        echo "1. Insufficient resources."
+        echo "2. Missing dependencies."
+        echo "3. Configuration errors."
+        echo "Please refer to the NudgeBee documentation for troubleshooting: https://app.nudgebee.com/help/docs/installation/agent/installation/"
+    fi
+done
