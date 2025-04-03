@@ -106,6 +106,9 @@ lightActions:
   - list_k8s_pdb
   - k8s_helm_compatibility_check
   - pod_node_metrics_enricher
+  - api_traces_enricher
+  - neighboring_connected_logs_enricher
+  - api_traces_enricher_v2
 
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
@@ -500,6 +503,9 @@ builtinPlaybooks:
       - logs_enricher: {}
       - pod_enricher: {}
       - api_failure_enricher: {}
+      - api_traces_enricher: {}
+      - neighboring_connected_logs_enricher:
+          tail_lines: 100
   - triggers:
       - on_kubernetes_warning_event_create:
           include: ["SpotInterruption"]
