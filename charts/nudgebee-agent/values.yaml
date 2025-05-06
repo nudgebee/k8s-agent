@@ -315,7 +315,7 @@ builtinPlaybooks:
       - logs_enricher:
           previous: true
       - pod_events_enricher: {}
-      - pod_enricher: {} 
+      - pod_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: PrometheusRuleFailures
