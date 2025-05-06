@@ -250,7 +250,7 @@ customPlaybooks:
   - triggers:
       - on_schedule:
           cron_schedule_repeat:
-            cron_expression: "0 12 * * 1" # every hour
+            cron_expression: "0 */4 * * *" # every 4 hour
     actions:
       - volume_analyzer: {}
   - triggers:
