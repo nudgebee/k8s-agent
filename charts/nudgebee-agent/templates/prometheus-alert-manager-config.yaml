@@ -14,6 +14,6 @@ spec:
     matchers:
     - severity=~".*"
     webhookConfigs:
-    - url: 'http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc/api/alerts'
+    - url: 'http://{{ .Release.Name }}-runner.{{ .Release.Namespace }}.svc/api/alerts'
       sendResolved: true
 {{- end }}
