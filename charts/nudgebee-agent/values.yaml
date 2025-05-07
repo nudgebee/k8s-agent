@@ -730,8 +730,8 @@ nodeAgent:
     tag: 2024-08-28T08-47-49_ed065a712c7d7ab1f1b4b463f483de26d62d5556
   resources:
     requests:
-      cpu: "50m"
-      memory: "50Mi"
+      cpu: "100m"
+      memory: "500Mi"
     limits:
       cpu: "1"
       memory: "1Gi"
