@@ -109,7 +109,8 @@ lightActions:
   - api_traces_enricher
   - neighboring_connected_logs_enricher
   - api_traces_enricher_v2
-
+  - pod_metric_enricher
+  - neighboring_workload_health_enricher
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: true
@@ -276,7 +277,8 @@ builtinPlaybooks:
       - report_crash_loop: {}
       - resource_events_enricher: {}
       - pod_enricher: {}
-      - logs_enricher: {}
+      - logs_enricher:
+          previous: true
       - impacted_services_enricher: {}
   - triggers:
       - on_image_pull_backoff: {}
@@ -290,7 +292,8 @@ builtinPlaybooks:
           rate_limit: 3600
     actions:
       - pod_oom_killer_enricher: {}
-      - logs_enricher: {}
+      - logs_enricher:
+          previous: true
       - noisy_neighbours_enricher:
           resource_type: Memory
       - oomkilled_container_matrix_enricher:
@@ -305,6 +308,14 @@ builtinPlaybooks:
       - pod_node_event_enricher: {}
     stop: true
   # playbooks for prometheus alerts enrichment
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: KubePodCrashLooping
+    actions:
+      - logs_enricher:
+          previous: true
+      - pod_events_enricher: {}
+      - pod_enricher: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: PrometheusRuleFailures
@@ -582,6 +593,13 @@ builtinPlaybooks:
       - node_running_pods_enricher: {}
       - status_enricher:
           show_details: true
+  - triggers:
+      - on_prometheus_alert:
+          alert_name: TCPConnectionFailure
+    actions:
+      - logs_enricher: {}
+      - pod_enricher: {}
+      - tcp_connection_failure_enricher: {}
 # parameters for the nudgebee forwarder deployment
 kubewatch:
   image:
@@ -712,8 +730,8 @@ nodeAgent:
     tag: 2024-08-28T08-47-49_ed065a712c7d7ab1f1b4b463f483de26d62d5556
   resources:
     requests:
-      cpu: "50m"
-      memory: "50Mi"
+      cpu: "100m"
+      memory: "500Mi"
     limits:
       cpu: "1"
       memory: "1Gi"
