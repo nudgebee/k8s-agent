@@ -297,3 +297,6 @@ stringData:
   {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
   CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}
   {{- end }}
+  {{- if and .Values.runner.trace_table .Values.runner.trace_table }}
+  TRACE_TABLE: {{ .Values.runner.trace_table }}
+  {{- end }}
