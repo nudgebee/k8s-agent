@@ -15,8 +15,11 @@ spec:
         {{- include "node-agent.selectorLabels" . | nindent 8 }}
         app: nudgebee-node-agent
       annotations:
-        {{- if .Values.nodeAgent.annotations }}
-        {{- toYaml .Values.nodeAgent.annotations | nindent 8 }}
+        {{- if .Values.nodeAgent.podAnnotations }}
+        {{ toYaml .Values.nodeAgent.podAnnotations | nindent 8 }}
+        {{- end }}
+        {{- if .Values.globalConfig.custom_annotations }}
+        {{ toYaml .Values.globalConfig.custom_annotations | nindent 8 }}
         {{- end }}
         prometheus.io/scrape: 'true'
         prometheus.io/port: '80'
