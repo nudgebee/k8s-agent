@@ -9,6 +9,14 @@
 
 Thank you for installing {{ .Chart.Name | title }} {{ .Chart.AppVersion }}
 
-Visit the web UI at: https://app.nudgebee.com
+{{- if eq .Values.nudgebee.endpoint "https://collector.nudgebee.com" }}
+Visit the web UI at:
+  https://app.nudgebee.com
+{{- else }}
+Please visit Nudgebee App.
+Your Nudgebee app URL depends on your specific configuration. Examples could include:
+  - A local Kubernetes service address (e.g., 'app.nudgebee.svc.cluster.local' if running in the same cluster).
+  - A custom DNS entry (e.g., 'nudgebee.yourcompany.com' if you've configured a specific DNS).
+{{- end }}
 
 ============================================================================
