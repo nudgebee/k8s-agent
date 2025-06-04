@@ -15,7 +15,7 @@ globalConfig:
   prometheus_url: ""
   account_id: ""
   signing_key: ""
-  custom_annotations: []
+  custom_annotations: {}
   regex_replacement_style: SAME_LENGTH_ASTERISKS
   regex_replacer_patterns:
     - name: JWT
@@ -724,6 +724,7 @@ nodeAgent:
   enabled: true
   podmonitor:
     enabled: true
+  podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
@@ -738,7 +739,6 @@ nodeAgent:
   imagePullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
-  podAnnotations: {}
   priorityClassName: ""
   logsEndpoint: ""
   profilesEndpoint: ""
