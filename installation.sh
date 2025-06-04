@@ -87,6 +87,23 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:" opt; do
   esac
 done
 
+# If a values file is provided AND auth_key is not already set by -a, try to extract auth_key from it
+if [ -z "$auth_key" ] && [ -n "$values" ] && [ -f "$values" ]; then
+  echo "No auth key via -a. Checking values file: $values..."
+  # Extract the auth_secret_key using grep and sed
+  # This handles potential spaces and quotes around the key and value
+  extracted_key=$(grep -A 2 '^\s*nudgebee:$' "$values" | grep -A 1 '^\s*auth_secret_key:' | grep '^\s*auth_secret_key:' | sed -e 's/^\s*auth_secret_key:\s*//' -e 's/^"\(.*\)"$//' -e "s/^'\(.*\)'$/\1/")
+
+  if [ -n "$extracted_key" ]; then
+    echo "Auth key successfully read from $values."
+    auth_key="$extracted_key"
+  else
+    echo "Auth key not found at runner.nudgebee.auth_secret_key in $values."
+  fi
+elif [ -n "$auth_key" ] && [ -n "$values" ] && [ -f "$values" ]; then
+  echo "Using auth key from -a flag (overrides key in $values if present)."
+fi
+
 # Check if an access key is provided
 if [ -z "$auth_key" ]; then
   echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."

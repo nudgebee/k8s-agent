@@ -1,0 +1,3 @@
+runner:
+  nudgebee:
+    auth_secret_key: "token_from_file"
