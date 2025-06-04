@@ -1,3 +1,5 @@
 .idea
 /charts/*/charts
 **/Chart.lock
+test_values.yaml
+empty_values.yaml
