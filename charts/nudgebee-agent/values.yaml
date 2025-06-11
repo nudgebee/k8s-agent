@@ -772,6 +772,12 @@ openshift:
   privilegedSccPriority: null
 opentelemetry-collector:
   enabled: true
+  resources:
+    limits:
+      memory: 1024Mi
+    requests:
+      cpu: 250m
+      memory: 512Mi
   mode: deployment
   extraEnvs:
     - name: CLICKHOUSE_PASSWORD
