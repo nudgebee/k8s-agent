@@ -87,6 +87,75 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:" opt; do
   esac
 done
 
+# Function to extract values from YAML file
+extract_yaml_value() {
+    local file="$1"
+    local key="$2"
+    if [ -f "$file" ]; then
+        # yq is guaranteed to be available when values file is provided
+        local value=$(yq eval ".$key" "$file" 2>/dev/null)
+        # Return value only if it's not null or empty
+        if [ -n "$value" ] && [ "$value" != "null" ]; then
+            echo "$value"
+        fi
+    fi
+}
+
+# If values file is provided, extract prometheus_url and auth_key from it
+if [ -n "$values" ] && [ -f "$values" ]; then
+    echo "Reading configuration from values file: $values"
+    
+    # Extract prometheus_url from values file if not set via command line
+    if [ -z "$prometheus_url" ]; then
+        values_prometheus_url=$(extract_yaml_value "$values" "globalConfig.prometheus_url")
+        if [ -n "$values_prometheus_url" ] && [ "$values_prometheus_url" != "\"\"" ] && [ "$values_prometheus_url" != "''" ]; then
+            prometheus_url="$values_prometheus_url"
+            echo "Using prometheus_url from values file: $prometheus_url"
+        fi
+    fi
+    
+    # Extract auth_key from values file if not set via command line
+    if [ -z "$auth_key" ]; then
+        values_auth_key=$(extract_yaml_value "$values" "runner.nudgebee.auth_secret_key")
+        if [ -n "$values_auth_key" ] && [ "$values_auth_key" != "\"\"" ] && [ "$values_auth_key" != "''" ]; then
+            auth_key="$values_auth_key"
+            echo "Using auth_secret_key from values file"
+        fi
+    fi
+    
+    # Extract alert_manager_url from values file if not set via command line
+    if [ -z "$alert_manager_url" ]; then
+        values_alert_manager_url=$(extract_yaml_value "$values" "globalConfig.alertmanager_url")
+        if [ -n "$values_alert_manager_url" ] && [ "$values_alert_manager_url" != "\"\"" ] && [ "$values_alert_manager_url" != "''" ]; then
+            alert_manager_url="$values_alert_manager_url"
+            echo "Using alert_manager_url from values file: $alert_manager_url"
+        fi
+    fi
+    
+    # Extract openshift_enable from values file if not set via command line
+    if [ -z "$openshift_enable" ]; then
+        values_openshift_enable=$(extract_yaml_value "$values" "openshift.enabled")
+        if [ -n "$values_openshift_enable" ] && [ "$values_openshift_enable" != "\"\"" ] && [ "$values_openshift_enable" != "''" ]; then
+            openshift_enable="$values_openshift_enable"
+            echo "Using openshift.enabled from values file: $openshift_enable"
+        fi
+    fi
+    
+    # Extract disable_node_agent from values file if not set via command line (inverted logic)
+    if [ -z "$disable_node_agent" ]; then
+        values_node_agent_enabled=$(extract_yaml_value "$values" "nodeAgent.enabled")
+        if [ -n "$values_node_agent_enabled" ] && [ "$values_node_agent_enabled" != "\"\"" ] && [ "$values_node_agent_enabled" != "''" ]; then
+            # Invert the logic: if nodeAgent.enabled is false, then disable_node_agent should be true
+            if [ "$values_node_agent_enabled" = "false" ]; then
+                disable_node_agent="true"
+                echo "Using nodeAgent.enabled from values file (disabled)"
+            else
+                echo "Using nodeAgent.enabled from values file (enabled)"
+            fi
+        fi
+    fi
+fi
+
 # Check if an access key is provided
 if [ -z "$auth_key" ]; then
   echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."
@@ -150,6 +219,15 @@ fi
 if ! command -v helm &> /dev/null; then
     echo "Error: Helm is not installed. You can install it by following the instructions at:"
     echo "https://helm.sh/docs/intro/install/"
+    exit 1
+fi
+
+# Check if yq is installed when values file is provided
+if [ -n "$values" ] && ! command -v yq &> /dev/null; then
+    echo "Error: yq is not installed but is required for parsing values file."
+    echo "You can install yq by following the instructions at:"
+    echo "https://github.com/mikefarah/yq#install"
+    echo "Or provide configuration via command line arguments instead."
     exit 1
 fi
 
