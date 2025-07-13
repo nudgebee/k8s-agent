@@ -796,9 +796,35 @@ opentelemetry-collector:
       enabled: false
   config:
     processors:
+      probabilistic_sampler:
+        sampling_percentage: 10
+      filter/drop_namespaces:
+        error_mode: ignore
+        traces:
+          span:
+            - attributes["k8s.namespace.name"] == "kube-system"
+      filter/drop_health_check:
+        error_mode: ignore
+        traces:
+          span:
+            - attributes["http.route"] == "/health"
+            - attributes["http.route"] == "/healthz"
+            - attributes["http.route"] == "/live"
+            - attributes["http.route"] == "/ready"
+            - attributes["http.route"] == "/metrics"
+            - attributes["http.target"] == "/health"
+            - attributes["http.target"] == "/healthz"
+            - attributes["http.target"] == "/live"
+            - attributes["http.target"] == "/ready"
+            - attributes["http.target"] == "/metrics"
+            - attributes["url.path"] == "/health"
+            - attributes["url.path"] == "/healthz"
+            - attributes["url.path"] == "/live"
+            - attributes["url.path"] == "/ready"
+            - attributes["url.path"] == "/metrics"
       batch:
         timeout: 5s
-        send_batch_size: 100000
+        send_batch_size: 25000
     exporters:
       clickhouse:
         endpoint: tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4
@@ -818,7 +844,7 @@ opentelemetry-collector:
     service:
       pipelines:
         traces:
-          processors: [batch]
+          processors: [filter/drop_namespaces, filter/drop_health_check, probabilistic_sampler, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
