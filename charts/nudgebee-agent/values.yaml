@@ -447,7 +447,6 @@ builtinPlaybooks:
       - prometheus_pvc_event_enricher: {}
     sinks:
       - "nudgebee_webhook_sink"
-
   - triggers:
       - on_prometheus_alert:
           alert_name: KubernetesVolumeOutOfDiskSpace
@@ -518,13 +517,6 @@ builtinPlaybooks:
       - neighboring_connected_logs_enricher:
           tail_lines: 100
   - triggers:
-      - on_kubernetes_warning_event_create:
-          include: ["SpotInterruption"]
-    actions:
-      - event_report: {}
-      - event_resource_events: {}
-      - node_running_pods_event_enricher: {}
-  - triggers:
       - on_prometheus_alert:
           alert_name: PodMemoryReachingLimit
     actions:
@@ -540,22 +532,6 @@ builtinPlaybooks:
     actions:
       - node_semantic_version_mismatch_enricher: {}
   - triggers:
-      - on_kubernetes_warning_event_create:
-          include: ["Liveness", "Readiness"]
-    actions:
-      - event_resource_enricher: {}
-      - event_logs_enricher: {}
-      - event_metric_enricher:
-          resource_type: Memory
-      - event_metric_enricher:
-          resource_type: CPU
-  - triggers:
-      - on_kubernetes_normal_event_create:
-          exclude: ["NodeSysctlChange"]
-    actions:
-      - event_report: {}
-      - event_resource_events: {}
-  - triggers:
       - on_prometheus_alert:
           alert_name: KubePersistentVolumeFillingUp
     actions:
@@ -565,18 +541,6 @@ builtinPlaybooks:
           alert_name: KubernetesVolumeOutOfDiskSpace
     actions:
       - prometheus_pvc_event_enricher: {}
-  - triggers:
-      - on_prometheus_alert:
-          alert_name: PostgreSQLCacheHitRatio
-    actions:
-      - pg_health_enricher:
-          secret_name: pg-secret
-          secret_namespace: nudgebee-agent
-      - pg_run_queries:
-          secret_name: pg-secret
-          secret_namespace: nudgebee-agent
-          queries:
-            - "SELECT relname AS table_name, heap_blks_read, heap_blks_hit, (heap_blks_hit::float / (heap_blks_hit + heap_blks_read + 1)) * 100 AS cache_hit_ratio FROM pg_statio_user_tables where heap_blks_read > 0 ORDER BY cache_hit_ratio asc limit 50"
   - triggers:
       - on_prometheus_alert:
           alert_name: NodeMemoryHighUtilization
