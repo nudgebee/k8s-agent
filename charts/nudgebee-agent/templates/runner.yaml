@@ -26,110 +26,9 @@ spec:
     spec:
       serviceAccountName: {{ .Release.Name }}-runner-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
-      {{- if .Values.runner.imagePullSecrets }}
-      imagePullSecrets:
-      {{- toYaml .Values.runner.imagePullSecrets | nindent 6 }}
-      {{- end }}
+      {{- include "nudgebee.runner.imagePullSecrets" (dict "root" . "config" .Values.runner) | nindent 6 }}
       containers:
-      - name: runner
-        image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
-        imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities: {}
-          privileged: false
-          readOnlyRootFilesystem: false
-        env:
-          - name: PLAYBOOKS_CONFIG_FILE_PATH
-            value: /etc/robusta/config/active_playbooks.yaml
-          - name: RELEASE_NAME
-            value: {{ .Release.Name | quote }}
-          - name: PROMETHEUS_ENABLED
-            value: {{ .Values.enablePrometheusStack | quote}}
-          - name: SEND_ADDITIONAL_TELEMETRY
-            value: {{ .Values.runner.sendAdditionalTelemetry | quote }}
-          - name: LOG_LEVEL
-            value: {{ .Values.runner.log_level }}
-          - name: INSTALLATION_NAMESPACE
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.namespace
-          {{- if .Values.disableCloudRouting }}
-          - name: CLOUD_ROUTING
-            value: "False"
-          {{- end }}
-          {{- if not .Values.monitorHelmReleases }}
-          - name: DISABLE_HELM_MONITORING
-            value: "True"
-          {{- end }}
-          {{- if .Values.scaleAlertsProcessing }}
-          - name: ALERTS_WORKERS_POOL
-            value: "True"
-          {{- end }}
-          - name: RUNNER_VERSION
-            value: {{ .Chart.AppVersion }}
-          - name: KRR_IMAGE_OVERRIDE
-            value: {{ .Values.runner.krr_image_override }}
-          - name: IMAGE_REGISTRY
-            value: {{ .Values.runner.image_registry }}
-          - name: WEBSOCKET_RELAY_ADDRESS
-            value: {{ .Values.runner.relay_address }}
-          - name: PROFILE_IMAGE_TAG_OVERRIDE
-            value: {{ .Values.runner.profiler_image_override }}
-          - name: KUBEPUG_IMAGE_OVERRIDE
-            value: {{ .Values.runner.kubepug_image_override }}
-          - name: NOVA_IMAGE_OVERRIDE
-            value: {{ .Values.runner.nova_image_override }}
-          - name: RUNBOOK_SIDECAR_IMAGE
-            value: {{ .Values.runner.image_registry }}/nudgebee_runbook_sidecar_agent:{{ .Values.runner.runbook_sidecar_image_tag }}
-          {{- if .Values.runner.victoria_metrics_enabled }}
-          - name: VICTORIA_METRICS_CONFIGURED
-            value: "True"
-          {{- end }}
-          {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_secret }}
-          - name: CLICKHOUSE_PASSWORD
-            valueFrom:
-              secretKeyRef:
-                name: {{ .Release.Name }}-clickhouse
-                key: admin-password
-          {{- end }}
-          {{- if kindIs "string" .Values.runner.additional_env_vars }}
-          {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
-          {{- end }}
-          {{- if .Values.runner.additional_env_vars }}
-          {{ toYaml .Values.runner.additional_env_vars | nindent 10 }}
-          {{- end }}
-        envFrom:
-        - secretRef:
-            name: {{ .Release.Name }}-runner-secret
-            optional: true
-        {{- if .Values.runner.additional_env_froms }}
-        {{ toYaml .Values.runner.additional_env_froms | nindent  }}
-        {{- end }}
-        volumeMounts:
-          - name: auth-config-secret
-            mountPath: /etc/robusta/auth
-          - name: playbooks-config-secret
-            mountPath: /etc/robusta/config
-          {{- if .Values.playbooksPersistentVolume }}
-          - name: persistent-playbooks-storage
-            mountPath: /etc/robusta/playbooks/storage
-          {{- end }}
-          {{- with .Values.runner.extraVolumeMounts }}
-          {{- toYaml . | nindent 10 }}
-          {{- end }}  
-        lifecycle:
-          preStop:
-            exec:
-              command: ["bash", "-c", "kill -SIGINT 1"]
-        resources:
-          requests:
-            cpu: {{ .Values.runner.resources.requests.cpu }}
-            memory: {{ if .Values.isSmallCluster }}"512Mi"{{ else }}{{ .Values.runner.resources.requests.memory | quote }}{{ end }}
-          limits:
-            {{ if .Values.runner.resources.limits.memory }}memory: {{ if .Values.isSmallCluster }}"512Mi"{{ else if .Values.runner.resources.limits.memory }}{{ .Values.runner.resources.limits.memory | quote }}{{ else }}{{ .Values.runner.resources.requests.memory | quote }}{{ end }}
-            {{ end }}
-            {{ if .Values.runner.resources.limits.cpu }}cpu: {{ .Values.runner.resources.limits.cpu | quote }}{{ end }}
+      {{- include "nudgebee.runner.container" (dict "root" . "config" .Values.runner "containerName" "runner" "runnerMode" "BACKGROUND") | nindent 6 }}
       {{- if .Values.grafanaRenderer.enableContainer }}
       - name: grafana-renderer
         image: {{ .Values.grafanaRenderer.image }}
@@ -148,23 +47,7 @@ spec:
             memory: {{ if .Values.isSmallCluster }}"64Mi"{{ else if .Values.grafanaRenderer.resources.limits.memory }}{{ .Values.grafanaRenderer.resources.limits.memory | quote }}{{ else }}{{ .Values.grafanaRenderer.resources.requests.memory | quote }}{{ end }}
             {{ if .Values.grafanaRenderer.resources.limits.cpu }}cpu: {{ .Values.grafanaRenderer.resources.limits.cpu | quote }}{{ end }}
       {{- end }}
-      volumes:
-        - name: playbooks-config-secret
-          secret:
-            secretName: {{ .Release.Name }}-playbooks-config-secret
-            optional: true
-        - name: auth-config-secret
-          secret:
-            secretName: {{ .Release.Name }}-auth-config-secret
-            optional: true
-        {{- if .Values.playbooksPersistentVolume }}
-        - name: persistent-playbooks-storage
-          persistentVolumeClaim:
-            claimName: persistent-playbooks-pv-claim
-        {{- end }}
-        {{- with .Values.runner.extraVolumes }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+      {{- include "nudgebee.runner.volumes" . | nindent 6 }}
       {{- if .Values.runner.nodeSelector }}
       nodeSelector: {{ toYaml .Values.runner.nodeSelector | nindent 8 }}
       {{- end }}

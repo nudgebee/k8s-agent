@@ -129,13 +129,7 @@ priorityBuiltinPlaybooks:
           status: "all"
     actions:
       - name_silencer:
-          names:
-            [
-              "Watchdog",
-              "KubeSchedulerDown",
-              "KubeControllerManagerDown",
-              "InfoInhibitor",
-            ]
+          names: ["Watchdog", "KubeSchedulerDown", "KubeControllerManagerDown", "InfoInhibitor"]
   # Silences for small/local clusters
   - triggers:
       - on_prometheus_alert:
@@ -143,13 +137,7 @@ priorityBuiltinPlaybooks:
           k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
     actions:
       - name_silencer:
-          names:
-            [
-              "etcdInsufficientMembers",
-              "etcdMembersDown",
-              "NodeClockNotSynchronising",
-              "PrometheusTSDBCompactionsFailing",
-            ]
+          names: ["etcdInsufficientMembers", "etcdMembersDown", "NodeClockNotSynchronising", "PrometheusTSDBCompactionsFailing"]
   # Silences for specific providers
   - triggers:
       - on_prometheus_alert:
@@ -447,7 +435,6 @@ builtinPlaybooks:
       - prometheus_pvc_event_enricher: {}
     sinks:
       - "nudgebee_webhook_sink"
-
   - triggers:
       - on_prometheus_alert:
           alert_name: KubernetesVolumeOutOfDiskSpace
@@ -549,12 +536,6 @@ builtinPlaybooks:
           resource_type: Memory
       - event_metric_enricher:
           resource_type: CPU
-  - triggers:
-      - on_kubernetes_normal_event_create:
-          exclude: ["NodeSysctlChange"]
-    actions:
-      - event_report: {}
-      - event_resource_events: {}
   - triggers:
       - on_prometheus_alert:
           alert_name: KubePersistentVolumeFillingUp
@@ -720,6 +701,40 @@ runner:
     auth_secret_key: ""
   serviceAccount:
     annotations: {}
+apiServer:
+  enabled: false
+  image:
+    repository: ~  # inherits from runner.image.repository
+    tag: ~         # inherits from runner.image.tag
+  imagePullPolicy: ~  # inherits from runner.imagePullPolicy
+  log_level: ~  # inherits from runner.log_level
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1500Mi
+    limits:
+      cpu: ~
+      memory: ~
+  tolerations: []
+  annotations: {}
+  nodeSelector: ~
+  affinity: ~
+  imagePullSecrets: ~  # inherits from runner.imagePullSecrets
+  extraVolumes: []
+  extraVolumeMounts: []
+  additional_env_vars: []
+  additional_env_froms: []
+  sendAdditionalTelemetry: ~
+  krr_image_override: ~
+  image_registry: ~
+  relay_address: ~
+  profiler_image_override: ~
+  kubepug_image_override: ~
+  nova_image_override: ~
+  runbook_sidecar_image_tag: ~
+  victoria_metrics_enabled: ~
+  clickhouse_enabled: ~
+  clickhouse_secret: ~
 nodeAgent:
   enabled: true
   podmonitor:
