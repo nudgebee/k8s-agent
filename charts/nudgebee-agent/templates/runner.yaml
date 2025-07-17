@@ -47,7 +47,7 @@ spec:
             memory: {{ if .Values.isSmallCluster }}"64Mi"{{ else if .Values.grafanaRenderer.resources.limits.memory }}{{ .Values.grafanaRenderer.resources.limits.memory | quote }}{{ else }}{{ .Values.grafanaRenderer.resources.requests.memory | quote }}{{ end }}
             {{ if .Values.grafanaRenderer.resources.limits.cpu }}cpu: {{ .Values.grafanaRenderer.resources.limits.cpu | quote }}{{ end }}
       {{- end }}
-      {{- include "nudgebee.runner.volumes" . | nindent 6 }}
+      {{- include "nudgebee.runner.volumes" (dict "root" . "config" .Values.runner) | nindent 6 }}
       {{- if .Values.runner.nodeSelector }}
       nodeSelector: {{ toYaml .Values.runner.nodeSelector | nindent 8 }}
       {{- end }}

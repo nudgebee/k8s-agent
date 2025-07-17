@@ -30,7 +30,7 @@ spec:
       {{- include "nudgebee.runner.imagePullSecrets" (dict "root" . "config" .Values.apiServer) | nindent 6 }}
       containers:
       {{- include "nudgebee.runner.container" (dict "root" . "config" .Values.apiServer "containerName" "apiserver" "runnerMode" "FOREGROUND") | nindent 6 }}
-      {{- include "nudgebee.runner.volumes" . | nindent 6 }}
+      {{- include "nudgebee.runner.volumes" (dict "root" . "config" .Values.apiServer) | nindent 6 }}
       {{- if .Values.apiServer.nodeSelector }}
       nodeSelector: {{ toYaml .Values.apiServer.nodeSelector | nindent 8 }}
       {{- end }}

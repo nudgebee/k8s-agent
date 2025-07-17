@@ -217,21 +217,19 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     - name: RUNNER_BACKGROUND_SERVER_URL
       value: "http://{{ $root.Release.Name }}-runner:80"
     {{- end }}
-    {{- if $root.Values.runner.additional_env_vars }}
-    {{ toYaml $root.Values.runner.additional_env_vars | nindent 4 }}
-    {{- end }}
     {{- if and (hasKey $config "additional_env_vars") $config.additional_env_vars }}
     {{ toYaml $config.additional_env_vars | nindent 4 }}
+    {{- else if $root.Values.runner.additional_env_vars }}
+    {{ toYaml $root.Values.runner.additional_env_vars | nindent 4 }}
     {{- end }}
   envFrom:
   - secretRef:
       name: {{ $root.Release.Name }}-runner-secret
       optional: true
-  {{- if $root.Values.runner.additional_env_froms }}
-  {{ toYaml $root.Values.runner.additional_env_froms | nindent 2 }}
-  {{- end }}
   {{- if and (hasKey $config "additional_env_froms") $config.additional_env_froms }}
   {{ toYaml $config.additional_env_froms | nindent 2 }}
+  {{- else if $root.Values.runner.additional_env_froms }}
+  {{ toYaml $root.Values.runner.additional_env_froms | nindent 2 }}
   {{- end }}
   volumeMounts:
     - name: auth-config-secret
@@ -242,11 +240,12 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     - name: persistent-playbooks-storage
       mountPath: /etc/robusta/playbooks/storage
     {{- end }}
-    {{- with $root.Values.runner.extraVolumeMounts }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
     {{- if and (hasKey $config "extraVolumeMounts") $config.extraVolumeMounts }}
     {{- with $config.extraVolumeMounts }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- else }}
+    {{- with $root.Values.runner.extraVolumeMounts }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
     {{- end }}
@@ -266,24 +265,33 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
 
 {{/*
 Common runner volumes template
+Usage: include "nudgebee.runner.volumes" (dict "root" . "config" .Values.apiServer)
 */}}
 {{- define "nudgebee.runner.volumes" -}}
+{{- $root := .root }}
+{{- $config := .config }}
 volumes:
   - name: playbooks-config-secret
     secret:
-      secretName: {{ .Release.Name }}-playbooks-config-secret
+      secretName: {{ $root.Release.Name }}-playbooks-config-secret
       optional: true
   - name: auth-config-secret
     secret:
-      secretName: {{ .Release.Name }}-auth-config-secret
+      secretName: {{ $root.Release.Name }}-auth-config-secret
       optional: true
-  {{- if .Values.playbooksPersistentVolume }}
+  {{- if $root.Values.playbooksPersistentVolume }}
   - name: persistent-playbooks-storage
     persistentVolumeClaim:
       claimName: persistent-playbooks-pv-claim
   {{- end }}
-  {{- with .Values.runner.extraVolumes }}
+  {{- if and (hasKey $config "extraVolumes") $config.extraVolumes }}
+  {{- with $config.extraVolumes }}
   {{- toYaml . | nindent 2 }}
+  {{- end }}
+  {{- else }}
+  {{- with $root.Values.runner.extraVolumes }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
   {{- end }}
 {{- end }}
 
