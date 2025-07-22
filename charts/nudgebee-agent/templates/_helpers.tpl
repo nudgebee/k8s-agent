@@ -138,7 +138,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
 {{- $config := .config }}
 {{- $containerName := .containerName }}
 {{- $runnerMode := .runnerMode }}
-{{- $isDualMode := and $root.Values.apiServer.enabled (eq $containerName "runner") }}
+{{- $isDualMode := $root.Values.apiServer.enabled }}
 - name: {{ $containerName }}
   image: "{{ default $root.Values.runner.image.repository $config.image.repository }}:{{ $config.image.tag | default $root.Values.runner.image.tag | default $root.Chart.AppVersion }}"
   imagePullPolicy: {{ default $root.Values.runner.imagePullPolicy $config.imagePullPolicy }}
