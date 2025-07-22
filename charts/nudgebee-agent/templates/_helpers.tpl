@@ -138,7 +138,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
 {{- $config := .config }}
 {{- $containerName := .containerName }}
 {{- $runnerMode := .runnerMode }}
-{{- $isDualMode := and $root.Values.apiServer.enabled (eq $containerName "runner") }}
+{{- $apiServerEnabled := $root.Values.apiServer.enabled }}
 - name: {{ $containerName }}
   image: "{{ default $root.Values.runner.image.repository $config.image.repository }}:{{ $config.image.tag | default $root.Values.runner.image.tag | default $root.Chart.AppVersion }}"
   imagePullPolicy: {{ default $root.Values.runner.imagePullPolicy $config.imagePullPolicy }}
@@ -207,7 +207,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     {{- if and (hasKey $config "additional_env_vars") (kindIs "string" $config.additional_env_vars) }}
     {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
     {{- end }}
-    {{- if $isDualMode }}
+    {{- if $apiServerEnabled }}
     - name: RUNNER_DUAL_MODE_ENABLED
       value: "true"
     - name: RUNNER_MODE
