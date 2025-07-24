@@ -820,6 +820,7 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
 clickhouse:
+  enable: true
   persistence:
     size: 50Gi
   replicaCount: 1
@@ -860,6 +861,35 @@ clickhouse:
   extraVolumes:
     - name: empty-dir
       emptyDir: {}
+  metrics:
+   enabled: true
+   serviceMonitor:
+     enabled: true
+     additionalLabels:
+       release: nudgebee-agent-clickhouse-shard0
+     interval: 30s
+     scrapeTimeout: 10s
+
+   prometheusRule:
+     enabled: true
+     rules:
+       - alert: ClickHouseInstanceDown
+         expr: up{job="clickhouse"} == 0
+         for: 2m
+         labels:
+           severity: critical
+         annotations:
+           summary: "ClickHouse instance is down"
+           description: "ClickHouse node is not responding for more than 2 minutes."
+       - alert: ClickHouseHighLatency
+         expr: rate(clickhouse_query_duration_seconds_sum[5m]) / rate(clickhouse_query_duration_seconds_count[5m]) > 1
+         for: 5m
+         labels:
+           severity: warning
+         annotations:
+           summary: "High query latency detected on ClickHouse"
+           description: "Average query duration is above 1 second over last 5 minutes."
+  
 alertmanager:
   create_nb_default_rules: true
   create_nb_alert_config: true
