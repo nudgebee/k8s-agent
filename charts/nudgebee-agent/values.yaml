@@ -678,6 +678,10 @@ runner:
     url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
     apiKey: ""
     headers: ""
+  signoz:
+    enabled: false
+    url: "https://signoz.signoz.svc:8080"
+    apiKey: ""
   grafana:
     enabled: false
     url: ""
