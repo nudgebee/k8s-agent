@@ -682,6 +682,8 @@ runner:
     enabled: false
     url: "https://signoz.signoz.svc:8080"
     apiKey: ""
+    user_email: ""
+    user_password: ""
   grafana:
     enabled: false
     url: ""
