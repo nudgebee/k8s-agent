@@ -671,7 +671,7 @@ runner:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
     - name: CLICKHOUSE_HOST
-      value: nudgebee-agent-rohit-clickhouse
+      value: nudgebee-agent-clickhouse
     - name: CLICKHOUSE_PORT
       value: "8123"
     - name: CLICKHOUSE_USER
@@ -713,9 +713,10 @@ nodeAgent:
 opencost:
   enabled: true
   image:
-    registry: registry.dev.nudgebee.pollux.in
+    registry: registry.nudgebee.com
     repository: opencost
     tag: 1.114.0
+    imagePullPolicy: Always
   opencost:
     prometheus:
       external:
@@ -746,7 +747,7 @@ openshift:
 opentelemetry-collector:
   enabled: true
   image:
-    repository: registry.dev.nudgebee.pollux.in/opentelemetry-collector-contrib
+    repository: registry.nudgebee.com/opentelemetry-collector-contrib
     tag: 0.75.0
   resources:
     limits:
@@ -759,7 +760,7 @@ opentelemetry-collector:
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: nudgebee-agent-rohit-clickhouse
+          name: nudgebee-agent-clickhouse
           key: admin-password
   ports:
     jaeger-compact:
@@ -803,7 +804,7 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: tcp://nudgebee-agent-rohit-clickhouse:9000?dial_timeout=10s&compress=lz4
+        endpoint: tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4
         database: default
         ttl_days: 7
         username: default
@@ -834,7 +835,7 @@ opentelemetry-collector:
 clickhouse:
   enabled: true
   image:
-    registry: registry.dev.nudgebee.pollux.in
+    registry: registry.nudgebee.com
     repository: clickhouse
     tag: 23.3.1-debian-11-r0
   persistence:
