@@ -719,11 +719,6 @@ opencost:
         enabled: true
       internal:
         enabled: false
-      serviceMonitor:
-        enabled: true
-      defaultRules:
-        create: true
-
     service:
       labels:
         app: opencost
