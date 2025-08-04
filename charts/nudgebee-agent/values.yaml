@@ -882,8 +882,6 @@ clickhouse:
     enabled: true
     serviceMonitor:
       enabled: true
-      additionalLabels:
-        release: nudgebee-agent-clickhouse-shard0
       interval: 30s
       scrapeTimeout: 10s
 
