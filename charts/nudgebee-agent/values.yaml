@@ -623,6 +623,16 @@ kubewatch:
       coreevent: false # added on kubewatch 2.5
       ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
       rollout: true
+    sync:
+      enabled: true
+      interval: "1h"
+      compression: true
+      batchSize: 1000
+      timeoutSeconds: 180
+      workloadSnapshot:
+        enabled: true
+        includeNodes: true
+        includeServices: true
 # parameters for the renderer service used in nudgebee runner to render grafana graphs
 grafanaRenderer:
   enableContainer: false
@@ -648,7 +658,7 @@ runner:
   resources:
     requests:
       cpu: 250m
-      memory: 1500Mi
+      memory: 1000Mi
     limits:
       cpu: ~
   tolerations: []
@@ -706,7 +716,7 @@ runner:
   serviceAccount:
     annotations: {}
 apiServer:
-  enabled: false
+  enabled: true
   image:
     repository: ~  # inherits from runner.image.repository
     tag: ~         # inherits from runner.image.tag
@@ -715,7 +725,7 @@ apiServer:
   resources:
     requests:
       cpu: 250m
-      memory: 1500Mi
+      memory: 1000Mi
     limits:
       cpu: ~
       memory: ~
