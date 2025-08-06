@@ -1,8 +1,11 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ .Release.Name }}-playbooks-config-secret
+  name: {{ include "nudgebee-agent.fullname" . }}-playbooks-config-secret
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: playbooks-config
 type: Opaque
 data:
   active_playbooks.yaml: |-

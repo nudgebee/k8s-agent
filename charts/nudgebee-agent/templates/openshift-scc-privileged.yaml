@@ -2,11 +2,11 @@
 apiVersion: security.openshift.io/v1
 kind: SecurityContextConstraints
 metadata:
-  name: {{ .Release.Name }}-scc-privileged
+  name: {{ include "nudgebee-agent.fullname" . }}-scc-privileged
   labels:
-    app: {{ .Release.Name }}
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
   annotations:
-    kubernetes.io/description: {{ .Release.Name }}-scc provides the features required to run robusta enhanced debuggers for Java, Python, and node host capabilities
+    kubernetes.io/description: {{ include "nudgebee-agent.fullname" . }}-scc provides the features required to run robusta enhanced debuggers for Java, Python, and node host capabilities
 allowHostDirVolumePlugin: true
 allowHostIPC: false
 allowHostNetwork: false
