@@ -718,6 +718,11 @@ nodeAgent:
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
 opencost:
   enabled: true
+  image:
+    registry: registry.nudgebee.com
+    repository: opencost
+    tag: 1.114.0
+    imagePullPolicy: Always
   opencost:
     prometheus:
       external:
@@ -725,6 +730,11 @@ opencost:
         enabled: true
       internal:
         enabled: false
+      serviceMonitor:
+        enabled: true
+      defaultRules:
+        create: true
+
     service:
       labels:
         app: opencost
@@ -742,6 +752,9 @@ openshift:
   privilegedSccPriority: null
 opentelemetry-collector:
   enabled: true
+  image:
+    repository: registry.nudgebee.com/opentelemetry-collector-contrib
+    tag: 0.75.0
   resources:
     limits:
       memory: 1024Mi
@@ -826,6 +839,11 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
 clickhouse:
+  enabled: true
+  image:
+    registry: registry.nudgebee.com
+    repository: clickhouse
+    tag: 23.3.1-debian-11-r0
   persistence:
     size: 50Gi
   replicaCount: 1
@@ -866,6 +884,32 @@ clickhouse:
   extraVolumes:
     - name: empty-dir
       emptyDir: {}
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      scrapeTimeout: 10s
+
+    prometheusRule:
+      enabled: true
+      rules:
+        - alert: ClickHouseInstanceDown
+          expr: up{job="clickhouse"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ClickHouse instance is down"
+            description: "ClickHouse node is not responding for more than 2 minutes."
+        - alert: ClickHouseHighLatency
+          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / rate(clickhouse_query_duration_seconds_count[5m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High query latency detected on ClickHouse"
+            description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
   create_nb_alert_config: true
