@@ -2,8 +2,11 @@
 apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
-  name: {{ .Release.Name }}-alert-config
+  name: {{ include "nudgebee-agent.fullname" . }}-alert-config
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: alert-manager-config
 spec:
   route:
     groupBy: []
@@ -14,6 +17,6 @@ spec:
     matchers:
     - severity=~".*"
     webhookConfigs:
-    - url: 'http://{{ .Release.Name }}-runner.{{ .Release.Namespace }}.svc/api/alerts'
+    - url: 'http://{{ include "nudgebee-agent.fullname" . }}-runner.{{ .Release.Namespace }}.svc/api/alerts'
       sendResolved: true
 {{- end }}
