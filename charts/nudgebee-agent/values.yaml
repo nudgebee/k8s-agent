@@ -1,7 +1,6 @@
 # Global name overrides for all resources
 nameOverride: ""
 fullnameOverride: ""
-
 playbookRepos: {}
 # sinks configurations
 sinksConfig:
@@ -572,7 +571,7 @@ builtinPlaybooks:
 kubewatch:
   image:
     repository: registry.nudgebee.com/kubewatch
-    tag: 2024-08-28T07-28-49_b5953b7ede531fe295d68d67fc69c4d4668d211a
+    tag: 2025-08-05T15-21-58_244b8879e108cf4b12313d400cd3716265869344
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -629,7 +628,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2024-10-10T11-05-50_0607b6d173ea01c561ba137eb5550ffcb6bf176b
+    tag: 2025-08-07T09-49-44_97c6d46376b705df8f644dc13886e3ee4c5ec642
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -646,14 +645,14 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2024-10-10T10-52-22_0a69563a1d545e1a511c89f56db530cd420a3853
+  krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2024-05-21T04-58-42_3b8eaf503ce4fdf32fb2c78885f9f14a6ad8cf82
-  kubepug_image_override: kubepug:latest
-  nova_image_override: nova:2024-06-13T12-50-45_fb0085fcaa8fd034b482ed1acd5ba26b145a4017
+  profiler_image_override: 2025-07-07T13-38-58_d1f74934b1c71cc11eec86147cb70cf5d73bb48a
+  kubepug_image_override: kubepug:2025-08-07T09-59-31_e77f4df80074d56ce35fa8011d56728058a3bf5d
+  nova_image_override: nova:2025-07-01T11-05-25_6f69b3fb48646ead110f1c5698f72c693484f9c1
   clickhouse_enabled: true
-  clickhouse_secret: ""  # Will be set dynamically based on name overrides
-  runbook_sidecar_image_tag: prod
+  clickhouse_secret: "" # Will be set dynamically based on name overrides
+  runbook_sidecar_image_tag: 2025-07-21T07-51-41_d58044c5b587a02d37c8da4579637c78774c1a45
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -700,7 +699,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2024-08-28T08-47-49_ed065a712c7d7ab1f1b4b463f483de26d62d5556
+    tag: 2025-07-02T07-50-51_41c2ef3c0214df9bb0bb63be3d0c9ea08af29796
   resources:
     requests:
       cpu: "100m"
@@ -714,7 +713,7 @@ nodeAgent:
   priorityClassName: ""
   logsEndpoint: ""
   profilesEndpoint: ""
-  tracesEndpoint: ""  # Will be set dynamically based on name overrides
+  tracesEndpoint: "" # Will be set dynamically based on name overrides
   env:
     - name: SENSITIVE_HEADERS
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
@@ -761,7 +760,7 @@ opentelemetry-collector:
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: ""  # Will be set dynamically based on name overrides
+          name: "" # Will be set dynamically based on name overrides
           key: admin-password
   ports:
     jaeger-compact:
@@ -805,7 +804,7 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: ""  # Will be set dynamically based on name overrides
+        endpoint: "" # Will be set dynamically based on name overrides
         database: default
         ttl_days: 7
         username: default
