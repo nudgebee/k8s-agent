@@ -117,12 +117,18 @@ jobs:
           config: .github/configs/cr.yaml
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          CR_RELEASE_NAME_TEMPLATE: "Release Candidate {{ .Version }}"
+          CR_SKIP_EXISTING: "true"
 
-      - name: Mark release as pre-release
+      - name: Mark release as pre-release  
         run: |
+          # Wait a moment for release to be fully created
+          sleep 5
+          
           # Update the release to mark it as pre-release
+          echo "Marking nudgebee-agent-${{ steps.rc_version.outputs.rc_version }} as pre-release..."
           gh release edit "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}" --prerelease
+          
+          echo "✅ Successfully marked release as pre-release"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -149,8 +155,11 @@ jobs:
           This is a release candidate. Use with caution in production environments.
           EOF
           
-          # Update the release notes (the release was created by chart-releaser-action)
+          # Update both the title and notes (the release was created by chart-releaser-action)
           gh release edit "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}" \
+            --title "Release Candidate ${{ steps.rc_version.outputs.rc_version }}" \
             --notes-file release_notes.md
+          
+          echo "✅ Updated release title and notes"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
