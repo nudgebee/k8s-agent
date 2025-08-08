@@ -128,3 +128,120 @@ Selector labels
 app.kubernetes.io/name: {{ include "node-agent.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+Common runner imagePullSecrets template
+Usage: include "nudgebee.runner.imagePullSecrets" (dict "root" . "config" .Values.apiServer)
+*/}}
+{{- define "nudgebee.runner.imagePullSecrets" -}}
+{{- $root := .root }}
+{{- $config := .config }}
+{{- if or $root.Values.runner.imagePullSecrets $config.imagePullSecrets }}
+imagePullSecrets:
+{{- if $config.imagePullSecrets }}
+{{- toYaml $config.imagePullSecrets | nindent 0 }}
+{{- else }}
+{{- toYaml $root.Values.runner.imagePullSecrets | nindent 0 }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "nudgebee-agent.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create a default fully qualified app name.
+We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
+If release name contains chart name it will be used as a full name.
+*/}}
+{{- define "nudgebee-agent.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create chart name and version as used by the chart label.
+*/}}
+{{- define "nudgebee-agent.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels
+*/}}
+{{- define "nudgebee-agent.labels" -}}
+helm.sh/chart: {{ include "nudgebee-agent.chart" . }}
+{{ include "nudgebee-agent.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "nudgebee-agent.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "nudgebee-agent.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse subchart
+*/}}
+{{- define "nudgebee-agent.clickhouse.servicename" -}}
+{{- if .Values.clickhouse.fullnameOverride -}}
+{{- .Values.clickhouse.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "clickhouse" .Values.clickhouse.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+OpenTelemetry Collector service name - handles fullnameOverride/nameOverride for otel subchart
+*/}}
+{{- define "nudgebee-agent.otelcollector.servicename" -}}
+{{- if index .Values "opentelemetry-collector" "fullnameOverride" -}}
+{{- index .Values "opentelemetry-collector" "fullnameOverride" | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "opentelemetry-collector" (index .Values "opentelemetry-collector" "nameOverride") -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+OpenCost service name - handles fullnameOverride/nameOverride for opencost subchart
+*/}}
+{{- define "nudgebee-agent.opencost.servicename" -}}
+{{- if .Values.opencost.fullnameOverride -}}
+{{- .Values.opencost.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "opencost" .Values.opencost.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

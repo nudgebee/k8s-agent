@@ -1,0 +1,190 @@
+name: Release RC Charts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release-rc:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.10.0
+
+      - name: Install GitHub CLI
+        run: |
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install gh
+  
+      - name: Install AWS cli
+        uses: unfor19/install-aws-cli-action@master
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Generate RC version
+        id: rc_version
+        run: |
+          # Get current version from Chart.yaml
+          CURRENT_VERSION=$(yq '.version' charts/nudgebee-agent/Chart.yaml)
+          
+          # Find existing RC releases for this version
+          EXISTING_RCS=$(gh release list --json tagName --jq '.[] | select(.tagName | test("nudgebee-agent-'${CURRENT_VERSION}'-rc-[0-9]+$")) | .tagName' | sed 's/nudgebee-agent-'${CURRENT_VERSION}'-rc-//' | sort -n | tail -1)
+          
+          if [ -z "$EXISTING_RCS" ]; then
+            RC_NUMBER=1
+          else
+            RC_NUMBER=$((EXISTING_RCS + 1))
+          fi
+          
+          RC_VERSION="${CURRENT_VERSION}-rc-${RC_NUMBER}"
+          echo "rc_version=$RC_VERSION" >> $GITHUB_OUTPUT
+          echo "Generated RC version: $RC_VERSION"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Chart version for RC
+        run: |
+          cd charts/nudgebee-agent
+          yq -i ".version=\"${{ steps.rc_version.outputs.rc_version }}\"" Chart.yaml
+          yq -i ".appVersion=\"${{ steps.rc_version.outputs.rc_version }}\"" Chart.yaml
+    
+      - name: Update Helm Package for Nudgebee RC
+        working-directory: ./charts/nudgebee-agent
+        run: |
+          nudgebee_app_image=`aws ecr describe-images --repository-name nudgebee-agent --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags], &imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text`
+          echo "nudgebee_app_image: $nudgebee_app_image"
+          yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
+
+          nudgebee_node_image=`aws ecr describe-images --repository-name nudgebee-node-agent --filter tagStatus=TAGGED  --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_node_image: $nudgebee_node_image"
+          yq -i ".nodeAgent.image.tag=\"$nudgebee_node_image\"" values.yaml
+
+          nudgebee_profile_image=`aws ecr describe-images --repository-name nudgebee-profiler-python --filter tagStatus=TAGGED --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_profile_image: $nudgebee_profile_image"
+          yq -i ".runner.profiler_image_override=\"$nudgebee_profile_image\"" values.yaml
+
+          nudgebee_krr_image=`aws ecr describe-images --repository-name krr-public --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_krr_image: $nudgebee_krr_image"
+          yq -i ".runner.krr_image_override=\"krr-public:$nudgebee_krr_image\"" values.yaml
+          
+          nudgebee_kubepug_image=`aws ecr describe-images --repository-name kubepug --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_kubepug_image: $nudgebee_kubepug_image"
+          yq -i ".runner.kubepug_image_override=\"kubepug:$nudgebee_kubepug_image\"" values.yaml
+          
+          nudgebee_nova_image=`aws ecr describe-images --repository-name nova --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_nova_image: $nudgebee_nova_image"
+          yq -i ".runner.nova_image_override=\"nova:$nudgebee_nova_image\"" values.yaml
+          
+          nudgebee_kubewatch_image=`aws ecr describe-images --repository-name kubewatch --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags != 'null'],& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "nudgebee_kubewatch_image: $nudgebee_kubewatch_image"
+          yq -i ".kubewatch.image.tag=\"$nudgebee_kubewatch_image\"" values.yaml
+
+          runbook_sidecar_image_tag=`aws ecr describe-images --repository-name nudgebee_runbook_sidecar_agent --filter tagStatus=TAGGED --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          echo "runbook_sidecar_image_tag: $runbook_sidecar_image_tag"
+          yq -i ".runner.runbook_sidecar_image_tag=\"$runbook_sidecar_image_tag\"" values.yaml
+
+      - name: Add dependency chart repos
+        run: |
+          helm repo add opencost https://opencost.github.io/opencost-helm-chart
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo add opentelemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo update
+
+      - name: Build dependencies
+        run: |
+          cd charts/nudgebee-agent
+          helm dependency build
+
+      - name: Package Helm chart
+        run: |
+          mkdir -p .cr-release-packages
+          helm package charts/nudgebee-agent --destination .cr-release-packages
+          
+      - name: Create GitHub release as prerelease first
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}"
+          name: "Release Candidate ${{ steps.rc_version.outputs.rc_version }}"
+          body: "Initial RC release - release notes will be updated shortly"
+          prerelease: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload chart to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}"
+          files: .cr-release-packages/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Helm repository index
+        run: |
+          # Create directory structure
+          mkdir -p .cr-index
+          
+          # Download current index if it exists
+          curl -f -s -L https://github.com/${{ github.repository }}/releases/download/index/index.yaml -o .cr-index/index.yaml || echo "apiVersion: v1" > .cr-index/index.yaml
+          
+          # Update index with new chart
+          helm repo index .cr-release-packages --url https://github.com/${{ github.repository }}/releases/download/nudgebee-agent-${{ steps.rc_version.outputs.rc_version }} --merge .cr-index/index.yaml
+          mv .cr-release-packages/index.yaml .cr-index/index.yaml
+          
+      - name: Upload updated index
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "index"
+          name: "Helm Repository Index"
+          body: "Helm repository index file"
+          files: .cr-index/index.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create RC release notes
+        run: |
+          echo "## Release Candidate ${{ steps.rc_version.outputs.rc_version }}" > release_notes.md
+          echo "" >> release_notes.md
+          echo "This is a release candidate generated from the dev branch." >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Latest Images Used:" >> release_notes.md
+          echo "- Built from latest dev branch commit: ${{ github.sha }}" >> release_notes.md
+          echo "- Generated at: $(date)" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Installation:" >> release_notes.md
+          echo "\`\`\`bash" >> release_notes.md
+          echo "helm repo add nudgebee https://nudgebee.github.io/k8s-agent" >> release_notes.md
+          echo "helm repo update" >> release_notes.md
+          echo "helm install nudgebee-agent nudgebee/nudgebee-agent --version ${{ steps.rc_version.outputs.rc_version }}" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+
+      - name: Update GitHub release with RC notes
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}"
+          name: "Release Candidate ${{ steps.rc_version.outputs.rc_version }}"
+          body_path: release_notes.md
+          prerelease: true
+          append_body: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
