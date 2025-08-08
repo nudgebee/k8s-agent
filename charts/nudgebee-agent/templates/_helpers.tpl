@@ -194,11 +194,17 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     - name: VICTORIA_METRICS_CONFIGURED
       value: "True"
     {{- end }}
-    {{- if and (default $root.Values.runner.clickhouse_enabled $config.clickhouse_enabled) (default $root.Values.runner.clickhouse_secret $config.clickhouse_secret) }}
+    {{- if default $root.Values.runner.clickhouse_enabled $config.clickhouse_enabled }}
+    {{- $clickhouseSecret := default $root.Values.runner.clickhouse_secret $config.clickhouse_secret }}
+    {{- if not $clickhouseSecret }}
+      {{- $clickhouseSecret = include "nudgebee-agent.clickhouse.servicename" $root }}
+    {{- end }}
+    - name: CLICKHOUSE_HOST
+      value: {{ include "nudgebee-agent.clickhouse.servicename" $root }}
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: {{ $root.Release.Name }}-clickhouse
+          name: {{ $clickhouseSecret }}
           key: admin-password
     {{- end }}
     {{- if kindIs "string" $root.Values.runner.additional_env_vars }}
@@ -215,7 +221,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     {{- end }}
     {{- if eq $containerName "apiserver" }}
     - name: RUNNER_BACKGROUND_SERVER_URL
-      value: "http://{{ $root.Release.Name }}-runner:80"
+      value: "http://{{ include "nudgebee-agent.fullname" $root }}-runner:80"
     {{- end }}
     {{- if and (hasKey $config "additional_env_vars") $config.additional_env_vars }}
     {{ toYaml $config.additional_env_vars | nindent 4 }}
@@ -224,7 +230,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     {{- end }}
   envFrom:
   - secretRef:
-      name: {{ $root.Release.Name }}-runner-secret
+      name: {{ include "nudgebee-agent.fullname" $root }}-runner-secret
       optional: true
   {{- if and (hasKey $config "additional_env_froms") $config.additional_env_froms }}
   {{ toYaml $config.additional_env_froms | nindent 2 }}
@@ -273,11 +279,11 @@ Usage: include "nudgebee.runner.volumes" (dict "root" . "config" .Values.apiServ
 volumes:
   - name: playbooks-config-secret
     secret:
-      secretName: {{ $root.Release.Name }}-playbooks-config-secret
+      secretName: {{ include "nudgebee-agent.fullname" $root }}-playbooks-config-secret
       optional: true
   - name: auth-config-secret
     secret:
-      secretName: {{ $root.Release.Name }}-auth-config-secret
+      secretName: {{ include "nudgebee-agent.fullname" $root }}-auth-config-secret
       optional: true
   {{- if $root.Values.playbooksPersistentVolume }}
   - name: persistent-playbooks-storage
@@ -311,3 +317,103 @@ imagePullSecrets:
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "nudgebee-agent.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create a default fully qualified app name.
+We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
+If release name contains chart name it will be used as a full name.
+*/}}
+{{- define "nudgebee-agent.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create chart name and version as used by the chart label.
+*/}}
+{{- define "nudgebee-agent.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels
+*/}}
+{{- define "nudgebee-agent.labels" -}}
+helm.sh/chart: {{ include "nudgebee-agent.chart" . }}
+{{ include "nudgebee-agent.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "nudgebee-agent.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "nudgebee-agent.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse subchart
+*/}}
+{{- define "nudgebee-agent.clickhouse.servicename" -}}
+{{- if .Values.clickhouse.fullnameOverride -}}
+{{- .Values.clickhouse.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "clickhouse" .Values.clickhouse.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+OpenTelemetry Collector service name - handles fullnameOverride/nameOverride for otel subchart
+*/}}
+{{- define "nudgebee-agent.otelcollector.servicename" -}}
+{{- if index .Values "opentelemetry-collector" "fullnameOverride" -}}
+{{- index .Values "opentelemetry-collector" "fullnameOverride" | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "opentelemetry-collector" (index .Values "opentelemetry-collector" "nameOverride") -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+OpenCost service name - handles fullnameOverride/nameOverride for opencost subchart
+*/}}
+{{- define "nudgebee-agent.opencost.servicename" -}}
+{{- if .Values.opencost.fullnameOverride -}}
+{{- .Values.opencost.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "opencost" .Values.opencost.nameOverride -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
