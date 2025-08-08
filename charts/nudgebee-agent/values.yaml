@@ -132,13 +132,7 @@ priorityBuiltinPlaybooks:
           status: "all"
     actions:
       - name_silencer:
-          names:
-            [
-              "Watchdog",
-              "KubeSchedulerDown",
-              "KubeControllerManagerDown",
-              "InfoInhibitor",
-            ]
+          names: ["Watchdog", "KubeSchedulerDown", "KubeControllerManagerDown", "InfoInhibitor"]
   # Silences for small/local clusters
   - triggers:
       - on_prometheus_alert:
@@ -146,13 +140,7 @@ priorityBuiltinPlaybooks:
           k8s_providers: ["Minikube", "Kind", "RancherDesktop"]
     actions:
       - name_silencer:
-          names:
-            [
-              "etcdInsufficientMembers",
-              "etcdMembersDown",
-              "NodeClockNotSynchronising",
-              "PrometheusTSDBCompactionsFailing",
-            ]
+          names: ["etcdInsufficientMembers", "etcdMembersDown", "NodeClockNotSynchronising", "PrometheusTSDBCompactionsFailing"]
   # Silences for specific providers
   - triggers:
       - on_prometheus_alert:
@@ -571,7 +559,7 @@ builtinPlaybooks:
 kubewatch:
   image:
     repository: registry.nudgebee.com/kubewatch
-    tag: 2025-08-05T15-21-58_244b8879e108cf4b12313d400cd3716265869344
+    tag: 2025-07-04T04-38-00_2e61c1792218b6f0e6d9da6b9bd596e7ca4095df
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -628,7 +616,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-07T09-49-44_97c6d46376b705df8f644dc13886e3ee4c5ec642
+    tag: 2025-08-07T11-36-34_df0518636a73ed6a52dc2c661d8be62dfff1db88
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -645,14 +633,14 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
+  krr_image_override: krr-public:2025-06-16T04-25-05_93361fa666f6eabe55ece9c9c918c080e38b73ab
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2025-07-07T13-38-58_d1f74934b1c71cc11eec86147cb70cf5d73bb48a
-  kubepug_image_override: kubepug:2025-08-07T09-59-31_e77f4df80074d56ce35fa8011d56728058a3bf5d
-  nova_image_override: nova:2025-07-01T11-05-25_6f69b3fb48646ead110f1c5698f72c693484f9c1
+  profiler_image_override: 2025-05-06T10-08-00_1a1779d4166a81b292375a950aeb49b86ed10b33
+  kubepug_image_override: kubepug:2025-05-02T17-20-56_40e2061bb36d5371794ff61bfeb167cd83d970d1
+  nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
   clickhouse_secret: "" # Will be set dynamically based on name overrides
-  runbook_sidecar_image_tag: 2025-07-21T07-51-41_d58044c5b587a02d37c8da4579637c78774c1a45
+  runbook_sidecar_image_tag: 2025-07-28T08-03-26_3123b6ef14ea32bf8bd435036dd21c00cfe2f0d7
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -699,7 +687,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2025-07-02T07-50-51_41c2ef3c0214df9bb0bb63be3d0c9ea08af29796
+    tag: 2025-06-11T13-17-27_a452a649e7be4ef822616f5865a11abb398a37ef
   resources:
     requests:
       cpu: "100m"
