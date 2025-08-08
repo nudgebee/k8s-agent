@@ -697,8 +697,6 @@ runner:
   additional_env_vars:
     - name: POPEYE_IMAGE_OVERRIDE
       value: "popeye:v0.11.1"
-    - name: CLICKHOUSE_HOST
-      value: ""  # Will be set dynamically based on name overrides
     - name: CLICKHOUSE_PORT
       value: "8123"
     - name: CLICKHOUSE_USER
