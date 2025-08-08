@@ -684,7 +684,7 @@ runner:
   krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2025-07-07T13-38-58_d1f74934b1c71cc11eec86147cb70cf5d73bb48a
-  kubepug_image_override: kubepug:2025-08-07T09-59-31_e77f4df80074d56ce35fa8011d56728058a3bf5d
+  kubepug_image_override: kubepug:2025-08-08T11-21-51_98b5ec0890673d303bbe7fd908cf35006bd4775f
   nova_image_override: nova:2025-07-01T11-05-25_6f69b3fb48646ead110f1c5698f72c693484f9c1
   clickhouse_enabled: true
   clickhouse_secret: "" # Will be set dynamically based on name overrides
