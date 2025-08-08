@@ -792,7 +792,7 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
+        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
         database: default
         ttl_days: 7
         username: default
