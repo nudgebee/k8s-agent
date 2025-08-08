@@ -2,10 +2,14 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: nudgebee-node-agent
+  name: {{ include "nudgebee-agent.fullname" . }}-node-agent
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: node-agent
 spec:
   selector:
     matchLabels:
+      {{- include "node-agent.selectorLabels" . | nindent 6 }}
       app: nudgebee-node-agent
   podMetricsEndpoints:
     - port: http

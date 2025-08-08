@@ -1,42 +1,50 @@
-name: Release Charts
+name: Update Image Tags on PR
 
 on:
-  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - prod
+    types: [opened, synchronize, reopened]
 
 jobs:
-  release:
+  update-tags:
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+      pull-requests: write
     steps:
-      - name: Checkout
+      - name: Checkout PR branch
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref }}
 
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
-      - name: Install Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: v3.10.0
-  
-      - name: Install AWS cli
+      - name: Install AWS CLI
         uses: unfor19/install-aws-cli-action@master
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS Credentials for prod branch
+        if: github.base_ref == 'prod'
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-    
-      - name: Update Helm Package for Nudgebee
+
+      - name: Configure AWS Credentials for main branch
+        if: github.base_ref == 'main'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Update image tags
         working-directory: ./charts/nudgebee-agent
         run: |
+          echo "Updating image tags for ${{ github.base_ref }} branch..."
+          
+          # Get latest images from ECR
           nudgebee_app_image=`aws ecr describe-images --repository-name nudgebee-agent --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags], &imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text`
           echo "nudgebee_app_image: $nudgebee_app_image"
           yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
@@ -69,11 +77,47 @@ jobs:
           echo "runbook_sidecar_image_tag: $runbook_sidecar_image_tag"
           yq -i ".runner.runbook_sidecar_image_tag=\"$runbook_sidecar_image_tag\"" values.yaml
 
-      - name: Add dependency chart repos
+      - name: Commit updated image tags
         run: |
-          helm repo add opencost https://opencost.github.io/opencost-helm-chart
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [[ -n $(git status --porcelain) ]]; then
+            git add charts/nudgebee-agent/values.yaml
+            git commit -m "chore: update image tags for ${{ github.base_ref }} release
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.4.1
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+            Updated image tags to latest versions from ECR for ${{ github.base_ref }} branch.
+
+            🤖 Generated with [Claude Code](https://claude.ai/code)
+
+            Co-Authored-By: Claude <noreply@anthropic.com>"
+            git push origin ${{ github.head_ref }}
+            echo "Image tags updated and committed to PR branch"
+          else
+            echo "No changes to commit - image tags are already up to date"
+          fi
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
+            const valuesChanged = files.some(file => file.filename.includes('values.yaml'));
+            
+            if (valuesChanged) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `📦 **Image Tags Updated**
+                
+                I've automatically updated the image tags in \`charts/nudgebee-agent/values.yaml\` to the latest versions from ECR for the \`${{ github.base_ref }}\` branch.
+                
+                The image tags are now synchronized with the latest builds and ready for release.`
+              });
+            }
