@@ -110,81 +110,47 @@ jobs:
           helm repo add opentelemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm repo update
 
-      - name: Build dependencies
-        run: |
-          cd charts/nudgebee-agent
-          helm dependency build
-
-      - name: Package Helm chart
-        run: |
-          mkdir -p .cr-release-packages
-          helm package charts/nudgebee-agent --destination .cr-release-packages
-          
-      - name: Create GitHub release as prerelease first
-        uses: softprops/action-gh-release@v1
+      - name: Run chart-releaser for RC
+        uses: helm/chart-releaser-action@v1.4.1
         with:
-          tag_name: "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}"
-          name: "Release Candidate ${{ steps.rc_version.outputs.rc_version }}"
-          body: "Initial RC release - release notes will be updated shortly"
-          prerelease: true
-          draft: false
+          charts_dir: charts
+          config: .github/configs/cr.yaml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          CR_RELEASE_NAME_TEMPLATE: "Release Candidate {{ .Version }}"
 
-      - name: Upload chart to release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}"
-          files: .cr-release-packages/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update Helm repository index
+      - name: Mark release as pre-release
         run: |
-          # Create directory structure
-          mkdir -p .cr-index
-          
-          # Download current index if it exists
-          curl -f -s -L https://github.com/${{ github.repository }}/releases/download/index/index.yaml -o .cr-index/index.yaml || echo "apiVersion: v1" > .cr-index/index.yaml
-          
-          # Update index with new chart
-          helm repo index .cr-release-packages --url https://github.com/${{ github.repository }}/releases/download/nudgebee-agent-${{ steps.rc_version.outputs.rc_version }} --merge .cr-index/index.yaml
-          mv .cr-release-packages/index.yaml .cr-index/index.yaml
-          
-      - name: Upload updated index
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "index"
-          name: "Helm Repository Index"
-          body: "Helm repository index file"
-          files: .cr-index/index.yaml
+          # Update the release to mark it as pre-release
+          gh release edit "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}" --prerelease
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create RC release notes
+      - name: Update RC release with additional notes
         run: |
-          echo "## Release Candidate ${{ steps.rc_version.outputs.rc_version }}" > release_notes.md
-          echo "" >> release_notes.md
-          echo "This is a release candidate generated from the dev branch." >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Latest Images Used:" >> release_notes.md
-          echo "- Built from latest dev branch commit: ${{ github.sha }}" >> release_notes.md
-          echo "- Generated at: $(date)" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Installation:" >> release_notes.md
-          echo "\`\`\`bash" >> release_notes.md
-          echo "helm repo add nudgebee https://nudgebee.github.io/k8s-agent" >> release_notes.md
-          echo "helm repo update" >> release_notes.md
-          echo "helm install nudgebee-agent nudgebee/nudgebee-agent --version ${{ steps.rc_version.outputs.rc_version }}" >> release_notes.md
-          echo "\`\`\`" >> release_notes.md
-
-      - name: Update GitHub release with RC notes
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}"
-          name: "Release Candidate ${{ steps.rc_version.outputs.rc_version }}"
-          body_path: release_notes.md
-          prerelease: true
-          append_body: false
+          # Create enhanced release notes
+          cat << 'EOF' > release_notes.md
+          ## Release Candidate ${{ steps.rc_version.outputs.rc_version }}
+          
+          This is a release candidate with the latest features and fixes.
+          
+          ### Latest Images Used:
+          - Built from latest commit: ${{ github.sha }}
+          - Generated at: $(date)
+          
+          ### Installation:
+          ```bash
+          helm repo add nudgebee https://nudgebee.github.io/k8s-agent
+          helm repo update
+          helm install nudgebee-agent nudgebee/nudgebee-agent --version ${{ steps.rc_version.outputs.rc_version }}
+          ```
+          
+          ### ⚠️ Pre-release Notice
+          This is a release candidate. Use with caution in production environments.
+          EOF
+          
+          # Update the release notes (the release was created by chart-releaser-action)
+          gh release edit "nudgebee-agent-${{ steps.rc_version.outputs.rc_version }}" \
+            --notes-file release_notes.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
