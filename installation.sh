@@ -92,11 +92,16 @@ extract_yaml_value() {
     local file="$1"
     local key="$2"
     if [ -f "$file" ]; then
-        # yq is guaranteed to be available when values file is provided
-        local value=$(yq eval ".$key" "$file" 2>/dev/null)
-        # Return value only if it's not null or empty
-        if [ -n "$value" ] && [ "$value" != "null" ]; then
-            echo "$value"
+        # Check if yq is available
+        if command -v yq &> /dev/null; then
+            local value=$(yq eval ".$key" "$file" 2>/dev/null)
+            # Return value only if it's not null or empty
+            if [ -n "$value" ] && [ "$value" != "null" ]; then
+                echo "$value"
+            fi
+        else
+            # yq not available - return empty to fallback to command line args
+            echo ""
         fi
     fi
 }
@@ -222,13 +227,11 @@ if ! command -v helm &> /dev/null; then
     exit 1
 fi
 
-# Check if yq is installed when values file is provided
+# Check if yq is installed when values file is provided (optional with warning)
 if [ -n "$values" ] && ! command -v yq &> /dev/null; then
-    echo "Error: yq is not installed but is required for parsing values file."
-    echo "You can install yq by following the instructions at:"
+    echo "Warning: yq is not installed. Values file will be ignored and configuration will fallback to command line arguments."
+    echo "To use values file parsing, install yq by following the instructions at:"
     echo "https://github.com/mikefarah/yq#install"
-    echo "Or provide configuration via command line arguments instead."
-    exit 1
 fi
 
 # Check for existing Prometheus
