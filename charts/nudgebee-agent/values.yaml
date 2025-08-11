@@ -559,7 +559,7 @@ builtinPlaybooks:
 kubewatch:
   image:
     repository: registry.nudgebee.com/kubewatch
-    tag: 2025-07-04T04-38-00_2e61c1792218b6f0e6d9da6b9bd596e7ca4095df
+    tag: 2025-08-05T15-21-58_244b8879e108cf4b12313d400cd3716265869344
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -597,6 +597,25 @@ kubewatch:
       coreevent: false # added on kubewatch 2.5
       ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
       rollout: true
+    sync:
+      # Enable/disable scheduled sync
+      enabled: true
+      # How often to run the sync
+      interval: "1h"
+      # Enable/disable payload compression for sync data
+      compression: true
+      # Number of resources to send in a single batch
+      batchSize: 1000
+      # Timeout in seconds for the sync request
+      timeoutSeconds: 180
+      # Configuration for workload snapshot
+      workloadSnapshot:
+        # Enable/disable workload snapshot as part of the sync
+        enabled: true
+        # Include nodes in the workload snapshot
+        includeNodes: true
+        # Include services in the workload snapshot
+        includeServices: true
 # parameters for the renderer service used in nudgebee runner to render grafana graphs
 grafanaRenderer:
   enableContainer: false
@@ -616,13 +635,13 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-07T11-36-34_df0518636a73ed6a52dc2c661d8be62dfff1db88
+    tag: 2025-08-07T09-49-44_97c6d46376b705df8f644dc13886e3ee4c5ec642
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
     requests:
       cpu: 250m
-      memory: 1500Mi
+      memory: 1000Mi
     limits:
       cpu: ~
   tolerations: []
@@ -633,14 +652,14 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2025-06-16T04-25-05_93361fa666f6eabe55ece9c9c918c080e38b73ab
+  krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2025-05-06T10-08-00_1a1779d4166a81b292375a950aeb49b86ed10b33
-  kubepug_image_override: kubepug:2025-08-08T12-04-33_ab7ce64f712e667c801b7346bb38f7d110d6bf53
-  nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
+  profiler_image_override: 2025-07-07T13-38-58_d1f74934b1c71cc11eec86147cb70cf5d73bb48a
+  kubepug_image_override: kubepug:2025-08-08T11-21-51_98b5ec0890673d303bbe7fd908cf35006bd4775f
+  nova_image_override: nova:2025-07-01T11-05-25_6f69b3fb48646ead110f1c5698f72c693484f9c1
   clickhouse_enabled: true
   clickhouse_secret: "" # Will be set dynamically based on name overrides
-  runbook_sidecar_image_tag: 2025-07-28T08-03-26_3123b6ef14ea32bf8bd435036dd21c00cfe2f0d7
+  runbook_sidecar_image_tag: 2025-07-21T07-51-41_d58044c5b587a02d37c8da4579637c78774c1a45
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -679,6 +698,40 @@ runner:
     auth_secret_key: ""
   serviceAccount:
     annotations: {}
+apiServer:
+  enabled: true
+  image:
+    repository: ~ # inherits from runner.image.repository
+    tag: ~ # inherits from runner.image.tag
+  imagePullPolicy: ~ # inherits from runner.imagePullPolicy
+  log_level: ~ # inherits from runner.log_level
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1000Mi
+    limits:
+      cpu: ~
+      memory: ~
+  tolerations: []
+  annotations: {}
+  nodeSelector: ~
+  affinity: ~
+  imagePullSecrets: ~ # inherits from runner.imagePullSecrets
+  extraVolumes: []
+  extraVolumeMounts: []
+  additional_env_vars: []
+  additional_env_froms: []
+  sendAdditionalTelemetry: ~
+  krr_image_override: ~
+  image_registry: ~
+  relay_address: ~
+  profiler_image_override: ~
+  kubepug_image_override: ~
+  nova_image_override: ~
+  runbook_sidecar_image_tag: ~
+  victoria_metrics_enabled: ~
+  clickhouse_enabled: ~
+  clickhouse_secret: ~
 nodeAgent:
   enabled: true
   podmonitor:
@@ -687,7 +740,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2025-06-11T13-17-27_a452a649e7be4ef822616f5865a11abb398a37ef
+    tag: 2025-07-02T07-50-51_41c2ef3c0214df9bb0bb63be3d0c9ea08af29796
   resources:
     requests:
       cpu: "100m"
