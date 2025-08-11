@@ -93,7 +93,7 @@ spec:
           - name: CLICKHOUSE_PASSWORD
             valueFrom:
               secretKeyRef:
-                name: {{ .Release.Name }}-clickhouse
+                name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
                 key: admin-password
           {{- end }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
@@ -104,7 +104,7 @@ spec:
           {{- end }}
         envFrom:
         - secretRef:
-            name: {{ .Release.Name }}-runner-secret
+            name: {{ include "nudgebee-agent.fullname" . }}-runner-secret
             optional: true
         {{- if .Values.runner.additional_env_froms }}
         {{ toYaml .Values.runner.additional_env_froms | nindent  }}
@@ -154,11 +154,11 @@ spec:
       volumes:
         - name: playbooks-config-secret
           secret:
-            secretName: {{ .Release.Name }}-playbooks-config-secret
+            secretName: {{ include "nudgebee-agent.fullname" . }}-playbooks-config-secret
             optional: true
         - name: auth-config-secret
           secret:
-            secretName: {{ .Release.Name }}-auth-config-secret
+            secretName: {{ include "nudgebee-agent.fullname" . }}-auth-config-secret
             optional: true
         {{- if .Values.playbooksPersistentVolume }}
         - name: persistent-playbooks-storage
