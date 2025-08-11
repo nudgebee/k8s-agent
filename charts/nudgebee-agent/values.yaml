@@ -712,12 +712,15 @@ nodeAgent:
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
 opencost:
   enabled: true
-  image:
-    registry: registry.nudgebee.com
-    repository: opencost
-    tag: 1.114.0
-    imagePullPolicy: Always
+  nameOverride: ""
+  fullnameOverride: ""
   opencost:
+    exporter:
+      image:
+        registry: registry.nudgebee.com
+        repository: opencost
+        tag: 1.114.0
+    imagePullPolicy: Always
     prometheus:
       external:
         url: ""
