@@ -726,7 +726,6 @@ opencost:
         enabled: true
       defaultRules:
         create: true
-
     service:
       labels:
         app: opencost
@@ -888,7 +887,6 @@ clickhouse:
       enabled: true
       interval: 30s
       scrapeTimeout: 10s
-
     prometheusRule:
       enabled: true
       rules:
