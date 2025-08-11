@@ -1,19 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-runner
+  name: {{ include "nudgebee-agent.fullname" . }}-runner
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ .Release.Name }}-runner
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: runner
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-runner
+      app: {{ include "nudgebee-agent.fullname" . }}-runner
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-runner
+        {{- include "nudgebee-agent.labels" . | nindent 8 }}
+        app: {{ include "nudgebee-agent.fullname" . }}-runner
+        component: runner
         nudgebeeComponent: "runner"
       annotations:
         rollme: {{ randAlphaNum 5 | quote }}
@@ -24,7 +27,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
-      serviceAccountName: {{ .Release.Name }}-runner-service-account
+      serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       {{- if .Values.runner.imagePullSecrets }}
       imagePullSecrets:
@@ -192,14 +195,16 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-runner
+  name: {{ include "nudgebee-agent.fullname" . }}-runner
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ .Release.Name }}-runner
-    target: {{ .Release.Name }}-runner
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: runner
+    target: {{ include "nudgebee-agent.fullname" . }}-runner
 spec:
   selector:
-    app: {{ .Release.Name }}-runner
+    {{- include "nudgebee-agent.selectorLabels" . | nindent 4 }}
+    component: runner
   ports:
     - name: http
       protocol: TCP
@@ -210,7 +215,7 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ .Release.Name }}-runner-service-monitor
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-service-monitor
   labels:
     # this label is how the Prometheus installed with Robusta finds ServiceMonitors
     # TODO: we probably need to add custom labels here for a Prometheus installed separately
@@ -221,7 +226,7 @@ spec:
       port: http
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-runner
+      app: {{ include "nudgebee-agent.fullname" . }}-runner
   targetLabels:
     - target
 {{ end }}
@@ -229,7 +234,7 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ .Release.Name }}-runner-secret
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-secret
   namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
@@ -293,6 +298,21 @@ stringData:
   {{- if .Values.runner.es.enabled }}
   ELASTICSEARCH_ENABLED: "True"
   {{- end }}
+  {{- if .Values.runner.signoz.enabled }}
+  SIGNOZ_ENABLED: "True"
+  {{- end }}
+  {{- if .Values.runner.signoz.apiKey }}
+  SIGNOZ_API_KEY:  {{ .Values.runner.signoz.apiKey }}
+  {{- end }}
+  {{- if .Values.runner.signoz.url }}
+  SIGNOZ_URL: {{ .Values.runner.signoz.url }}
+  {{- end }}
+  {{- if .Values.runner.signoz.user_email }}
+  SIGNOZ_USER: {{ .Values.runner.signoz.user_email }}
+  {{- end }}
+  {{- if .Values.runner.signoz.user_password }}
+  SIGNOZ_PASSWORD: {{ .Values.runner.signoz.user_password }}
+  {{- end }}]
   CLICKHOUSE_ENABLED: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
   {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
   CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}

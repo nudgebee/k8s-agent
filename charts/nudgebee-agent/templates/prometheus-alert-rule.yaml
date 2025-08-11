@@ -2,8 +2,11 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ .Release.Name }}.rules
+  name: {{ include "nudgebee-agent.fullname" . }}.rules
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: prometheus-rules
 spec:
   groups:
     - name: kubernetes-apps

@@ -2,9 +2,10 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "node-agent.fullname" . }}
+  name: {{ include "nudgebee-agent.fullname" . }}-node-agent
   labels:
-    {{- include "node-agent.labels" . | nindent 4 }}
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: node-agent
 spec:
   selector:
     matchLabels:
@@ -13,6 +14,7 @@ spec:
     metadata:
       labels:
         {{- include "node-agent.selectorLabels" . | nindent 8 }}
+        component: node-agent
         app: nudgebee-node-agent
       annotations:
         {{- if .Values.nodeAgent.podAnnotations }}
@@ -24,7 +26,7 @@ spec:
         prometheus.io/scrape: 'true'
         prometheus.io/port: '80'
     spec:
-      serviceAccountName: {{ .Release.Name }}-runner-service-account
+      serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -43,7 +45,7 @@ spec:
           env:
           {{- if index .Values "opentelemetry-collector" "enabled" }}
             - name: TRACES_ENDPOINT
-              value: "{{ .Values.nodeAgent.tracesEndpoint }}"
+              value: "http://{{ include "nudgebee-agent.otelcollector.servicename" . }}:4318/v1/traces"
           {{- end }}
           {{- if .Values.nodeAgent.logsEndpoint }}
             - name: LOGS_ENDPOINT
