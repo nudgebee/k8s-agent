@@ -312,7 +312,7 @@ stringData:
   {{- end }}
   {{- if .Values.runner.signoz.user_password }}
   SIGNOZ_PASSWORD: {{ .Values.runner.signoz.user_password }}
-  {{- end }}]
+  {{- end }}
   CLICKHOUSE_ENABLED: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
   {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
   CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}
