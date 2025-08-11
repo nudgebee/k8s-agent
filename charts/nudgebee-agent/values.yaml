@@ -616,7 +616,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-07T11-36-34_df0518636a73ed6a52dc2c661d8be62dfff1db88
+    tag: 2025-08-11T09-03-45_0e1c77ae256ffac177c4a2dc6ba386ac3aa8c982
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
