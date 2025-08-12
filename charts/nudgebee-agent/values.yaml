@@ -677,6 +677,7 @@ runner:
     apiKey: ""
     user_email: ""
     user_password: ""
+    global_filter: ""
   grafana:
     enabled: false
     url: ""
