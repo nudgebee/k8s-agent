@@ -616,7 +616,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-07T11-36-34_df0518636a73ed6a52dc2c661d8be62dfff1db88
+    tag: 2025-08-11T12-49-30_191ab27abef502605a07597a91584a34c4a36162
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -636,7 +636,7 @@ runner:
   krr_image_override: krr-public:2025-06-16T04-25-05_93361fa666f6eabe55ece9c9c918c080e38b73ab
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2025-05-06T10-08-00_1a1779d4166a81b292375a950aeb49b86ed10b33
-  kubepug_image_override: kubepug:2025-05-02T17-20-56_40e2061bb36d5371794ff61bfeb167cd83d970d1
+  kubepug_image_override: kubepug:2025-08-08T12-04-33_ab7ce64f712e667c801b7346bb38f7d110d6bf53
   nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
   clickhouse_secret: "" # Will be set dynamically based on name overrides
@@ -748,7 +748,7 @@ opentelemetry-collector:
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: "" # Will be set dynamically based on name overrides
+          name: "nudgebee-agent-clickhouse" # Default name, can be overridden
           key: admin-password
   ports:
     jaeger-compact:
@@ -792,7 +792,7 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: "" # Will be set dynamically based on name overrides
+        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
         database: default
         ttl_days: 7
         username: default
