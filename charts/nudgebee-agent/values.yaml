@@ -635,7 +635,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-11T12-19-29_088718d9ac6f9edbb43ce555ace3132253233a32
+    tag: 2025-08-13T05-07-35_1c075ec10c37296d22e182d19041550022ec2376
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -655,7 +655,7 @@ runner:
   krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2025-07-07T13-38-58_d1f74934b1c71cc11eec86147cb70cf5d73bb48a
-  kubepug_image_override: kubepug:2025-08-11T05-11-11_6c0a96a1e70bef1cf2c31f0d4f36909636a98c55
+  kubepug_image_override: kubepug:2025-08-12T10-07-39_d7b5a7dd12f1e625278fc01e71877482bd085e1f
   nova_image_override: nova:2025-07-01T11-05-25_6f69b3fb48646ead110f1c5698f72c693484f9c1
   clickhouse_enabled: true
   clickhouse_secret: "" # Will be set dynamically based on name overrides
@@ -912,7 +912,7 @@ clickhouse:
       memory: 2000Mi
   initContainers:
     - name: volume-init
-      image: bitnami/os-shell:12-debian-12-r46
+      image: registry.nudgebee.com/bitnami-os-shell:12-debian-12-r46
       command:
         - /bin/sh
         - -ec
