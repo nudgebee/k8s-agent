@@ -912,7 +912,7 @@ clickhouse:
       memory: 2000Mi
   initContainers:
     - name: volume-init
-      image: registry.dev.nudgebee.pollux.in/bitnami-os-shell:12-debian-12-r46
+      image: registry.nudgebee.com/bitnami-os-shell:12-debian-12-r46
       command:
         - /bin/sh
         - -ec
