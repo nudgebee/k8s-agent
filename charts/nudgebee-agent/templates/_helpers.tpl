@@ -202,7 +202,11 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     {{- $additionalEnvVars := default $root.Values.runner.additional_env_vars $config.additional_env_vars }}
     {{- $envVarNames := list }}
     {{- if and $additionalEnvVars (kindIs "slice" $additionalEnvVars) }}
-      {{- $envVarNames = $additionalEnvVars | pluck "name" }}
+      {{- range $additionalEnvVars }}
+        {{- if and (kindIs "map" .) (hasKey . "name") }}
+          {{- $envVarNames = append $envVarNames .name }}
+        {{- end }}
+      {{- end }}
     {{- end }}
     {{- if not (has "CLICKHOUSE_HOST" $envVarNames) }}
     - name: CLICKHOUSE_HOST
