@@ -199,8 +199,19 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     {{- if not $clickhouseSecret }}
       {{- $clickhouseSecret = include "nudgebee-agent.clickhouse.servicename" $root }}
     {{- end }}
+    {{- $additionalEnvVars := default $root.Values.runner.additional_env_vars $config.additional_env_vars }}
+    {{- $envVarNames := list }}
+    {{- if and $additionalEnvVars (kindIs "slice" $additionalEnvVars) }}
+      {{- range $additionalEnvVars }}
+        {{- if and (kindIs "map" .) (hasKey . "name") }}
+          {{- $envVarNames = append $envVarNames .name }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if not (has "CLICKHOUSE_HOST" $envVarNames) }}
     - name: CLICKHOUSE_HOST
       value: {{ include "nudgebee-agent.clickhouse.servicename" $root }}
+    {{- end }}
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
