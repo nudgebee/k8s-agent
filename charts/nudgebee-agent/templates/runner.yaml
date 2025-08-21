@@ -46,7 +46,7 @@ spec:
           - name: PLAYBOOKS_CONFIG_FILE_PATH
             value: /etc/robusta/config/active_playbooks.yaml
           - name: RELEASE_NAME
-            value: {{ .Release.Name | quote }}
+            value: {{ include "nudgebee-agent.fullname" . | quote }}
           - name: PROMETHEUS_ENABLED
             value: {{ .Values.enablePrometheusStack | quote}}
           - name: SEND_ADDITIONAL_TELEMETRY
