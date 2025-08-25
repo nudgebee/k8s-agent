@@ -89,7 +89,7 @@ spec:
           - name: VICTORIA_METRICS_CONFIGURED
             value: "True"
           {{- end }}
-          {{- if .Values.runner.clickhouse_enabled }}
+          {{- if and .Values.runner.clickhouse_enabled (not .Values.runner.clickhouse_password) }}
           - name: CLICKHOUSE_PASSWORD
             valueFrom:
               secretKeyRef:
