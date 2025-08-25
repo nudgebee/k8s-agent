@@ -89,11 +89,11 @@ spec:
           - name: VICTORIA_METRICS_CONFIGURED
             value: "True"
           {{- end }}
-          {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_secret }}
+          {{- if .Values.runner.clickhouse_enabled }}
           - name: CLICKHOUSE_PASSWORD
             valueFrom:
               secretKeyRef:
-                name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
+                name: {{ .Values.runner.clickhouse_secret | default (include "nudgebee-agent.clickhouse.servicename" .) }}
                 key: admin-password
           {{- end }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}

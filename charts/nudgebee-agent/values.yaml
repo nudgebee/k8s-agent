@@ -29,6 +29,7 @@ globalConfig:
       regex: "AIza[0-9A-Za-z-_]{35}"
     - name: google-auth-code
       regex: "1/[0-9A-Za-z-]{43}|1/[0-9A-Za-z-]{64}"
+
 alertRelabel: []
 # safe actions to enable authenticated users to run
 lightActions:
@@ -639,7 +640,7 @@ runner:
   kubepug_image_override: kubepug:2025-08-14T05-16-09_6da6481b63b699ab4c61e86e1c611a182319d3de
   nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
-  clickhouse_secret: "" # Will be set dynamically based on name overrides
+  clickhouse_secret: ""
   runbook_sidecar_image_tag: 2025-07-28T08-03-26_3123b6ef14ea32bf8bd435036dd21c00cfe2f0d7
   victoria_metrics_enabled: false
   loki:
