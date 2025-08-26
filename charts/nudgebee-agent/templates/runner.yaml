@@ -89,11 +89,11 @@ spec:
           - name: VICTORIA_METRICS_CONFIGURED
             value: "True"
           {{- end }}
-          {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_secret }}
+          {{- if and (or (index .Values "opentelemetry-collector" "enabled") .Values.runner.clickhouse_enabled) (not (hasKey .Values.runner "clickhouse_password")) }}
           - name: CLICKHOUSE_PASSWORD
             valueFrom:
               secretKeyRef:
-                name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
+                name: {{ .Values.runner.clickhouse_secret | default (include "nudgebee-agent.clickhouse.servicename" .) }}
                 key: admin-password
           {{- end }}
           {{- if kindIs "string" .Values.runner.additional_env_vars }}
@@ -314,7 +314,7 @@ stringData:
   SIGNOZ_PASSWORD: {{ .Values.runner.signoz.user_password }}
   {{- end }}
   CLICKHOUSE_ENABLED: "{{ if index .Values "opentelemetry-collector" "enabled" }}True{{ else if .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
-  {{- if and .Values.runner.clickhouse_enabled .Values.runner.clickhouse_password }}
+  {{- if and (or (index .Values "opentelemetry-collector" "enabled") .Values.runner.clickhouse_enabled) (hasKey .Values.runner "clickhouse_password") }}
   CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}
   {{- end }}
   {{- if and .Values.runner.trace_table .Values.runner.trace_table }}
