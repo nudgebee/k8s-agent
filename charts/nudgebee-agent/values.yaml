@@ -29,7 +29,6 @@ globalConfig:
       regex: "AIza[0-9A-Za-z-_]{35}"
     - name: google-auth-code
       regex: "1/[0-9A-Za-z-]{43}|1/[0-9A-Za-z-]{64}"
-
 alertRelabel: []
 # safe actions to enable authenticated users to run
 lightActions:
