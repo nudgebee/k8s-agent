@@ -616,7 +616,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-13T15-46-43_681baa567195ebdc566a2673cc4df6338ef585b7
+    tag: 2025-08-20T10-27-32_b4b7d3720b331dc0c655d5d85a6bf7f2b107a5da
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -639,7 +639,7 @@ runner:
   kubepug_image_override: kubepug:2025-08-14T05-16-09_6da6481b63b699ab4c61e86e1c611a182319d3de
   nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
-  clickhouse_secret: "" # Will be set dynamically based on name overrides
+  clickhouse_secret: ""
   runbook_sidecar_image_tag: 2025-07-28T08-03-26_3123b6ef14ea32bf8bd435036dd21c00cfe2f0d7
   victoria_metrics_enabled: false
   loki:
