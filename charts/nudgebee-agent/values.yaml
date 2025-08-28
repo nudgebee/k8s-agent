@@ -635,7 +635,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-20T10-27-32_b4b7d3720b331dc0c655d5d85a6bf7f2b107a5da
+    tag: 2025-08-28T04-42-10_40901b0c8535de18f4ed259e3673ead9d0486bbf
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -656,10 +656,10 @@ runner:
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2025-07-07T13-38-58_d1f74934b1c71cc11eec86147cb70cf5d73bb48a
   kubepug_image_override: kubepug:2025-08-13T08-26-24_d16f6f2d1e27c24258c36ab8caf2054b583aa3cb
-  nova_image_override: nova:2025-07-01T11-05-25_6f69b3fb48646ead110f1c5698f72c693484f9c1
+  nova_image_override: nova:2025-08-25T06-49-02_8a8e0766cfc5817c4de429f0df8fb0faa154907f
   clickhouse_enabled: true
   clickhouse_secret: ""
-  runbook_sidecar_image_tag: 2025-07-28T08-03-26_3123b6ef14ea32bf8bd435036dd21c00cfe2f0d7
+  runbook_sidecar_image_tag: 2025-07-21T07-51-41_d58044c5b587a02d37c8da4579637c78774c1a45
   victoria_metrics_enabled: false
   loki:
     url: ""
