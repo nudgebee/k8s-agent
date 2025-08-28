@@ -215,8 +215,8 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: {{ $clickhouseSecret }}
-          key: admin-password
+          name: {{ if $root.Values.runner.clickhouse_password }}{{ include "nudgebee-agent.fullname" $root }}-runner-secret{{ else }}{{ $clickhouseSecret }}{{ end }}
+          key: {{ if $root.Values.runner.clickhouse_password }}CLICKHOUSE_PASSWORD{{ else }}admin-password{{ end }}
     {{- end }}
     {{- if kindIs "string" $root.Values.runner.additional_env_vars }}
     {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
