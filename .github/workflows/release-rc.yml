@@ -68,6 +68,16 @@ jobs:
           yq -i ".version=\"${{ steps.rc_version.outputs.rc_version }}\"" Chart.yaml
           yq -i ".appVersion=\"${{ steps.rc_version.outputs.rc_version }}\"" Chart.yaml
     
+      - name: Update registries for RC (dev ECR)
+        working-directory: ./charts/nudgebee-agent
+        run: |
+          echo "Updating registries from registry.nudgebee.com to registry.dev.nudgebee.pollux.in for RC release"
+          
+          # Update all registry.nudgebee.com references to registry.dev.nudgebee.pollux.in
+          sed -i 's|registry\.nudgebee\.com|registry.dev.nudgebee.pollux.in|g' values.yaml
+          
+          echo "Registry update completed"
+
       - name: Update Helm Package for Nudgebee RC
         working-directory: ./charts/nudgebee-agent
         run: |
