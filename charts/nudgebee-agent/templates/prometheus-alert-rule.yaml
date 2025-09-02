@@ -32,7 +32,7 @@ spec:
             > 1
           for: 5m
           annotations:
-            summary: High error and critical log messages
+            summary: "High error/critical logs - Sample: {{`{{ printf "%.80s" $labels.sample }}`}}"
             description: >-
               The total count of container log messages with error or critical
               level is higher for the past 5 minutes, grouped by container_id.
@@ -47,7 +47,7 @@ spec:
             status=~"5..|4.."}[5m]) > 1
           for: 5m
           annotations:
-            summary: High API Failures
+            summary: "API Failures - {{`{{ $labels.method }}`}} {{`{{ printf "%.50s" $labels.path }}`}} ({{`{{ $labels.status }}`}})"
             description: |
               Application reported API failure 
               Container ID: {{`{{ $labels.container_id }}`}}
