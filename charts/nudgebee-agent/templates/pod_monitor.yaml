@@ -1,5 +1,9 @@
 {{- if (and .Values.nodeAgent.enabled .Values.nodeAgent.podmonitor.enabled) }}
+{{- if .Values.nodeAgent.podmonitor.azuremanaged }}
+apiVersion: azmonitoring.coreos.com/v1
+{{- else }}
 apiVersion: monitoring.coreos.com/v1
+{{- end }}
 kind: PodMonitor
 metadata:
   name: {{ include "nudgebee-agent.fullname" . }}-node-agent

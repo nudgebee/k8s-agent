@@ -616,7 +616,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-20T10-27-32_b4b7d3720b331dc0c655d5d85a6bf7f2b107a5da
+    tag: 2025-09-05T05-06-07_a6a2755a8be4b5707e28b6d81135fa80e07a167f
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -683,6 +683,7 @@ nodeAgent:
   enabled: true
   podmonitor:
     enabled: true
+    azuremanaged: false
   podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
