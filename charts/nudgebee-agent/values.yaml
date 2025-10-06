@@ -616,7 +616,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-08-20T10-27-32_b4b7d3720b331dc0c655d5d85a6bf7f2b107a5da
+    tag: 2025-10-01T12-22-30_28548fd7838590a8a500d9ff0d51d9f5bd440ba9
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -683,6 +683,7 @@ nodeAgent:
   enabled: true
   podmonitor:
     enabled: true
+    azuremanaged: false
   podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
@@ -711,6 +712,11 @@ opencost:
   nameOverride: ""
   fullnameOverride: ""
   opencost:
+    exporter:
+      image:
+        registry: registry.nudgebee.com
+        repository: opencost
+        tag: 1.114.0
     prometheus:
       external:
         url: ""
@@ -734,6 +740,9 @@ openshift:
   privilegedSccPriority: null
 opentelemetry-collector:
   enabled: true
+  image:
+    repository: registry.nudgebee.com/opentelemetry-collector-contrib
+    tag: 0.75.0
   # Inherit name overrides from parent chart
   nameOverride: ""
   fullnameOverride: ""
@@ -822,6 +831,10 @@ opentelemetry-collector:
           receivers: [otlp]
 clickhouse:
   # Inherit name overrides from parent chart
+  image:
+    registry: registry.nudgebee.com
+    repository: clickhouse
+    tag: 23.3.1-debian-11-r0
   nameOverride: ""
   fullnameOverride: ""
   persistence:
@@ -842,7 +855,7 @@ clickhouse:
       memory: 2000Mi
   initContainers:
     - name: volume-init
-      image: bitnami/os-shell:12-debian-12-r46
+      image: registry.nudgebee.com/bitnami-os-shell:12-debian-12-r46
       command:
         - /bin/sh
         - -ec
