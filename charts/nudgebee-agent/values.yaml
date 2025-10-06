@@ -635,7 +635,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-09-04T14-40-49_d2ab03d65e072d5fa2fdd957a080d207e7d4e20c
+    tag: 2025-10-03T06-03-07_e21b2585ac464dba7667d5035b83f4043b31d181
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -654,7 +654,7 @@ runner:
   image_registry: registry.nudgebee.com
   krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2025-09-01T17-36-47_a72905c0524bfbecace65fa68e8f9a65e357de5d
+  profiler_image_override: 2025-10-03T17-40-26_5f8389332b19bb3c47f838e8c285d72ac7926557
   kubepug_image_override: kubepug:2025-08-13T08-26-24_d16f6f2d1e27c24258c36ab8caf2054b583aa3cb
   nova_image_override: nova:2025-08-25T06-49-02_8a8e0766cfc5817c4de429f0df8fb0faa154907f
   clickhouse_enabled: true
@@ -741,7 +741,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2025-09-04T08-57-02_6a27da6bacc2711a3555d635f91619714c078163
+    tag: 2025-10-05T17-31-49_264a1db8af256d21a10a929ddd4869e5343f496e
   resources:
     requests:
       cpu: "100m"
