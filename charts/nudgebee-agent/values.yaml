@@ -769,7 +769,6 @@ opencost:
         registry: registry.nudgebee.com
         repository: opencost
         tag: 1.114.0
-    imagePullPolicy: Always
     prometheus:
       external:
         url: ""
@@ -893,6 +892,10 @@ clickhouse:
     repository: clickhouse
     tag: 23.3.1-debian-11-r0
   # Inherit name overrides from parent chart
+  image:
+    registry: registry.nudgebee.com
+    repository: clickhouse
+    tag: 23.3.1-debian-11-r0
   nameOverride: ""
   fullnameOverride: ""
   persistence:
