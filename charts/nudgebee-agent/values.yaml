@@ -635,7 +635,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-10-16T05-54-56_c0f01af74c1d0de6ca1ee2718650d18174e2bc7d
+    tag: 2025-10-27T09-22-36_40d54a9f0048425771ec900d038f8f1b363abf83
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -741,7 +741,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2025-10-13T18-41-11_9e4e809b35a5fa5e386f2b7148e0418369e779a0
+    tag: 2025-10-29T05-16-46_692d7442f139a17c6aa975d7fa9373d576cc628f
   resources:
     requests:
       cpu: "100m"
