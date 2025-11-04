@@ -2,19 +2,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-apiserver
+  name: {{ include "nudgebee-agent.fullname" . }}-apiserver
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ .Release.Name }}-apiserver
+    app: {{ include "nudgebee-agent.fullname" . }}-apiserver
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-apiserver
+      app: {{ include "nudgebee-agent.fullname" . }}-apiserver
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-apiserver
+        app: {{ include "nudgebee-agent.fullname" . }}-apiserver
         nudgebeeComponent: "apiserver"
       annotations:
         rollme: {{ randAlphaNum 5 | quote }}
@@ -25,7 +25,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
-      serviceAccountName: {{ .Release.Name }}-runner-service-account
+      serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       {{- include "nudgebee.runner.imagePullSecrets" (dict "root" . "config" .Values.apiServer) | nindent 6 }}
       containers:
@@ -44,14 +44,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-apiserver
+  name: {{ include "nudgebee-agent.fullname" . }}-apiserver
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ .Release.Name }}-apiserver
-    target: {{ .Release.Name }}-apiserver
+    app: {{ include "nudgebee-agent.fullname" . }}-apiserver
+    target: {{ include "nudgebee-agent.fullname" . }}-apiserver
 spec:
   selector:
-    app: {{ .Release.Name }}-apiserver
+    app: {{ include "nudgebee-agent.fullname" . }}-apiserver
   ports:
     - name: http
       protocol: TCP
@@ -62,7 +62,7 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ .Release.Name }}-apiserver-service-monitor
+  name: {{ include "nudgebee-agent.fullname" . }}-apiserver-service-monitor
   labels:
     release: {{ .Release.Name }}
 spec:
@@ -71,7 +71,7 @@ spec:
       port: http
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-apiserver
+      app: {{ include "nudgebee-agent.fullname" . }}-apiserver
   targetLabels:
     - target
 {{ end }}
