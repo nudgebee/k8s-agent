@@ -194,7 +194,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     - name: VICTORIA_METRICS_CONFIGURED
       value: "True"
     {{- end }}
-    {{- if default $root.Values.runner.clickhouse_enabled $config.clickhouse_enabled }}
+    {{- if or (index (default (dict) (index $root.Values "opentelemetry-collector")) "enabled") (default $root.Values.runner.clickhouse_enabled $config.clickhouse_enabled) }}
     {{- $clickhouseSecret := default $root.Values.runner.clickhouse_secret $config.clickhouse_secret }}
     {{- if not $clickhouseSecret }}
       {{- $clickhouseSecret = include "nudgebee-agent.clickhouse.servicename" $root }}
