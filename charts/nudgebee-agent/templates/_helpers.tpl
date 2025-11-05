@@ -151,7 +151,7 @@ Usage: include "nudgebee.runner.container" (dict "root" . "config" .Values.runne
     - name: PLAYBOOKS_CONFIG_FILE_PATH
       value: /etc/robusta/config/active_playbooks.yaml
     - name: RELEASE_NAME
-      value: {{ $root.Release.Name | quote }}
+      value: {{ include "nudgebee-agent.fullname" $root | quote }}
     - name: PROMETHEUS_ENABLED
       value: {{ $root.Values.enablePrometheusStack | quote}}
     - name: SEND_ADDITIONAL_TELEMETRY
