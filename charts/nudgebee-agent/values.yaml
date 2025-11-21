@@ -114,6 +114,7 @@ lightActions:
   - api_traces_enricher_v2
   - pod_metric_enricher
   - neighboring_workload_health_enricher
+  - http_post
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
 enableServiceMonitors: true
