@@ -692,6 +692,10 @@ runner:
       value: default
     - name: CLICKHOUSE_DB
       value: default
+    - name: JAEGER_QUERY_URL
+      value: http://jaeger-query.demo.svc.cluster.local:16686/jaeger/ui
+    - name: JAEGER_ENABLED
+      value: true
   nudgebee:
     endpoint: https://collector.nudgebee.com
     publish_window: "3600"
