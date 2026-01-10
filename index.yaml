@@ -5,14 +5,18 @@ entries:
     appVersion: 0.0.0
     created: "2023-10-17T22:47:42.090929+05:30"
     dependencies:
-    - condition: enablePrometheusStack
-      name: kube-prometheus-stack
-      repository: https://prometheus-community.github.io/helm-charts
-      version: 47.2.0
-    - condition: enableOpenCostStack
+    - condition: opencost.enabled
       name: opencost
       repository: https://opencost.github.io/opencost-helm-chart
-      version: 1.20.0
+      version: 2.0.1
+    - condition: opentelemetry-collector.enabled
+      name: clickhouse
+      repository: https://charts.bitnami.com/bitnami
+      version: 3.1.*
+    - condition: opentelemetry-collector.enabled
+      name: opentelemetry-collector
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.52.*
     description: Nudgebee Helm chart for Kubernetes
     digest: 39b93fa0b07fc89ba0b36c5f7cf6e9a7daad58b05d34c9817b4d3ab537b4b627
     name: nudgebee-agent
