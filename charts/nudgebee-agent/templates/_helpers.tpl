@@ -14,6 +14,10 @@ playbook_repos:
   {{- end }}
 {{- end }}
 
+{{- if and (not .Values.enablePrometheusStack) .Values.opencost.enabled }}
+{{- fail "opencost requires Prometheus to be enabled. Please set `enablePrometheusStack: true` or set `opencost.enabled: false`" -}}
+{{- end }}
+
 {{- if or .Values.slackApiKey .Values.robustaApiKey }}
 {{- /* support old values files, prior to chart version 0.8.9 */}}
 sinks_config:
