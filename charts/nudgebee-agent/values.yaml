@@ -114,7 +114,7 @@ lightActions:
   - api_traces_enricher_v2
   - pod_metric_enricher
   - neighboring_workload_health_enricher
-# install prometheus stack with nudgebee
+# enable prometheus auto-discovery (set to false to disable auto-discovery and require prometheus_url configuration)
 enablePrometheusStack: true
 # install opencost , along with nudgebee ?
 enableOpenCostStack: false
