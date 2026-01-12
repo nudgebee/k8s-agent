@@ -2,6 +2,7 @@
 nameOverride: ""
 fullnameOverride: ""
 playbookRepos: {}
+enablePrometheusStack: true
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
@@ -635,7 +636,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-11-26T07-47-01_b7ff6b07efd6a2ec402b5f26978f53b7dd3f1fe9
+    tag: 2026-01-09T10-54-01_eabafd546d9e50c1601a8262667a223226abe042
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -659,7 +660,7 @@ runner:
   nova_image_override: nova:2025-08-25T06-49-02_8a8e0766cfc5817c4de429f0df8fb0faa154907f
   clickhouse_enabled: true
   clickhouse_secret: ""
-  runbook_sidecar_image_tag: 2025-07-21T07-51-41_d58044c5b587a02d37c8da4579637c78774c1a45
+  runbook_sidecar_image_tag: 2026-01-09T08-56-51_1bc8ed44579b442306416c9a2733c4ae4c124873
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -741,7 +742,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2025-10-29T05-16-46_692d7442f139a17c6aa975d7fa9373d576cc628f
+    tag: 2026-01-12T03-44-08_8755b8391c96d6fefd4f4c6726d3796fe7bdcc5c
   resources:
     requests:
       cpu: "100m"
