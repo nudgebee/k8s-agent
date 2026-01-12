@@ -2,6 +2,7 @@
 nameOverride: ""
 fullnameOverride: ""
 playbookRepos: {}
+enablePrometheusStack: true
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
