@@ -2,6 +2,7 @@
 nameOverride: ""
 fullnameOverride: ""
 playbookRepos: {}
+enablePrometheusStack: true
 # sinks configurations
 sinksConfig:
   - nudge_bee_sink:
@@ -635,7 +636,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-10-03T18-16-22_9f4528d40aae29f249adc0fcdfcb2c4901f63424
+    tag: 2026-01-21T12-24-21_79e6d1636bbb39c92a9a7ad920bf5b289b4884ff
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -652,14 +653,14 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2025-06-16T04-25-05_93361fa666f6eabe55ece9c9c918c080e38b73ab
+  krr_image_override: krr-public:2025-11-12T10-27-20_05e19006ab7b743e092267132d3b40e2c0b7b43c
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2025-05-06T10-08-00_1a1779d4166a81b292375a950aeb49b86ed10b33
   kubepug_image_override: kubepug:2025-08-14T05-16-09_6da6481b63b699ab4c61e86e1c611a182319d3de
   nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
   clickhouse_secret: ""
-  runbook_sidecar_image_tag: 2025-07-28T08-03-26_3123b6ef14ea32bf8bd435036dd21c00cfe2f0d7
+  runbook_sidecar_image_tag: 2026-01-20T13-53-59_402c0a7377afb3ba12fb7c5cba2c1d389175c24e
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -890,7 +891,7 @@ clickhouse:
   image:
     registry: registry.nudgebee.com
     repository: clickhouse
-    tag: 23.3.1-debian-11-r0
+    tag: 24.12.4-debian-12-r0-nb-2
   nameOverride: ""
   fullnameOverride: ""
   persistence:
