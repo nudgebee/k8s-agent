@@ -23,8 +23,6 @@ spec:
         {{- if .Values.globalConfig.custom_annotations }}
         {{ toYaml .Values.globalConfig.custom_annotations | nindent 8 }}
         {{- end }}
-        prometheus.io/scrape: 'true'
-        prometheus.io/port: '80'
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
       {{- with .Values.imagePullSecrets }}
