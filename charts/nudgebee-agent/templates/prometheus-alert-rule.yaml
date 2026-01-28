@@ -32,13 +32,8 @@ spec:
             > 1
           for: 5m
           annotations:
-            summary: High error and critical log messages
-            description: >-
-              The total count of container log messages with error or critical
-              level is higher for the past 5 minutes, grouped by container_id.
-              Container ID: {{`{{ $labels.container_id }}`}}
-              Log Sample: {{`{{ $labels.sample }}`}}
-              Failure Count: {{`{{ printf "%.0f" $value }}`}}
+            summary: "High error/critical logs - Sample: {{`{{ printf \"%.80s\" $labels.sample }}`}}"
+            description: "The total count of container log messages with error or critical level is higher for the past 5 minutes, grouped by container_id. Container ID: {{`{{ $labels.container_id }}`}} Log Sample: {{`{{ $labels.sample }}`}} Failure Count: {{`{{ printf \"%.0f\" $value }}`}}"
           labels:
             severity: critical
         - alert: ApplicationAPIFailures
@@ -47,13 +42,8 @@ spec:
             status=~"5..|4.."}[5m]) > 1
           for: 5m
           annotations:
-            summary: High API Failures
-            description: |
-              Application reported API failure 
-              Container ID: {{`{{ $labels.container_id }}`}}
-              Request Path: {{`{{ $labels.path }}`}}
-              Request Method: {{`{{ $labels.method }}`}}
-              Failure Count: {{`{{ printf "%.0f" $value }}`}}
+            summary: "API Failures - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}} ({{`{{ $labels.status }}`}})"
+            description: "Application reported API failure. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} Failure Count: {{`{{ printf \"%.0f\" $value }}`}}"
           labels:
             severity: critical
         - alert: KubePodStuckTerminating
@@ -66,6 +56,5 @@ spec:
             severity: critical
           annotations:
             summary: Pod stuck in terminating state
-            description: >-
-              Pod {{`{{$labels.namespace}}`}}/{{`{{$labels.pod}}`}} blocked in Terminating state.
+            description: "Pod {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} blocked in Terminating state."
 {{- end }}

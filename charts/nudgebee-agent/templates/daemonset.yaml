@@ -41,7 +41,7 @@ spec:
           resources:
             {{- toYaml .Values.nodeAgent.resources | nindent 12 }}
           env:
-          {{- if index .Values "opentelemetry-collector" "enabled" }}
+          {{- if index (default (dict) (index .Values "opentelemetry-collector")) "enabled" }}
             - name: TRACES_ENDPOINT
               value: "http://{{ include "nudgebee-agent.otelcollector.servicename" . }}:4318/v1/traces"
           {{- end }}
