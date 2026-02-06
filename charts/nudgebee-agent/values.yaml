@@ -660,7 +660,7 @@ runner:
   nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
   clickhouse_secret: ""
-  runbook_sidecar_image_tag: 2026-01-20T13-53-59_402c0a7377afb3ba12fb7c5cba2c1d389175c24e
+  runbook_sidecar_image_tag: 2026-01-30T07-39-18_68169ef8bece3b4d3ccb6e80a12023d2ab305181-arm64
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -738,6 +738,10 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+  service:
+    enabled: false
+    labels: {}
+    annotations: {}
   podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
