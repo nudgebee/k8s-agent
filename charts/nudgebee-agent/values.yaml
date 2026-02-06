@@ -738,6 +738,10 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+  service:
+    enabled: false
+    labels: {}
+    annotations: {}
   podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
