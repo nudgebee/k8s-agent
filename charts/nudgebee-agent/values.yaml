@@ -648,6 +648,11 @@ runner:
   tolerations: []
   annotations: {}
   nodeSelector: ~
+  # Enable write permissions for the runner service account.
+  # Adds permissions for: node delete/drain, service management, secret updates,
+  # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
+  # statefulset scaling, workload creation, and rollout lifecycle management.
+  enableWritePermissions: false
   customClusterRoleRules: []
   imagePullSecrets: []
   extraVolumes: []
