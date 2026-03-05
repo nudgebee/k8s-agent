@@ -250,7 +250,12 @@ if [ -z "$loki_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add grafana https://grafana.github.io/helm-charts
         helm repo update
-        helm upgrade --install nudgebee-loki grafana/loki-stack -n $namespace --create-namespace --set loki.persistence.enabled=true --set loki.persistence.size=10Gi --set promtail.enabled=true --set loki.isDefault=false
+        helm upgrade --install nudgebee-loki grafana/loki-stack \
+            -n "$namespace" --create-namespace \
+            --set loki.persistence.enabled=true \
+            --set loki.persistence.size=10Gi \
+            --set promtail.enabled=true \
+            --set loki.isDefault=false
         loki_url="http://nudgebee-loki:3100"
     else
         echo "Loki installation not requested. Node Agent will still be installed."
