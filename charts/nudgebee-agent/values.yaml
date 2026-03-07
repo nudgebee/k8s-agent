@@ -208,12 +208,6 @@ customPlaybooks:
           cron_schedule_repeat:
             cron_expression: "0 12 * * *" # every day at 12:00
     actions:
-      - krr_scan: {}
-  - triggers:
-      - on_schedule:
-          cron_schedule_repeat:
-            cron_expression: "0 12 * * *" # every day at 12:00
-    actions:
       - certificate_scanner: {}
   - triggers:
       - on_schedule:
@@ -239,12 +233,6 @@ customPlaybooks:
             cron_expression: "0 0 * * *" # every day at 00:00
     actions:
       - unused_pv: {}
-  - triggers:
-      - on_schedule:
-          cron_schedule_repeat:
-            cron_expression: "0 */4 * * *" # every 4 hour
-    actions:
-      - volume_analyzer: {}
   - triggers:
       - on_deployment_all_changes: {}
       - on_daemonset_all_changes: {}
