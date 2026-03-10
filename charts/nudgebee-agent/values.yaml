@@ -773,7 +773,7 @@ opencost:
       image:
         registry: registry.nudgebee.com
         repository: opencost
-        tag: 1.114.0
+        tag: 1.115.0
     prometheus:
       external:
         url: ""
