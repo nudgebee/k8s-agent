@@ -265,6 +265,8 @@ builtinPlaybooks:
   - triggers:
       - on_pod_crash_loop:
           restart_reason: "CrashLoopBackOff"
+          rate_limit: 14400 # 4 hours, per workload
+          restart_count: 2
     actions:
       - report_crash_loop: {}
       - resource_events_enricher: {}
@@ -273,7 +275,9 @@ builtinPlaybooks:
           previous: true
       - impacted_services_enricher: {}
   - triggers:
-      - on_image_pull_backoff: {}
+      - on_image_pull_backoff:
+          rate_limit: 14400 # 4 hours, per workload
+          fire_delay: 120 # seconds, avoids false positives on startup
     actions:
       - image_pull_backoff_reporter: {}
       - resource_events_enricher: {}
@@ -281,7 +285,7 @@ builtinPlaybooks:
   # playbooks for non-prometheus based monitoring that use prometheus for enrichment
   - triggers:
       - on_pod_oom_killed:
-          rate_limit: 3600
+          rate_limit: 3600 # 1 hour, per workload
     actions:
       - pod_oom_killer_enricher: {}
       - logs_enricher:
@@ -636,7 +640,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2026-03-20T13-39-48_7ec3f1ffdba8a3d44f793e716b52987af426d23c
+    tag: 2026-03-23T12-03-00_b5fb6a3dec070d497d8abe5c8957429d61363c5b
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
