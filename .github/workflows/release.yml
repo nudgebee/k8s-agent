@@ -37,7 +37,7 @@ jobs:
       - name: Update Helm Package for Nudgebee
         working-directory: ./charts/nudgebee-agent
         run: |
-          nudgebee_app_image=`aws ecr describe-images --repository-name nudgebee-agent --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags], &imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text`
+          nudgebee_app_image=`aws ecr describe-images --repository-name nudgebee-agent --filter tagStatus=TAGGED --query 'sort_by(imageDetails[?imageTags], &imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
           echo "nudgebee_app_image: $nudgebee_app_image"
           yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
 
