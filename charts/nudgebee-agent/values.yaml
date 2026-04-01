@@ -253,6 +253,8 @@ builtinPlaybooks:
   - triggers:
       - on_pod_crash_loop:
           restart_reason: "CrashLoopBackOff"
+          rate_limit: 14400 # 4 hours, per workload
+          restart_count: 2
     actions:
       - report_crash_loop: {}
       - resource_events_enricher: {}
@@ -261,7 +263,9 @@ builtinPlaybooks:
           previous: true
       - impacted_services_enricher: {}
   - triggers:
-      - on_image_pull_backoff: {}
+      - on_image_pull_backoff:
+          rate_limit: 14400 # 4 hours, per workload
+          fire_delay: 120 # seconds, avoids false positives on startup
     actions:
       - image_pull_backoff_reporter: {}
       - resource_events_enricher: {}
@@ -269,7 +273,7 @@ builtinPlaybooks:
   # playbooks for non-prometheus based monitoring that use prometheus for enrichment
   - triggers:
       - on_pod_oom_killed:
-          rate_limit: 3600
+          rate_limit: 3600 # 1 hour, per workload
     actions:
       - pod_oom_killer_enricher: {}
       - logs_enricher:
@@ -548,7 +552,7 @@ builtinPlaybooks:
 kubewatch:
   image:
     repository: registry.nudgebee.com/kubewatch
-    tag: 2025-08-05T15-21-58_244b8879e108cf4b12313d400cd3716265869344
+    tag: 2025-07-04T04-38-00_2e61c1792218b6f0e6d9da6b9bd596e7ca4095df
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -646,14 +650,14 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2025-07-10T07-36-19_9195d324fdcde4e2f4724ba270c4351ed2366a1d
+  krr_image_override: krr-public:2025-11-12T10-27-20_05e19006ab7b743e092267132d3b40e2c0b7b43c
   relay_address: wss://relay.nudgebee.com/register
-  profiler_image_override: 2025-10-07T09-20-18_6ede7487ac41f9c167a2e547e70ac7e7a2de7a88
-  kubepug_image_override: kubepug:2025-08-13T08-26-24_d16f6f2d1e27c24258c36ab8caf2054b583aa3cb
-  nova_image_override: nova:2026-03-07T11-56-14_c1432955300a4a231c9d6a364513ec680898f595
+  profiler_image_override: 2025-05-06T10-08-00_1a1779d4166a81b292375a950aeb49b86ed10b33
+  kubepug_image_override: kubepug:2025-08-14T05-16-09_6da6481b63b699ab4c61e86e1c611a182319d3de
+  nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
   clickhouse_enabled: true
   clickhouse_secret: ""
-  runbook_sidecar_image_tag: 2026-01-21T12-26-01_65a85cc1e589d506b9d5fa39f684d61c98638c4e
+  runbook_sidecar_image_tag: 2026-01-30T07-39-18_68169ef8bece3b4d3ccb6e80a12023d2ab305181-arm64
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -731,6 +735,10 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+  service:
+    enabled: false
+    labels: {}
+    annotations: {}
   podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
@@ -851,7 +859,7 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
+        endpoint: "http://nudgebee-agent-clickhouse:8123?dial_timeout=10s" # Default endpoint, can be overridden
         database: default
         ttl_days: 7
         username: default
