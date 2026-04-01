@@ -641,7 +641,7 @@ runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
     tag: |-
-      2026-03-24T17-16-49_7617e780e26fe1f430bc6c74826cf41eb68fe11a
+      2026-03-27T12-08-19_a6f2ef26c0dfbca5d64d837c72f5f681f27650b8
       2025-11-12T06-00-45_8ab57887ffd3ee0611c8b3e1a51413d1e0660445
   imagePullPolicy: IfNotPresent
   log_level: INFO
