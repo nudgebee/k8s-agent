@@ -651,7 +651,7 @@ runner:
   profiler_image_override: 2025-10-07T09-20-18_6ede7487ac41f9c167a2e547e70ac7e7a2de7a88
   kubepug_image_override: kubepug:2025-08-13T08-26-24_d16f6f2d1e27c24258c36ab8caf2054b583aa3cb
   nova_image_override: nova:2026-03-07T11-56-14_c1432955300a4a231c9d6a364513ec680898f595
-  clickhouse_enabled: true
+  clickhouse_enabled: false
   clickhouse_secret: ""
   runbook_sidecar_image_tag: 2026-01-21T12-26-01_65a85cc1e589d506b9d5fa39f684d61c98638c4e
   victoria_metrics_enabled: false
