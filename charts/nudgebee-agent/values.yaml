@@ -752,7 +752,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2026-03-08T10-10-12_4c2599ad0f8267bee4360ac0d66176e882d917e6
+    tag: 2026-04-09T04-23-32_8102b4ec69bb0ba14c1a0a5ebc36ced6bab2497e
   resources:
     requests:
       cpu: "100m"
