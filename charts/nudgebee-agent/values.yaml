@@ -971,4 +971,4 @@ clickhouse:
             description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
-  create_nb_alert_config: true
+  create_nb_alert_config: false
