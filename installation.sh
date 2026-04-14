@@ -8,13 +8,19 @@ openshift_enable=""
 additional_secret=""
 prometheus_url=""
 opencost_service_url=""
-namespace="nudgebee-agent" 
+namespace="nudgebee-agent"
 agent_name="nudgebee-agent"
 env="prod"
 disable_node_agent=""
 values=""
 alert_manager_url=""
 prometheus_org_id=""
+relay_address=""
+collector_endpoint=""
+image_registry=""
+disable_opencost=""
+disable_otel=""
+disable_prometheus_stack=""
 
 # Help function
 usage() {
@@ -33,12 +39,18 @@ usage() {
   echo "  -f <values> values yaml"
   echo "  -m <alert_manager_url> Alert manager URL"
   echo "  -r <prometheus-org-id> Prometheus org id"
+  echo "  -w <relay_address>    WebSocket relay address (self-hosted)"
+  echo "  -c <collector_endpoint> Collector endpoint URL (self-hosted)"
+  echo "  -i <image_registry>   Image registry (air-gapped/on-prem)"
+  echo "  -x <disable_opencost> Disable OpenCost (true/false)"
+  echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
+  echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:c:i:x:t:g:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -72,6 +84,24 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:" opt; do
       ;;
     r)
       prometheus_org_id="$OPTARG"
+      ;;
+    w)
+      relay_address="$OPTARG"
+      ;;
+    c)
+      collector_endpoint="$OPTARG"
+      ;;
+    i)
+      image_registry="$OPTARG"
+      ;;
+    x)
+      disable_opencost="$OPTARG"
+      ;;
+    t)
+      disable_otel="$OPTARG"
+      ;;
+    g)
+      disable_prometheus_stack="$OPTARG"
       ;;
     h)
       usage
@@ -153,44 +183,47 @@ if ! command -v helm &> /dev/null; then
     exit 1
 fi
 
-# Check for existing Prometheus
-if [ -z "$prometheus_url" ]; then
-    prometheus_selectors=(
-            "app=kube-prometheus-stack-prometheus"
-            "app=prometheus,component=server,release!=kubecost"
-            "app=prometheus-server"
-            "app=prometheus-operator-prometheus"
-    )
-    prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
-fi
-
+# Check for existing Prometheus (skip if prometheus stack is disabled)
 existingPrometheus=false
 grafana_command=""
-# Check if service_url is empty
-if [ -z "$prometheus_url" ]; then
-   echo "Prometheus not found..!"
-   read -p "Installing Prometheus using helm, do you want to continue? (yes/no): " install_prometheus
-    if [ "$install_prometheus" == "yes" ]; then
-        # Add Helm installation command here or instructions
-        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-        helm repo update
-        helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
-            -n $namespace --create-namespace \
-            --set nodeExporter.enabled=true \
-            --set nodeExporter.service.targetPort=9101 \
-            --set pushgateway.enabled=false \
-            --set alertmanager.enabled=true \
-            --set kubeStateMetrics.enabled=true \
-            --set grafana.enabled=true \
-            -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
-        prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"  # Prometheus uses default port 9090
-        grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
-    else
-        echo "Prometheus installation not requested. Exiting."
-        exit 0
-    fi
+if [ "$disable_prometheus_stack" == "true" ]; then
+    echo "Prometheus stack disabled, skipping Prometheus discovery and installation."
 else
-    existingPrometheus=true
+    if [ -z "$prometheus_url" ]; then
+        prometheus_selectors=(
+                "app=kube-prometheus-stack-prometheus"
+                "app=prometheus,component=server,release!=kubecost"
+                "app=prometheus-server"
+                "app=prometheus-operator-prometheus"
+        )
+        prometheus_url=$(getPrometheusURL "${prometheus_selectors[@]}")
+    fi
+
+    # Check if service_url is empty
+    if [ -z "$prometheus_url" ]; then
+       echo "Prometheus not found..!"
+       read -p "Installing Prometheus using helm, do you want to continue? (yes/no): " install_prometheus
+        if [ "$install_prometheus" == "yes" ]; then
+            helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+            helm repo update
+            helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
+                -n $namespace --create-namespace \
+                --set nodeExporter.enabled=true \
+                --set nodeExporter.service.targetPort=9101 \
+                --set pushgateway.enabled=false \
+                --set alertmanager.enabled=true \
+                --set kubeStateMetrics.enabled=true \
+                --set grafana.enabled=true \
+                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
+            prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
+            grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
+        else
+            echo "Prometheus installation not requested. Exiting."
+            exit 0
+        fi
+    else
+        existingPrometheus=true
+    fi
 fi
 
 echo "Discovered Prometheus URL: $prometheus_url"
@@ -228,8 +261,38 @@ if [ -n "$prometheus_org_id" ]; then
   prometheus_org_id_command=" --set globalConfig.prometheus_headers='X-Scope-OrgID: $prometheus_org_id' --set globalConfig.alertmanager_headers='X-Scope-OrgID: $prometheus_org_id' --set opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
 fi
 
+relay_address_command=""
+if [ -n "$relay_address" ]; then
+  relay_address_command=" --set runner.relay_address=$relay_address"
+fi
+
+collector_endpoint_command=""
+if [ -n "$collector_endpoint" ]; then
+  collector_endpoint_command=" --set runner.nudgebee.endpoint=$collector_endpoint"
+fi
+
+image_registry_command=""
+if [ -n "$image_registry" ]; then
+  image_registry_command=" --set runner.image_registry=$image_registry"
+fi
+
+disable_opencost_command=""
+if [ "$disable_opencost" == "true" ]; then
+  disable_opencost_command=" --set opencost.enabled=false"
+fi
+
+disable_otel_command=""
+if [ "$disable_otel" == "true" ]; then
+  disable_otel_command=" --set opentelemetry-collector.enabled=false --set clickhouse.enabled=false"
+fi
+
+disable_prometheus_stack_command=""
+if [ "$disable_prometheus_stack" == "true" ]; then
+  disable_prometheus_stack_command=" --set enablePrometheusStack=false"
+fi
+
 # Use helm upgrade --install to either install or upgrade the Helm chart
-a="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key=\"$auth_key\" --set globalConfig.prometheus_url=\"$prometheus_url\" --set opencost.opencost.prometheus.external.url=\"$prometheus_url\" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command $alert_manager_url_command $prometheus_org_id_command"
+a="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key=\"$auth_key\" --set globalConfig.prometheus_url=\"$prometheus_url\" --set opencost.opencost.prometheus.external.url=\"$prometheus_url\" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command $alert_manager_url_command $prometheus_org_id_command $relay_address_command $collector_endpoint_command $image_registry_command $disable_opencost_command $disable_otel_command $disable_prometheus_stack_command"
 
 echo "Running command: $a"
 eval $a
