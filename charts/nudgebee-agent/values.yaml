@@ -856,9 +856,9 @@ opentelemetry-collector:
         error_mode: ignore
         traces:
           span:
-            - 'IsMatch(attributes["http.route"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
-            - 'IsMatch(attributes["http.target"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
-            - 'IsMatch(attributes["url.path"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
+            - 'IsMatch(attributes["http.route"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+            - 'IsMatch(attributes["http.target"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+            - 'IsMatch(attributes["url.path"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
       # Drop spans with malformed timestamps (zero, or end before start). These
       # come from broken upstream instrumentation and waste storage.
       filter/drop_invalid_timestamps:
