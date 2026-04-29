@@ -837,32 +837,64 @@ opentelemetry-collector:
       enabled: false
   config:
     processors:
-      probabilistic_sampler:
-        sampling_percentage: 10
+      # Drop early under memory pressure rather than OOM-killing the collector.
+      # Must be the first processor in every pipeline.
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
       filter/drop_namespaces:
         error_mode: ignore
         traces:
           span:
             - attributes["k8s.namespace.name"] == "kube-system"
+      # Drop probe / scrape / health-check traffic. Regex covers /health, /healthz,
+      # /livez, /readyz, /ping, /metrics, /status and namespaced variants like
+      # /api/health, /healthcheck, /health/liveness across all three OTel attribute
+      # name conventions (http.route, http.target, url.path).
       filter/drop_health_check:
         error_mode: ignore
         traces:
           span:
-            - attributes["http.route"] == "/health"
-            - attributes["http.route"] == "/healthz"
-            - attributes["http.route"] == "/live"
-            - attributes["http.route"] == "/ready"
-            - attributes["http.route"] == "/metrics"
-            - attributes["http.target"] == "/health"
-            - attributes["http.target"] == "/healthz"
-            - attributes["http.target"] == "/live"
-            - attributes["http.target"] == "/ready"
-            - attributes["http.target"] == "/metrics"
-            - attributes["url.path"] == "/health"
-            - attributes["url.path"] == "/healthz"
-            - attributes["url.path"] == "/live"
-            - attributes["url.path"] == "/ready"
-            - attributes["url.path"] == "/metrics"
+            - 'IsMatch(attributes["http.route"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
+            - 'IsMatch(attributes["http.target"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
+            - 'IsMatch(attributes["url.path"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
+      # Drop spans with malformed timestamps (zero, or end before start). These
+      # come from broken upstream instrumentation and waste storage.
+      filter/drop_invalid_timestamps:
+        error_mode: ignore
+        traces:
+          span:
+            - end_time_unix_nano == 0
+            - start_time_unix_nano == 0
+            - end_time_unix_nano < start_time_unix_nano
+      # Trace-level sampling. Unlike probabilistic head sampling, this preserves
+      # 100% of error and slow traces — exactly the ones an SRE wants to see —
+      # while keeping a 10% sample of healthy traffic for baseline visibility.
+      # Memory cost: roughly num_traces * average-trace-size bytes (~50-100MB
+      # at 50k traces buffered).
+      # NOTE: tail sampling requires all spans of a trace to land on the SAME
+      # collector instance. This default ships a single-replica deployment which
+      # is correct out of the box. Customers scaling to >1 replica must add a
+      # consistent-hash load balancer (otel `loadbalancing` exporter) in front,
+      # otherwise sampling decisions are made on partial traces.
+      tail_sampling:
+        decision_wait: 10s
+        num_traces: 50000
+        expected_new_traces_per_sec: 200
+        policies:
+          - name: errors
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: slow
+            type: latency
+            latency:
+              threshold_ms: 1000
+          - name: healthy-sample
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
       batch:
         timeout: 5s
         send_batch_size: 25000
@@ -884,16 +916,19 @@ opentelemetry-collector:
           max_elapsed_time: 300s
     service:
       pipelines:
+        # memory_limiter must be the first processor in every pipeline so it can
+        # back-pressure receivers under memory load before any expensive work
+        # (filters, sampling, batching) runs.
         traces:
-          processors: [filter/drop_namespaces, filter/drop_health_check, probabilistic_sampler, batch]
+          processors: [memory_limiter, filter/drop_namespaces, filter/drop_health_check, filter/drop_invalid_timestamps, tail_sampling, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         metrics:
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
 clickhouse:
