@@ -61,7 +61,7 @@ spec:
         - alert: ApplicationAPIFailures
           expr: |
             (
-              sum by (container_id, method, path, status) (rate(container_http_requests_total{status=~"5..", container_id!~"{{ $excludeApi }}"}[5m]))
+              sum by (container_id, method, path) (rate(container_http_requests_total{status=~"5..", container_id!~"{{ $excludeApi }}"}[5m]))
               / on (container_id) group_left ()
               sum by (container_id) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m]))
             ) > 0.05
@@ -69,8 +69,8 @@ spec:
             sum by (container_id) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m])) > 0.1
           for: 10m
           annotations:
-            summary: "High 5xx rate - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}} ({{`{{ $labels.status }}`}})"
-            description: "Application 5xx rate exceeds 5% of total traffic. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} Status: {{`{{ $labels.status }}`}} Failure Ratio: {{`{{ printf \"%.2f\" $value }}`}}"
+            summary: "High 5xx rate - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}}"
+            description: "Aggregate 5xx rate across status codes exceeds 5% of total traffic. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} 5xx Ratio: {{`{{ printf \"%.2f\" $value }}`}}"
           labels:
             severity: critical
         # Fires when a pod has been in Terminating state for >30 minutes — that
