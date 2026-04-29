@@ -641,7 +641,7 @@ runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
     tag: |-
-      2026-03-27T12-08-19_a6f2ef26c0dfbca5d64d837c72f5f681f27650b8
+      2026-04-29T06-02-05_5678ecd5b0955fbf7cadf4306e17d056903a12dc
       2025-11-12T06-00-45_8ab57887ffd3ee0611c8b3e1a51413d1e0660445
   imagePullPolicy: IfNotPresent
   log_level: INFO
@@ -752,7 +752,7 @@ nodeAgent:
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2026-04-09T04-23-32_8102b4ec69bb0ba14c1a0a5ebc36ced6bab2497e
+    tag: 2026-04-29T06-15-05_7fd20886980a75b7b9c8ca561621a19e1ff0976f
   resources:
     requests:
       cpu: "100m"
@@ -856,9 +856,9 @@ opentelemetry-collector:
         error_mode: ignore
         traces:
           span:
-            - 'IsMatch(attributes["http.route"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
-            - 'IsMatch(attributes["http.target"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
-            - 'IsMatch(attributes["url.path"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$")'
+            - 'IsMatch(attributes["http.route"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+            - 'IsMatch(attributes["http.target"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+            - 'IsMatch(attributes["url.path"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
       # Drop spans with malformed timestamps (zero, or end before start). These
       # come from broken upstream instrumentation and waste storage.
       filter/drop_invalid_timestamps:
