@@ -211,10 +211,14 @@ getServiceURL() {
   local selectors=("$@")
   for selector in "${selectors[@]}"; do
     local svc ns port_web port_http port_first
-    read -r svc ns port_web port_http port_first < <(
+    # Use comma delimiter so missing fields stay empty. With space-separated
+    # output and default IFS, `read` collapses consecutive whitespace and
+    # shifts later columns into earlier variables when an expected port name
+    # (e.g. "web") is absent — making port_web hold what should be port_first.
+    IFS=',' read -r svc ns port_web port_http port_first < <(
       kctl get svc --all-namespaces -l "$selector" \
-        -o jsonpath='{range .items[0]}{.metadata.name}{" "}{.metadata.namespace}{" "}{.spec.ports[?(@.name=="web")].port}{" "}{.spec.ports[?(@.name=="http")].port}{" "}{.spec.ports[0].port}{"\n"}{end}' \
-        2>/dev/null || echo ""
+        -o jsonpath='{range .items[0]}{.metadata.name}{","}{.metadata.namespace}{","}{.spec.ports[?(@.name=="web")].port}{","}{.spec.ports[?(@.name=="http")].port}{","}{.spec.ports[0].port}{"\n"}{end}' \
+        2>/dev/null || echo ",,,,"
     )
     [ -z "${svc:-}" ] && continue
     local port="${port_web:-${port_http:-${port_first:-}}}"
