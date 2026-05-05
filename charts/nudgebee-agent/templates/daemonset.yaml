@@ -90,3 +90,34 @@ spec:
             path: /sys/kernel/debug
           name: debugfs
 {{- end }}
+{{- if (and .Values.nodeAgent.enabled .Values.nodeAgent.service.enabled) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-node-agent
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "80"
+    prometheus.io/path: /metrics
+    {{- with .Values.nodeAgent.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: node-agent
+    {{- with .Values.nodeAgent.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "node-agent.selectorLabels" . | nindent 4 }}
+    component: node-agent
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+{{- end }}

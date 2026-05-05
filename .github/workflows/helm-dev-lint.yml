@@ -1,43 +1,60 @@
 # CI Workflow for Agent Helm chart
 name: CI
 
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main"]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  helm-test:
+  helm-lint-and-validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Add dependency chart repos
         run: |
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo add opencost https://opencost.github.io/opencost-helm-chart
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo add bitnami https://charts.bitnami.com/bitnami
 
-      - uses: azure/setup-helm@v3
+      - uses: azure/setup-helm@v4
         with:
-          version: v3.10.0
+          version: v3.14.0
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
-          check-latest: true
+          python-version: '3.12'
 
       - name: Set up chart-testing
-        uses: helm/chart-testing-action@v2.3.1
+        uses: helm/chart-testing-action@v2.7.0
 
       - name: Run chart-testing (lint)
         run: ct lint --debug --config ./.github/configs/ct.yaml --lint-conf ./.github/configs/lintconf.yaml --check-version-increment=false
+
+      - name: Build chart dependencies
+        run: helm dependency build charts/nudgebee-agent
+
+      - name: Render templates
+        run: helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent > /tmp/rendered.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
+
+      - name: Validate rendered templates
+        run: |
+          kubeconform \
+            -strict \
+            -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -skip SecurityContextConstraints \
+            /tmp/rendered.yaml

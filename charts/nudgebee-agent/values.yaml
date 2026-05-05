@@ -265,6 +265,8 @@ builtinPlaybooks:
   - triggers:
       - on_pod_crash_loop:
           restart_reason: "CrashLoopBackOff"
+          rate_limit: 14400 # 4 hours, per workload
+          restart_count: 2
     actions:
       - report_crash_loop: {}
       - resource_events_enricher: {}
@@ -273,7 +275,9 @@ builtinPlaybooks:
           previous: true
       - impacted_services_enricher: {}
   - triggers:
-      - on_image_pull_backoff: {}
+      - on_image_pull_backoff:
+          rate_limit: 14400 # 4 hours, per workload
+          fire_delay: 120 # seconds, avoids false positives on startup
     actions:
       - image_pull_backoff_reporter: {}
       - resource_events_enricher: {}
@@ -281,7 +285,7 @@ builtinPlaybooks:
   # playbooks for non-prometheus based monitoring that use prometheus for enrichment
   - triggers:
       - on_pod_oom_killed:
-          rate_limit: 3600
+          rate_limit: 3600 # 1 hour, per workload
     actions:
       - pod_oom_killer_enricher: {}
       - logs_enricher:
@@ -636,7 +640,9 @@ runnerServiceAccount:
 runner:
   image:
     repository: registry.nudgebee.com/nudgebee-agent
-    tag: 2025-10-03T18-16-22_9f4528d40aae29f249adc0fcdfcb2c4901f63424
+    tag: |-
+      2026-04-29T06-02-05_5678ecd5b0955fbf7cadf4306e17d056903a12dc
+      2025-11-12T06-00-45_8ab57887ffd3ee0611c8b3e1a51413d1e0660445
   imagePullPolicy: IfNotPresent
   log_level: INFO
   resources:
@@ -653,14 +659,14 @@ runner:
   extraVolumes: []
   extraVolumeMounts: []
   image_registry: registry.nudgebee.com
-  krr_image_override: krr-public:2025-06-16T04-25-05_93361fa666f6eabe55ece9c9c918c080e38b73ab
+  krr_image_override: krr-public:2025-11-12T10-27-20_05e19006ab7b743e092267132d3b40e2c0b7b43c
   relay_address: wss://relay.nudgebee.com/register
   profiler_image_override: 2025-05-06T10-08-00_1a1779d4166a81b292375a950aeb49b86ed10b33
   kubepug_image_override: kubepug:2025-08-14T05-16-09_6da6481b63b699ab4c61e86e1c611a182319d3de
   nova_image_override: nova:2025-07-04T04-12-43_76ed8fffc46f03f798e9dd6a975890064807d6e2
-  clickhouse_enabled: true
+  clickhouse_enabled: false
   clickhouse_secret: ""
-  runbook_sidecar_image_tag: 2026-01-09T08-56-51_1bc8ed44579b442306416c9a2733c4ae4c124873
+  runbook_sidecar_image_tag: 2026-01-30T07-39-18_68169ef8bece3b4d3ccb6e80a12023d2ab305181-arm64
   victoria_metrics_enabled: false
   loki:
     url: ""
@@ -738,11 +744,15 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+  service:
+    enabled: false
+    labels: {}
+    annotations: {}
   podAnnotations: {}
   image:
     repository: registry.nudgebee.com/nudgebee-node-agent
     pullPolicy: IfNotPresent
-    tag: 2026-01-12T03-44-08_8755b8391c96d6fefd4f4c6726d3796fe7bdcc5c
+    tag: 2026-04-29T06-15-05_7fd20886980a75b7b9c8ca561621a19e1ff0976f
   resources:
     requests:
       cpu: "100m"
@@ -827,38 +837,70 @@ opentelemetry-collector:
       enabled: false
   config:
     processors:
-      probabilistic_sampler:
-        sampling_percentage: 10
+      # Drop early under memory pressure rather than OOM-killing the collector.
+      # Must be the first processor in every pipeline.
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
       filter/drop_namespaces:
         error_mode: ignore
         traces:
           span:
             - attributes["k8s.namespace.name"] == "kube-system"
+      # Drop probe / scrape / health-check traffic. Regex covers /health, /healthz,
+      # /livez, /readyz, /ping, /metrics, /status and namespaced variants like
+      # /api/health, /healthcheck, /health/liveness across all three OTel attribute
+      # name conventions (http.route, http.target, url.path).
       filter/drop_health_check:
         error_mode: ignore
         traces:
           span:
-            - attributes["http.route"] == "/health"
-            - attributes["http.route"] == "/healthz"
-            - attributes["http.route"] == "/live"
-            - attributes["http.route"] == "/ready"
-            - attributes["http.route"] == "/metrics"
-            - attributes["http.target"] == "/health"
-            - attributes["http.target"] == "/healthz"
-            - attributes["http.target"] == "/live"
-            - attributes["http.target"] == "/ready"
-            - attributes["http.target"] == "/metrics"
-            - attributes["url.path"] == "/health"
-            - attributes["url.path"] == "/healthz"
-            - attributes["url.path"] == "/live"
-            - attributes["url.path"] == "/ready"
-            - attributes["url.path"] == "/metrics"
+            - 'IsMatch(attributes["http.route"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+            - 'IsMatch(attributes["http.target"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+            - 'IsMatch(attributes["url.path"], "^/(healthz?|livez?|readyz?|ping|metrics|status)(/.*)?$") == true'
+      # Drop spans with malformed timestamps (zero, or end before start). These
+      # come from broken upstream instrumentation and waste storage.
+      filter/drop_invalid_timestamps:
+        error_mode: ignore
+        traces:
+          span:
+            - end_time_unix_nano == 0
+            - start_time_unix_nano == 0
+            - end_time_unix_nano < start_time_unix_nano
+      # Trace-level sampling. Unlike probabilistic head sampling, this preserves
+      # 100% of error and slow traces — exactly the ones an SRE wants to see —
+      # while keeping a 10% sample of healthy traffic for baseline visibility.
+      # Memory cost: roughly num_traces * average-trace-size bytes (~50-100MB
+      # at 50k traces buffered).
+      # NOTE: tail sampling requires all spans of a trace to land on the SAME
+      # collector instance. This default ships a single-replica deployment which
+      # is correct out of the box. Customers scaling to >1 replica must add a
+      # consistent-hash load balancer (otel `loadbalancing` exporter) in front,
+      # otherwise sampling decisions are made on partial traces.
+      tail_sampling:
+        decision_wait: 10s
+        num_traces: 50000
+        expected_new_traces_per_sec: 200
+        policies:
+          - name: errors
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: slow
+            type: latency
+            latency:
+              threshold_ms: 1000
+          - name: healthy-sample
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
       batch:
         timeout: 5s
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
+        endpoint: "http://nudgebee-agent-clickhouse:8123?dial_timeout=10s" # Default endpoint, can be overridden
         database: default
         ttl_days: 7
         username: default
@@ -874,16 +916,19 @@ opentelemetry-collector:
           max_elapsed_time: 300s
     service:
       pipelines:
+        # memory_limiter must be the first processor in every pipeline so it can
+        # back-pressure receivers under memory load before any expensive work
+        # (filters, sampling, batching) runs.
         traces:
-          processors: [filter/drop_namespaces, filter/drop_health_check, probabilistic_sampler, batch]
+          processors: [memory_limiter, filter/drop_namespaces, filter/drop_health_check, filter/drop_invalid_timestamps, tail_sampling, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         metrics:
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
 clickhouse:
@@ -961,4 +1006,4 @@ clickhouse:
             description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
-  create_nb_alert_config: true
+  create_nb_alert_config: false
