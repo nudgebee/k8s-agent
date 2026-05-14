@@ -142,9 +142,9 @@ nodeAgent:
     azuremanaged: false
   podAnnotations: {}
   image:
-    repository: registry.nudgebee.com/nudgebee-node-agent
+    repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 2026-03-07T13-05-46_d38d1d4491462852250825a90161b417b21d5c3a
+    tag: 0.1.0
   resources:
     requests:
       cpu: "100m"

@@ -21,25 +21,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.head_ref }}
 
-      - name: Install AWS CLI
-        uses: unfor19/install-aws-cli-action@master
-
-      - name: Configure AWS Credentials for prod branch
-        if: github.base_ref == 'prod'
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: Configure AWS Credentials for main branch
-        if: github.base_ref == 'main'
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
       - name: Update image tags
         working-directory: ./charts/nudgebee-agent
         env:
@@ -54,8 +35,10 @@ jobs:
           echo "nudgebee_app_image: $nudgebee_app_image"
           yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
 
-          # nudgebee-node-agent: still on ECR until GHCR migration completes
-          nudgebee_node_image=`aws ecr describe-images --repository-name nudgebee-node-agent --filter tagStatus=TAGGED  --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --region us-east-1 --output text --no-paginate`
+          # node-agent: newest semver tag from GHCR
+          nudgebee_node_image=$(gh api -H "Accept: application/vnd.github+json" \
+            "/orgs/nudgebee/packages/container/node-agent/versions?per_page=20" \
+            --jq '[.[].metadata.container.tags[]] | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+"))) | .[0]')
           echo "nudgebee_node_image: $nudgebee_node_image"
           yq -i ".nodeAgent.image.tag=\"$nudgebee_node_image\"" values.yaml
 
@@ -73,13 +56,7 @@ jobs:
           
           if [[ -n $(git status --porcelain) ]]; then
             git add charts/nudgebee-agent/values.yaml
-            git commit -m "chore: update image tags for ${{ github.base_ref }} release
-
-            Updated image tags to latest versions from ECR for ${{ github.base_ref }} branch.
-
-            🤖 Generated with [Claude Code](https://claude.ai/code)
-
-            Co-Authored-By: Claude <noreply@anthropic.com>"
+            git commit -m "chore: update image tags for ${{ github.base_ref }} release"
             git push origin ${{ github.head_ref }}
             echo "Image tags updated and committed to PR branch"
           else
@@ -105,7 +82,7 @@ jobs:
                 repo: context.repo.repo,
                 body: `📦 **Image Tags Updated**
                 
-                I've automatically updated the image tags in \`charts/nudgebee-agent/values.yaml\` to the latest versions from ECR for the \`${{ github.base_ref }}\` branch.
+                I've automatically updated the image tags in \`charts/nudgebee-agent/values.yaml\` to the latest versions from GHCR for the \`${{ github.base_ref }}\` branch.
                 
                 The image tags are now synchronized with the latest builds and ready for release.`
               });
