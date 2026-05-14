@@ -1,4 +1,4 @@
-{{- if (and (not (default false .Values.runner.victoria_metrics_enabled)) (default false .Values.alertmanager.create_nb_default_rules)) }}
+{{- if (default false .Values.alertmanager.create_nb_default_rules) }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
