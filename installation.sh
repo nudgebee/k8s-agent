@@ -232,70 +232,124 @@ echo "Installing nudgebee agent using helm"
 helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
 helm repo update > /dev/null 2>&1
 
-addition_secret_command=""
+# Build the helm command as an array. Each optional flag becomes an
+# (empty or populated) sub-array; bash expands `"${arr[@]}"` correctly
+# even when empty, preserves spaces/quoting in values, and avoids
+# command-injection via eval.
+helm_args=(
+  upgrade --install "$agent_name" nudgebee-agent/nudgebee-agent
+  --namespace "$namespace"
+  --create-namespace
+  --set "runner.nudgebee.auth_secret_key=$auth_key"
+)
+
+if [ -n "$prometheus_url" ]; then
+  helm_args+=(
+    --set "globalConfig.prometheus_url=$prometheus_url"
+    --set "opencost.opencost.prometheus.external.url=$prometheus_url"
+  )
+fi
+
+addition_secret_args=()
 if [ -n "$additional_secret" ]; then
-    addition_secret_command=" --set-string runner.additional_env_froms[0].secretRef.name=$additional_secret --set-string runner.additional_env_froms[0].secretRef.optional=true"
+  addition_secret_args=(
+    --set-string "runner.additional_env_froms[0].secretRef.name=$additional_secret"
+    --set-string "runner.additional_env_froms[0].secretRef.optional=true"
+  )
 fi
 
-openshift_enable_command=""
+openshift_enable_args=()
 if [ -n "$openshift_enable" ]; then
-    openshift_enable_command=" --set-string openshift.enable=true --set-string openshift.createScc=true"
+  openshift_enable_args=(
+    --set-string "openshift.enable=true"
+    --set-string "openshift.createScc=true"
+  )
 fi
-disable_node_agent_command=""
+
+disable_node_agent_args=()
 if [ -n "$disable_node_agent" ]; then
-  disable_node_agent_command=" --set nodeAgent.enabled=false"
+  disable_node_agent_args=(--set "nodeAgent.enabled=false")
 fi
 
-values_command=""
+values_args=()
 if [ -n "$values" ]; then
-  values_command=" -f $values"
+  values_args=(-f "$values")
 fi
 
-alert_manager_url_command=""
+# Note: grafana_command is built earlier in the script as a quoted string;
+# split it into an array safely. It only contains --set key=value pairs
+# with no shell metacharacters in the values (admin/admin defaults).
+grafana_args=()
+if [ -n "$grafana_command" ]; then
+  # shellcheck disable=SC2206  # intentional word-split — known-safe content
+  grafana_args=($grafana_command)
+fi
+
+alert_manager_url_args=()
 if [ -n "$alert_manager_url" ]; then
-  alert_manager_url_command=" --set globalConfig.alertmanager_url=$alert_manager_url"
+  alert_manager_url_args=(--set "globalConfig.alertmanager_url=$alert_manager_url")
 fi
 
-prometheus_org_id_command=""
+prometheus_org_id_args=()
 if [ -n "$prometheus_org_id" ]; then
-  prometheus_org_id_command=" --set globalConfig.prometheus_headers='X-Scope-OrgID: $prometheus_org_id' --set globalConfig.alertmanager_headers='X-Scope-OrgID: $prometheus_org_id' --set opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
+  prometheus_org_id_args=(
+    --set "globalConfig.prometheus_headers=X-Scope-OrgID: $prometheus_org_id"
+    --set "globalConfig.alertmanager_headers=X-Scope-OrgID: $prometheus_org_id"
+    --set "opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
+  )
 fi
 
-relay_address_command=""
+relay_address_args=()
 if [ -n "$relay_address" ]; then
-  relay_address_command=" --set runner.relay_address=$relay_address"
+  relay_address_args=(--set "runner.relay_address=$relay_address")
 fi
 
-collector_endpoint_command=""
+collector_endpoint_args=()
 if [ -n "$collector_endpoint" ]; then
-  collector_endpoint_command=" --set runner.nudgebee.endpoint=$collector_endpoint"
+  collector_endpoint_args=(--set "runner.nudgebee.endpoint=$collector_endpoint")
 fi
 
-image_registry_command=""
+image_registry_args=()
 if [ -n "$image_registry" ]; then
-  image_registry_command=" --set runner.image_registry=$image_registry"
+  image_registry_args=(--set "runner.image_registry=$image_registry")
 fi
 
-disable_opencost_command=""
+disable_opencost_args=()
 if [ "$disable_opencost" == "true" ]; then
-  disable_opencost_command=" --set opencost.enabled=false"
+  disable_opencost_args=(--set "opencost.enabled=false")
 fi
 
-disable_otel_command=""
+disable_otel_args=()
 if [ "$disable_otel" == "true" ]; then
-  disable_otel_command=" --set opentelemetry-collector.enabled=false --set clickhouse.enabled=false"
+  disable_otel_args=(
+    --set "opentelemetry-collector.enabled=false"
+    --set "clickhouse.enabled=false"
+  )
 fi
 
-disable_prometheus_stack_command=""
+disable_prometheus_stack_args=()
 if [ "$disable_prometheus_stack" == "true" ]; then
-  disable_prometheus_stack_command=" --set enablePrometheusStack=false"
+  disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
 fi
 
-# Use helm upgrade --install to either install or upgrade the Helm chart
-a="helm upgrade --install $agent_name nudgebee-agent/nudgebee-agent  --namespace $namespace --create-namespace --set runner.nudgebee.auth_secret_key=\"$auth_key\" --set globalConfig.prometheus_url=\"$prometheus_url\" --set opencost.opencost.prometheus.external.url=\"$prometheus_url\" $disable_node_agent_command $openshift_enable_command $addition_secret_command $values_command $grafana_command $alert_manager_url_command $prometheus_org_id_command $relay_address_command $collector_endpoint_command $image_registry_command $disable_opencost_command $disable_otel_command $disable_prometheus_stack_command"
+helm_args+=(
+  "${disable_node_agent_args[@]}"
+  "${openshift_enable_args[@]}"
+  "${addition_secret_args[@]}"
+  "${values_args[@]}"
+  "${grafana_args[@]}"
+  "${alert_manager_url_args[@]}"
+  "${prometheus_org_id_args[@]}"
+  "${relay_address_args[@]}"
+  "${collector_endpoint_args[@]}"
+  "${image_registry_args[@]}"
+  "${disable_opencost_args[@]}"
+  "${disable_otel_args[@]}"
+  "${disable_prometheus_stack_args[@]}"
+)
 
-echo "Running command: $a"
-eval $a
+echo "Running command: helm ${helm_args[*]}"
+helm "${helm_args[@]}"
 
 # Discover Loki as log server if not found, then provide link to nudgebee doc to configure log provider
 loki_selectors=(
