@@ -1,4 +1,4 @@
-{{- if and .Values.nodeAgent.enabled }}
+{{- if .Values.nodeAgent.enabled }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -27,13 +27,15 @@ spec:
         prometheus.io/port: '80'
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
-      {{- with .Values.imagePullSecrets }}
+      {{- with .Values.nodeAgent.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       tolerations:
         - operator: Exists
-      priorityClassName: "{{ .Values.priorityClassName }}"
+      {{- if .Values.nodeAgent.priorityClassName }}
+      priorityClassName: {{ .Values.nodeAgent.priorityClassName | quote }}
+      {{- end }}
       hostPID: true
       containers:
         - name: node-agent
@@ -51,7 +53,7 @@ spec:
             - name: LOGS_ENDPOINT
               value: "{{ .Values.nodeAgent.logsEndpoint }}"
           {{- end }}
-          {{- if and .Values.nodeAgent.profilesEndpoint }}
+          {{- if .Values.nodeAgent.profilesEndpoint }}
             - name: PROFILES_ENDPOINT
               value: "{{ .Values.nodeAgent.profilesEndpoint }}"
           {{- end }}
@@ -65,7 +67,7 @@ spec:
           {{- end }}
           {{- if .Values.nodeAgent.apiKey }}
             - name: API_KEY
-              value: "{{ .Values.apiKey }}"
+              value: "{{ .Values.nodeAgent.apiKey }}"
           {{- end }}
           {{- with .Values.nodeAgent.env }}
           {{- . | toYaml | nindent 12 }}

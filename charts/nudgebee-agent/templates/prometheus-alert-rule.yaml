@@ -1,4 +1,4 @@
-{{- if (and (not (default false .Values.runner.victoria_metrics_enabled)) (default false .Values.alertmanager.create_nb_default_rules)) }}
+{{- if (default false .Values.alertmanager.create_nb_default_rules) }}
 {{- /*
 Container-ID exclusions for the log-error and HTTP-failure rules.
 
@@ -62,11 +62,11 @@ spec:
           expr: |
             (
               sum by (container_id, method, path) (rate(container_http_requests_total{status=~"5..", container_id!~"{{ $excludeApi }}"}[5m]))
-              / on (container_id) group_left ()
-              sum by (container_id) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m]))
+              /
+              sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m]))
             ) > 0.05
-            and on (container_id)
-            sum by (container_id) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m])) > 0.1
+            and on (container_id, method, path)
+            sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m])) > 0.1
           for: 10m
           annotations:
             summary: "High 5xx rate - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}}"
