@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "nudgebee-agent.labels" . | nindent 4 }}
   annotations:
-    kubernetes.io/description: {{ include "nudgebee-agent.fullname" . }}-scc provides the features required to run robusta enhanced debuggers for Java, Python, and node host capabilities
+    kubernetes.io/description: {{ include "nudgebee-agent.fullname" . }}-scc provides the features required to run nudgebee-agent debuggers and node host capabilities
 allowHostDirVolumePlugin: true
 allowHostIPC: false
 allowHostNetwork: false

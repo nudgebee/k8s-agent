@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "nudgebee-agent.labels" . | nindent 4 }}
   annotations:
-    kubernetes.io/description: {{ include "nudgebee-agent.fullname" . }}-scc provides the features required to run robusta
+    kubernetes.io/description: {{ include "nudgebee-agent.fullname" . }}-scc provides the features required to run nudgebee-agent
 allowHostDirVolumePlugin: false
 allowHostIPC: false
 allowHostNetwork: false
