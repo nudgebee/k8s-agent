@@ -29,9 +29,9 @@ spec:
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
-      {{- include "nudgebee.runner.imagePullSecrets" (dict "root" . "config" .Values.runner) | nindent 6 }}
+      {{- include "nudgebee.runner.imagePullSecrets" . | nindent 6 }}
       containers:
-      {{- include "nudgebee.runner.container" (dict "root" . "config" .Values.runner "containerName" "runner" "runnerMode" "BACKGROUND") | nindent 6 }}
+      {{- include "nudgebee.runner.container" . | nindent 6 }}
       {{- if .Values.grafanaRenderer.enableContainer }}
       - name: grafana-renderer
         image: {{ .Values.grafanaRenderer.image }}
@@ -50,7 +50,7 @@ spec:
             memory: {{ if .Values.isSmallCluster }}"64Mi"{{ else if .Values.grafanaRenderer.resources.limits.memory }}{{ .Values.grafanaRenderer.resources.limits.memory | quote }}{{ else }}{{ .Values.grafanaRenderer.resources.requests.memory | quote }}{{ end }}
             {{ if .Values.grafanaRenderer.resources.limits.cpu }}cpu: {{ .Values.grafanaRenderer.resources.limits.cpu | quote }}{{ end }}
       {{- end }}
-      {{- include "nudgebee.runner.volumes" (dict "root" . "config" .Values.runner) | nindent 6 }}
+      {{- include "nudgebee.runner.volumes" . | nindent 6 }}
       {{- if .Values.runner.nodeSelector }}
       nodeSelector: {{ toYaml .Values.runner.nodeSelector | nindent 8 }}
       {{- end }}
@@ -60,20 +60,6 @@ spec:
       {{- if .Values.runner.tolerations }}
       tolerations:  {{ toYaml .Values.runner.tolerations | nindent 8 }}
       {{- end }}
-{{- if .Values.playbooksPersistentVolume }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: persistent-playbooks-pv-claim
-  namespace: {{ .Release.Namespace }}
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: {{ if .Values.isSmallCluster }}"512Mi"{{ else }}{{ .Values.playbooksPersistentVolumeSize }}{{ end }}
-{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -121,38 +107,22 @@ metadata:
   namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
-  {{ if .Values.runner.sentry_dsn }}
-  SENTRY_DSN: {{ .Values.runner.sentry_dsn }}
-  {{ end }}
   NUDGEBEE_ENDPOINT: {{ .Values.runner.nudgebee.endpoint }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
-  PUBLISHING_WINDOW: {{ .Values.runner.nudgebee.publish_window | quote }}
-  {{ if .Values.runner.grafana.password }}
+  {{- if .Values.runner.grafana.password }}
   GRAFANA_PASSWORD: {{ .Values.runner.grafana.password | quote }}
-  {{ end }}
-  {{ if .Values.runner.grafana.apikey }}
-  GRAFANA_APIKEY: {{ .Values.runner.grafana.apikey | quote }}
-  {{ end }}
-  {{ if .Values.runner.grafana.username }}
+  {{- end }}
+  {{- if .Values.runner.grafana.username }}
   GRAFANA_USERNAME: {{ .Values.runner.grafana.username | quote }}
-  {{ end }}
-  {{ if .Values.runner.grafana.url }}
+  {{- end }}
+  {{- if .Values.runner.grafana.url }}
   GRAFANA_URL: {{ .Values.runner.grafana.url | quote }}
-  {{ end }}
-  {{ if .Values.runner.grafana.enabled }}
-  GRAFANA_ENABLED: "True"
-  {{ end }}
-  {{ if .Values.runner.grafana.extra_headers }}
+  {{- end }}
+  {{- if .Values.runner.grafana.extra_headers }}
   GRAFANA_EXTRA_HEADER: {{ .Values.runner.grafana.extra_headers | quote }}
-  {{ end }}
+  {{- end }}
   {{- if .Values.runner.loki.url }}
   LOKI_URL: {{ .Values.runner.loki.url }}
-  {{- end }}
-  {{- if .Values.runner.loki.username }}
-  LOKI_USERNAME: {{ .Values.runner.loki.username }}
-  {{- end }}
-  {{- if .Values.runner.loki.password }}
-  LOKI_PASSWORD: {{ .Values.runner.loki.password }}
   {{- end }}
   {{- if .Values.runner.loki.headers }}
   LOKI_EXTRA_HEADER: {{ .Values.runner.loki.headers }}
@@ -166,40 +136,18 @@ stringData:
   {{- if .Values.runner.es.username }}
   ELASTICSEARCH_USERNAME: {{ .Values.runner.es.username }}
   {{- end }}
-  {{- if .Values.runner.es.headers }}
-  ELASTICSEARCH_HEADER: {{ .Values.runner.es.headers }}
-  {{- end }}
   {{- if .Values.runner.es.apiKey }}
   ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
   {{- end }}
-  {{- if .Values.runner.es.use_ssl }}
-  ELASTICSEARCH_SSL_ENABLED: "True"
-  {{- end }}
-  {{- if .Values.runner.es.verify_cert }}
-  ELASTICSEARCH_SSL_VERIFY: "True"
-  {{- end }}
-  {{- if .Values.runner.es.enabled }}
-  ELASTICSEARCH_ENABLED: "True"
-  {{- end }}
-  {{- if .Values.runner.signoz.enabled }}
-  SIGNOZ_ENABLED: "True"
-  {{- end }}
   {{- if .Values.runner.signoz.apiKey }}
-  SIGNOZ_API_KEY:  {{ .Values.runner.signoz.apiKey }}
+  SIGNOZ_API_KEY: {{ .Values.runner.signoz.apiKey }}
   {{- end }}
   {{- if .Values.runner.signoz.url }}
   SIGNOZ_URL: {{ .Values.runner.signoz.url }}
   {{- end }}
-  {{- if .Values.runner.signoz.user_email }}
-  SIGNOZ_USER: {{ .Values.runner.signoz.user_email }}
-  {{- end }}
-  {{- if .Values.runner.signoz.user_password }}
-  SIGNOZ_PASSWORD: {{ .Values.runner.signoz.user_password }}
-  {{- end }}
-  CLICKHOUSE_ENABLED: "{{ if or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled }}True{{ else }}False{{ end }}"
   {{- if and (or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled) (hasKey .Values.runner "clickhouse_password") }}
   CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}
   {{- end }}
-  {{- if and .Values.runner.trace_table .Values.runner.trace_table }}
+  {{- if .Values.runner.trace_table }}
   TRACE_TABLE: {{ .Values.runner.trace_table }}
   {{- end }}
