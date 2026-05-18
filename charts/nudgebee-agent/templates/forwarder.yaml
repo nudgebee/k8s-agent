@@ -32,7 +32,7 @@ spec:
       {{- end }}
       containers:
       - name: kubewatch
-        # this is a custom version of kubewatch built from https://github.com/aantn/kubewatch
+        # nudgebee fork of kubewatch — github.com/nudgebee/kubewatch
         image: {{ .Values.kubewatch.image.repository }}:{{ .Values.kubewatch.image.tag | default "latest" }}
         imagePullPolicy: {{ .Values.kubewatch.imagePullPolicy }}
         env:
