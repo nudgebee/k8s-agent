@@ -68,8 +68,7 @@ kind: ServiceMonitor
 metadata:
   name: {{ include "nudgebee-agent.fullname" . }}-runner-service-monitor
   labels:
-    # this label is how the Prometheus installed with Robusta finds ServiceMonitors
-    # TODO: we probably need to add custom labels here for a Prometheus installed separately
+    # release label matches kube-prometheus-stack's default ServiceMonitor selector
     release: {{ .Release.Name }}
 spec:
   endpoints:

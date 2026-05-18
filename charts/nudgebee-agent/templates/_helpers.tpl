@@ -87,10 +87,12 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    {{- if .Values.rsa }}
     - name: MUTATE_ENABLED
       value: "true"
     - name: RSA_PRIVATE_KEY_PATH
-      value: /etc/robusta/auth/prv
+      value: /etc/nudgebee/auth/prv
+    {{- end }}
     {{- if or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled }}
     {{- $clickhouseSecret := .Values.runner.clickhouse_secret }}
     {{- if not $clickhouseSecret }}
@@ -129,7 +131,7 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
   {{- end }}
   volumeMounts:
     - name: auth-config-secret
-      mountPath: /etc/robusta/auth
+      mountPath: /etc/nudgebee/auth
     {{- with .Values.runner.extraVolumeMounts }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
