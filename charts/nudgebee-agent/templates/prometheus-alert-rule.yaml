@@ -1,4 +1,13 @@
 {{- if (default false .Values.alertmanager.create_nb_default_rules) }}
+{{- /*
+Container-ID exclusions for the log-error and HTTP-failure rules.
+
+The log-error regex additionally excludes log-collection infrastructure
+(fluent-bit, loki, opensearch, etc.), which emits steady error-level
+log streams that are transport/ingest failures — not app-level signal.
+*/ -}}
+{{- $excludeLog := ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1|fluent-bit|fluentd|loki|opensearch|elasticsearch|logstash|datadog|newrelic|otel|promtail).*" -}}
+{{- $excludeApi := ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*" -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -13,8 +22,8 @@ spec:
       rules:
         - alert: KubeHpaMaxedOut
           expr: >-
-            kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics"} 
-              == 
+            kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics"}
+              ==
             kube_horizontalpodautoscaler_spec_max_replicas{job="kube-state-metrics"}
             > 1
           for: 15m
@@ -22,39 +31,62 @@ spec:
             severity: warning
           annotations:
             description: >-
-              HPA {{`{{ $labels.namespace }}`}}/{{`{{ $labels.horizontalpodautoscaler }}`}} 
+              HPA {{`{{ $labels.namespace }}`}}/{{`{{ $labels.horizontalpodautoscaler }}`}}
               has been running at max replicas for longer than 15 minutes.
             summary: HPA is running at max replicas
+        # Fires when a container's error/critical log rate is >3x its historical
+        # baseline (1h window offset 1h — the offset keeps an ongoing spike from
+        # polluting the baseline and silencing sustained incidents). The 0.1/s
+        # floor is an activity floor (≥6 err/min) that avoids ratio blowups on
+        # idle containers. The baseline>0 guard prevents cold-start containers
+        # (no historical data) from firing on their first error burst.
         - alert: HighErrorCriticalLogs
-          expr: >-
-            increase(container_log_messages_total{level=~"error|critical",
-            container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1).*"}[5m])
-            > 1
-          for: 5m
+          expr: |
+            rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[5m])
+              > 3 * rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[1h] offset 1h)
+            and
+            rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[5m]) > 0.1
+            and
+            rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[1h] offset 1h) > 0
+          for: 10m
           annotations:
             summary: "High error/critical logs - Sample: {{`{{ printf \"%.80s\" $labels.sample }}`}}"
-            description: "The total count of container log messages with error or critical level is higher for the past 5 minutes, grouped by container_id. Container ID: {{`{{ $labels.container_id }}`}} Log Sample: {{`{{ $labels.sample }}`}} Failure Count: {{`{{ printf \"%.0f\" $value }}`}}"
+            description: "Container log error rate is more than 3x its 1h baseline. Container ID: {{`{{ $labels.container_id }}`}} Log Sample: {{`{{ $labels.sample }}`}} Current rate (err/s): {{`{{ printf \"%.2f\" $value }}`}}"
           labels:
-            severity: critical
+            severity: warning
+        # Fires when >5% of a container's HTTP traffic is 5xx for 10m, with an
+        # activity floor of 0.1 req/s so ratios don't blow up on low-volume
+        # containers. 4xx is excluded — those are client errors (bad request,
+        # unauthorised, etc.) and don't indicate the application failing.
         - alert: ApplicationAPIFailures
-          expr: >-
-            increase(container_http_requests_total{container_id!~".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*",
-            status=~"5..|4.."}[5m]) > 1
-          for: 5m
+          expr: |
+            (
+              sum by (container_id, method, path) (rate(container_http_requests_total{status=~"5..", container_id!~"{{ $excludeApi }}"}[5m]))
+              /
+              sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m]))
+            ) > 0.05
+            and on (container_id, method, path)
+            sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m])) > 0.1
+          for: 10m
           annotations:
-            summary: "API Failures - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}} ({{`{{ $labels.status }}`}})"
-            description: "Application reported API failure. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} Failure Count: {{`{{ printf \"%.0f\" $value }}`}}"
+            summary: "High 5xx rate - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}}"
+            description: "Aggregate 5xx rate across status codes exceeds 5% of total traffic. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} 5xx Ratio: {{`{{ printf \"%.2f\" $value }}`}}"
           labels:
             severity: critical
+        # Fires when a pod has been in Terminating state for >30 minutes — that
+        # is 60x the Kubernetes default terminationGracePeriodSeconds (30s), well
+        # past any legitimate graceful termination. max_over_time smooths across
+        # kube-state-metrics scrape gaps so the alert stays firing instead of
+        # flapping on each missed scrape.
         - alert: KubePodStuckTerminating
-          expr: >-
-            count(kube_pod_deletion_timestamp) by (namespace, pod) *
-            count(kube_pod_status_reason{reason="NodeLost"} == 0) by
-            (namespace, pod) > 0
-          for: 5m
+          expr: |
+            (time() - max_over_time(kube_pod_deletion_timestamp[20m])) > 1800
+            unless on (namespace, pod)
+            max_over_time(kube_pod_status_reason{reason="NodeLost"}[20m]) == 1
+          for: 15m
           labels:
-            severity: critical
+            severity: warning
           annotations:
             summary: Pod stuck in terminating state
-            description: "Pod {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} blocked in Terminating state."
+            description: "Pod {{`{{ $labels.namespace }}`}}/{{`{{ $labels.pod }}`}} blocked in Terminating state for over 30 minutes."
 {{- end }}

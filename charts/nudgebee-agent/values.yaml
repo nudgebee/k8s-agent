@@ -110,6 +110,10 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+  service:
+    enabled: false
+    annotations: {}
+    labels: {}
   podAnnotations: {}
   image:
     repository: ghcr.io/nudgebee/node-agent
