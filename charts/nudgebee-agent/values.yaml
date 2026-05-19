@@ -83,10 +83,12 @@ runner:
     url: ""
     headers: ""
   es:
-    url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
+    # Set to enable Elasticsearch actions. Surfaces as ELASTICSEARCH_URL.
+    url: ""
     apiKey: ""
   signoz:
-    url: "https://signoz.signoz.svc:8080"
+    # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
+    url: ""
     apiKey: ""
   grafana:
     url: ""
