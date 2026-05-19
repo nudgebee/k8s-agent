@@ -56,7 +56,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-05-18T07-34-08_bb616ea340b11a941bac1ad2615df5b2f3284e65
+    tag: 2026-05-18T18-17-59_787ea0cc865e96db72659ddc586058b8d737cded
   imagePullPolicy: IfNotPresent
   resources:
     requests:
@@ -83,10 +83,12 @@ runner:
     url: ""
     headers: ""
   es:
-    url: "https://elasticsearch-es-internal-http.monitoring.svc:9200"
+    # Set to enable Elasticsearch actions. Surfaces as ELASTICSEARCH_URL.
+    url: ""
     apiKey: ""
   signoz:
-    url: "https://signoz.signoz.svc:8080"
+    # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
+    url: ""
     apiKey: ""
   grafana:
     url: ""
