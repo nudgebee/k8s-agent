@@ -90,6 +90,12 @@ type: Opaque
 stringData:
   NUDGEBEE_ENDPOINT: {{ .Values.runner.nudgebee.endpoint }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
+  {{- if .Values.globalConfig.prometheus_url }}
+  PROMETHEUS_URL: {{ .Values.globalConfig.prometheus_url | quote }}
+  {{- end }}
+  {{- if .Values.globalConfig.prometheus_headers }}
+  PROMETHEUS_HEADERS: {{ .Values.globalConfig.prometheus_headers | quote }}
+  {{- end }}
   {{- if .Values.runner.grafana.password }}
   GRAFANA_PASSWORD: {{ .Values.runner.grafana.password | quote }}
   {{- end }}
