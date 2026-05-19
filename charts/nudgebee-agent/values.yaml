@@ -5,6 +5,11 @@ enablePrometheusStack: true
 automountServiceAccountToken: true
 globalConfig:
   custom_annotations: {}
+  # Prometheus URL the runner queries (e.g. "http://prometheus-server.prometheus.svc:80").
+  # Surfaces as PROMETHEUS_URL on the runner pod. Leave empty to let the agent auto-discover.
+  prometheus_url: ""
+  # Optional headers (comma-separated "Header: value" pairs). Surfaces as PROMETHEUS_HEADERS.
+  prometheus_headers: ""
 enableServiceMonitors: true
 # parameters for the nudgebee forwarder deployment
 kubewatch:
