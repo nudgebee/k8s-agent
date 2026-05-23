@@ -1,0 +1,9 @@
+# Default reviewers for all changes in this repo.
+# Adjust the team handle below to match your GitHub org/team.
+
+*                               @nudgebee/maintainers
+
+# Chart-specific
+/charts/                        @nudgebee/maintainers
+/.github/workflows/             @nudgebee/maintainers
+/installation.sh                @nudgebee/maintainers

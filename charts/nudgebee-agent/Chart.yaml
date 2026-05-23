@@ -1,8 +1,31 @@
 apiVersion: v2
 name: nudgebee-agent
-description: Nudgebee Helm chart for Kubernetes
+description: NudgeBee Kubernetes agent — connects your cluster to the NudgeBee backend for observability, cost, and incident automation.
 type: application
 icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+home: https://github.com/nudgebee/k8s-agent
+sources:
+  - https://github.com/nudgebee/k8s-agent
+maintainers:
+  - name: NudgeBee
+    email: support@nudgebee.com
+    url: https://nudgebee.com
+keywords:
+  - kubernetes
+  - observability
+  - opentelemetry
+  - opencost
+  - monitoring
+  - clickhouse
+  - kubewatch
+  - sre
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://app.nudgebee.com/help/docs/installation/agent/installation/
+    - name: Source
+      url: https://github.com/nudgebee/k8s-agent
 # these are set to the right value by .github/workflows/release.yaml
 # we use 0.0.1 as a placeholder for the version` because Helm wont allow `0.0.0` and we want to be able to run
 # `helm install` on development checkouts without updating this file. the version doesn't matter in that case anyway
