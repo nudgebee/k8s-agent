@@ -9,10 +9,10 @@ on:
 permissions:
   contents: read
 
-# Pushes to GHCR (ghcr.io/nudgebee/nudgebee-agent). Multi-arch (amd64+arm64)
-# since target nodes can be either. The image name is kept from the former
-# nudgebee-agent repo so the chart's update-image-tags workflow picks up new
-# tags unchanged. main is the release branch.
+# Builds the runner and pushes ghcr.io/nudgebee/nudgebee-agent (multi-arch
+# amd64+arm64; target nodes can be either). The chart's update-image-tags
+# workflow picks up new tags by image name. Images are signed (cosign,
+# keyless) and ship SBOM + provenance attestations. main is the release branch.
 
 jobs:
   build:
@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # keyless cosign signing + provenance attestation
     steps:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -42,14 +43,25 @@ jobs:
         run: echo "tag=$(date +'%Y-%m-%dT%H-%M-%S')_$GITHUB_SHA" >> $GITHUB_ENV
 
       - name: Build and Push Image
+        id: build
         uses: docker/build-push-action@v7
         with:
           platforms: linux/amd64,linux/arm64
           context: runner
           file: runner/Dockerfile
           push: true
+          sbom: true
+          provenance: mode=max
           build-args: |
             VERSION=${{ env.tag }}
             COMMIT=${{ github.sha }}
           tags: |
             ghcr.io/nudgebee/nudgebee-agent:${{ env.tag }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Sign image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/nudgebee/nudgebee-agent@${DIGEST}"
