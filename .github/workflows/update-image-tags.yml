@@ -7,6 +7,9 @@ on:
       - prod
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   update-tags:
     runs-on: ubuntu-latest

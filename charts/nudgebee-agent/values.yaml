@@ -61,7 +61,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-05-21T11-58-47_dea9a9abd8c9aa877c405ffa0e1c86e9d3983906
+    tag: 2026-05-26T07-35-13_511a9e0b1ea6318caea7031edd59fe79d32930ca
   imagePullPolicy: IfNotPresent
   resources:
     requests:

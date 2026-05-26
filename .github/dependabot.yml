@@ -16,3 +16,20 @@ updates:
     labels:
       - dependencies
       - docker
+
+  # Runner component (Go binary + its Dockerfile)
+  - package-ecosystem: docker
+    directory: /runner
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
+
+  - package-ecosystem: gomod
+    directory: /runner
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - go

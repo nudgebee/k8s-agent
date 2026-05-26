@@ -1,3 +1,27 @@
-.idea
-/charts/*/charts
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+
+# Helm
+/charts/*/charts/
 **/Chart.lock
+*.tgz
+.cr-release-packages/
+
+# Go / test output
+coverage.out
+coverage.html
+*.test
+
+# Local-only files — never commit. Anchored to the repo root so chart
+# templates (e.g. charts/*/templates/*secret*.yaml) are unaffected.
+/*secret*.yaml
+/*secret*.yml
+/sample-data.yaml
+.env
+.env.local

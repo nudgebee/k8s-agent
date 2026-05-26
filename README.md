@@ -4,6 +4,7 @@
 [![Helm Lint](https://github.com/nudgebee/k8s-agent/actions/workflows/helm-dev-lint.yml/badge.svg)](https://github.com/nudgebee/k8s-agent/actions/workflows/helm-dev-lint.yml)
 [![Helm Test](https://github.com/nudgebee/k8s-agent/actions/workflows/helm-prod-test.yml/badge.svg)](https://github.com/nudgebee/k8s-agent/actions/workflows/helm-prod-test.yml)
 [![Release](https://img.shields.io/github/v/release/nudgebee/k8s-agent)](https://github.com/nudgebee/k8s-agent/releases)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/nudgebee/k8s-agent/badge)](https://securityscorecards.dev/viewer/?uri=github.com/nudgebee/k8s-agent)
 
 Helm chart for the NudgeBee Kubernetes agent. The agent runs in your cluster, collects Kubernetes state, events, metrics, logs, and traces, and forwards them to the NudgeBee backend for observability, cost visibility, and incident automation.
 

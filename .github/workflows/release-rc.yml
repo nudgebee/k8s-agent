@@ -3,6 +3,9 @@ name: Release RC Charts
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   release-rc:
     permissions:
