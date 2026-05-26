@@ -1,0 +1,12 @@
+bin/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+coverage.out
+coverage.html
+cov.out
+.env
+.env.local
+*.pem
+*.key

@@ -1,0 +1,71 @@
+name: Runner - Lint and Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths: ['runner/**']
+  push:
+    branches: [main]
+    paths: ['runner/**']
+
+jobs:
+  test:
+    name: Lint + Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+    strategy:
+      matrix:
+        go-version: ['1.26.x']
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+          cache-dependency-path: runner/go.sum
+
+      - name: gofmt check
+        run: |
+          gofmt_diff=$(gofmt -s -l . | grep -v '^vendor/' || true)
+          if [ -n "$gofmt_diff" ]; then
+            echo "Files need gofmt -s -w:"
+            echo "$gofmt_diff"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.9.0
+          args: --timeout 10m
+          working-directory: runner
+
+      - name: Unit tests with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Coverage
+        run: |
+          go test -race -count=1 \
+            -coverpkg=$(go list ./pkg/... ./internal/... | grep -v /pkg/version | tr '\n' ',' | sed 's/,$//') \
+            -coverprofile=coverage.out -covermode=atomic \
+            ./pkg/... ./internal/...
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Upload coverage artefact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: runner/coverage.out
+          retention-days: 7

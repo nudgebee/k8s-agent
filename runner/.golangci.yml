@@ -1,0 +1,64 @@
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    - bodyclose
+    - gocritic
+    - gosec
+    - unconvert
+    - unparam
+
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+          arguments:
+            - [] # allowList
+            - [] # blockList
+            - - skipPackageNameChecks: true
+        - name: package-comments
+        - name: exported
+          disabled: true
+    gosec:
+      excludes:
+        # G104 — Errors unhandled. We rely on errcheck instead.
+        - G104
+        # G304 — File path provided as taint input. The agent legitimately
+        # reads paths from config (RSA_PRIVATE_KEY_PATH, KUBECONFIG, etc.).
+        - G304
+        # G101 — Looks for hardcoded credentials. False-positive on the AWS
+        # IMDS URL (http://169.254.169.254/...) which is a well-known
+        # well-known link-local endpoint, not a credential.
+        - G101
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - unparam
+          - bodyclose
+      - path: pkg/version/
+        linters:
+          - unused
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/nudgebee/nudgebee-agent
