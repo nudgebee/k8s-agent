@@ -9,6 +9,9 @@ on:
     branches: [main]
     paths: ['runner/**']
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint + Test

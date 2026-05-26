@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths: ['runner/**']
 
+permissions:
+  contents: read
+
 # Pushes to GHCR (ghcr.io/nudgebee/nudgebee-agent). Multi-arch (amd64+arm64)
 # since target nodes can be either. The image name is kept from the former
 # nudgebee-agent repo so the chart's update-image-tags workflow picks up new
