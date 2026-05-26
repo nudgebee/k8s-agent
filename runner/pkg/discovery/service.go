@@ -327,10 +327,12 @@ func (s *Service) processOne(ctx context.Context, h *resourceHandler, key string
 		// process deletions — full snapshots on resync handle them. We log
 		// for now and skip.
 		s.logger.Debug("resource deleted (will reconcile on next snapshot)", "key", key)
+		h.queue.Forget(key)
 		return
 	}
 	item, ok := h.converter(raw)
 	if !ok {
+		h.queue.Forget(key)
 		return
 	}
 	env := &Envelope{Type: h.typ, Data: []any{item}}
@@ -338,6 +340,9 @@ func (s *Service) processOne(ctx context.Context, h *resourceHandler, key string
 		s.logger.Error("incremental post failed", "type", h.typ, "key", key, "err", err)
 		// Don't AddRateLimited on transient backend errors — next periodic
 		// snapshot will pick it up. Failed retries pile up otherwise.
+	} else {
+		// Clear any backoff accumulated from a prior indexer-get error.
+		h.queue.Forget(key)
 	}
 }
 

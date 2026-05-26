@@ -637,6 +637,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // cap request body at 1 MiB
 			var body relay.ActionRequestBody
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)

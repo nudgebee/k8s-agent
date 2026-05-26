@@ -102,18 +102,19 @@ func toSnakeCase(s string) string {
 	if strings.ContainsAny(s, "_./-:") {
 		return s
 	}
+	runes := []rune(s)
 	var b strings.Builder
 	b.Grow(len(s) + 4)
-	for i, r := range s {
+	for i, r := range runes {
 		if i > 0 && unicode.IsUpper(r) {
 			// Insert underscore before the uppercase letter — except
 			// when it follows another uppercase (handle acronyms like
 			// "APIVersion" → "api_version" not "a_p_i_version").
-			prev := []rune(s)[i-1]
+			prev := runes[i-1]
 			if unicode.IsLower(prev) || unicode.IsDigit(prev) {
 				b.WriteByte('_')
-			} else if i+1 < len(s) {
-				next := []rune(s)[i+1]
+			} else if i+1 < len(runes) {
+				next := runes[i+1]
 				// "APIVersion" — at i=3 ('V'), prev='I' (upper),
 				// next='e' (lower). Insert underscore before V to
 				// separate the acronym from the next word.

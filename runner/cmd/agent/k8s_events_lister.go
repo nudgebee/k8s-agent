@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,6 +68,11 @@ func (l *k8sEventsLister) ListEvents(ctx context.Context, namespace, kind, name 
 	for i := range list.Items {
 		events = append(events, toAgentEvent(&list.Items[i]))
 	}
+	// Sort by LastSeen descending so the most-recent events survive the
+	// cap below (the API returns them in arbitrary order).
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].LastSeen.After(events[j].LastSeen)
+	})
 	if len(events) > limit {
 		events = events[:limit]
 	}

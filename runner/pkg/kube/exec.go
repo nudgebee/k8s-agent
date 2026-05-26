@@ -76,10 +76,16 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
 
+	// ProcessState is nil if the process never started (e.g. kubectl not
+	// on PATH); the real-exec-failure branch below turns that into an error.
+	exitCode := -1
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
 	out := map[string]any{
 		"stdout":    stdout.String(),
 		"stderr":    stderr.String(),
-		"exit_code": cmd.ProcessState.ExitCode(),
+		"exit_code": exitCode,
 	}
 	// kubectl returns non-zero for cases the caller may want to inspect
 	// (e.g. "not found"); surface as data, not Go error.
