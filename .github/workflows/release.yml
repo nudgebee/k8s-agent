@@ -3,6 +3,9 @@ name: Release Charts
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   release:
     permissions:
