@@ -2,7 +2,7 @@
 # working `kubectl` binary alongside the agent — the kubectl_command_executor
 # action shells out to it (pkg/kube/exec.go).
 
-FROM golang:1.26-alpine AS build
+FROM golang:1.26-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS build
 WORKDIR /src
 
 ARG VERSION=dev
@@ -26,13 +26,13 @@ RUN go build \
 # we test against. The binary is amd64; if the agent runs on arm64 nodes, the
 # build pipeline should pull the arm64 variant. Currently we only build amd64
 # images (.github/workflows/build-image.yaml).
-FROM alpine:3.23 AS kubectl
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11 AS kubectl
 ARG KUBECTL_VERSION=v1.32.1
 RUN apk add --no-cache curl ca-certificates && \
 	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
 	chmod +x /usr/local/bin/kubectl
 
-FROM alpine:3.23
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 WORKDIR /
 RUN apk add --no-cache ca-certificates && \
 	addgroup -S nonroot -g 65532 && \
