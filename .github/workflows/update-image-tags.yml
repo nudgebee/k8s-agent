@@ -19,7 +19,7 @@ jobs:
       packages: read
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.head_ref }}
@@ -28,8 +28,9 @@ jobs:
         working-directory: ./charts/nudgebee-agent
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          echo "Updating image tags for ${{ github.base_ref }} branch..."
+          echo "Updating image tags for $BASE_REF branch..."
 
           # nudgebee-agent: newest timestamp_sha tag from GHCR
           nudgebee_app_image=$(gh api -H "Accept: application/vnd.github+json" \
@@ -53,21 +54,26 @@ jobs:
           yq -i ".kubewatch.image.tag=\"$nudgebee_kubewatch_image\"" values.yaml
 
       - name: Commit updated image tags
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           if [[ -n $(git status --porcelain) ]]; then
             git add charts/nudgebee-agent/values.yaml
-            git commit -m "chore: update image tags for ${{ github.base_ref }} release"
-            git push origin ${{ github.head_ref }}
+            git commit -m "chore: update image tags for $BASE_REF release"
+            git push origin "$HEAD_REF"
             echo "Image tags updated and committed to PR branch"
           else
             echo "No changes to commit - image tags are already up to date"
           fi
 
       - name: Comment on PR
-        uses: actions/github-script@v6
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        env:
+          BASE_REF: ${{ github.base_ref }}
         with:
           script: |
             const { data: files } = await github.rest.pulls.listFiles({
@@ -85,7 +91,7 @@ jobs:
                 repo: context.repo.repo,
                 body: `📦 **Image Tags Updated**
                 
-                I've automatically updated the image tags in \`charts/nudgebee-agent/values.yaml\` to the latest versions from GHCR for the \`${{ github.base_ref }}\` branch.
+                I've automatically updated the image tags in \`charts/nudgebee-agent/values.yaml\` to the latest versions from GHCR for the \`${process.env.BASE_REF}\` branch.
                 
                 The image tags are now synchronized with the latest builds and ready for release.`
               });
