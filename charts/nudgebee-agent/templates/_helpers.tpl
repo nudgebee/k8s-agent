@@ -87,6 +87,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    {{- if .Values.runner.profilerImage }}
+    - name: PROFILER_IMAGE
+      value: {{ .Values.runner.profilerImage | quote }}
+    {{- end }}
     {{- if .Values.rsa }}
     - name: MUTATE_ENABLED
       value: "true"
