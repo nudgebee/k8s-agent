@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -70,8 +71,16 @@ func NewService(cs kubernetes.Interface, sink *Sink, resync time.Duration, logge
 }
 
 // RegisterPods wires the Pod informer + workqueue + converter. Call before Run().
+//
+// The converter is bound to the ReplicaSet informer's indexer so each
+// Pod's `owner` field is resolved up to the controlling Deployment
+// (RS.OwnerReferences) instead of being emitted as the immediate
+// ReplicaSet. This is what keeps `k8s_pods.workload_type =
+// "Deployment"` at the backend; without it every Deployment-owned pod
+// gets recorded as workload_type="ReplicaSet" and the UI workload
+// queries return empty.
 func (s *Service) RegisterPods() {
-	s.register(s.factory.Core().V1().Pods().Informer(), TypeService, convertPod)
+	s.register(s.factory.Core().V1().Pods().Informer(), TypeService, newPodConverter(s.replicaSetLookup()))
 }
 
 // RegisterDeployments wires the Deployment informer. The converter is
@@ -150,6 +159,33 @@ func (s *Service) podLookup() podLookupFn {
 	}
 }
 
+// replicaSetLookup returns a `(namespace, name) -> *ReplicaSet` closure
+// backed by the ReplicaSet informer's indexer. Used by the Pod
+// converter to walk the Pod → ReplicaSet → Deployment owner chain at
+// emit time. Returns nil when the RS isn't (yet) in cache — caller
+// falls back to emitting the ReplicaSet ref unchanged, and the next
+// pod-status event re-emits with the correct owner once
+// WaitForCacheSync completes.
+//
+// As with podLookup, GetIndexer() is taken eagerly here:
+// SharedInformerFactory.ReplicaSets().Informer() is idempotent, so the
+// indexer is the same shared instance RegisterReplicaSets wires up
+// regardless of registration order.
+func (s *Service) replicaSetLookup() replicaSetLookupFn {
+	indexer := s.factory.Apps().V1().ReplicaSets().Informer().GetIndexer()
+	return func(namespace, name string) *appsv1.ReplicaSet {
+		if indexer == nil {
+			return nil
+		}
+		obj, ok, err := indexer.GetByKey(namespace + "/" + name)
+		if err != nil || !ok {
+			return nil
+		}
+		rs, _ := obj.(*appsv1.ReplicaSet)
+		return rs
+	}
+}
+
 // RegisterJobs wires the Job informer (under "job" type).
 func (s *Service) RegisterJobs() {
 	s.register(s.factory.Batch().V1().Jobs().Informer(), TypeJob, convertJob)
@@ -211,9 +247,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.factory.Start(stopCh)
 
-	// Wait for all caches to sync before emitting the first full snapshot.
-	if !cache.WaitForCacheSync(stopCh, s.cacheSyncFuncs()...) {
-		return errors.New("discovery: cache sync timed out")
+	// Wait at the factory level (not just on handler-bound informers) so
+	// auxiliary informers instantiated via lookup closures — replicaSetLookup,
+	// podLookup — are synced before the initial snapshot. Otherwise, a caller
+	// that wires RegisterPods without RegisterReplicaSets would race: the RS
+	// informer would still be started (factory tracks any informer ever
+	// requested), but a handler-only sync wait wouldn't include it, and the
+	// first pod snapshot could fire with unresolved ReplicaSet owners.
+	for typ, ok := range s.factory.WaitForCacheSync(stopCh) {
+		if !ok {
+			return fmt.Errorf("discovery: cache sync timed out for %v", typ)
+		}
 	}
 	s.logger.Info("discovery caches synced", "handlers", len(s.handlers))
 
@@ -256,14 +300,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return nil
-}
-
-func (s *Service) cacheSyncFuncs() []cache.InformerSynced {
-	out := make([]cache.InformerSynced, 0, len(s.handlers))
-	for _, h := range s.handlers {
-		out = append(out, h.informer.HasSynced)
-	}
-	return out
 }
 
 // emitAllSnapshots posts one full-load envelope per resource type by walking
@@ -358,56 +394,70 @@ func enqueue(q workqueue.TypedRateLimitingInterface[string], obj any) {
 // convertPod produces the service-of-type-Pod dict. Same wire shape as
 // Deployment/StatefulSet/etc. — the collector reads pods through the
 // same `_process_discovery` path, keying off `service_key`
-// and `type=="Pod"` for the terminal-state
-// branch.
+// and `type=="Pod"` for the terminal-state branch.
+//
+// This is the no-lookup variant kept for backward-compat / tests; the
+// production `RegisterPods` path wires `newPodConverter(rsLookup)` so
+// the owner field is resolved up to the controlling Deployment via the
+// ReplicaSet informer. Without the lookup, a Pod owned by a ReplicaSet
+// is emitted with `owner = [{kind: "ReplicaSet", ...}]` — the backend
+// then keys its workload tables to the RS rather than the Deployment.
 func convertPod(obj any) (any, bool) {
-	p, ok := obj.(*corev1.Pod)
-	if !ok {
-		return nil, false
-	}
-	containers := make([]map[string]any, 0, len(p.Spec.Containers))
-	for _, c := range p.Spec.Containers {
-		containers = append(containers, map[string]any{
-			"name":  c.Name,
-			"image": c.Image,
-		})
-	}
-	owners := make([]map[string]any, 0, len(p.OwnerReferences))
-	for _, o := range p.OwnerReferences {
-		owners = append(owners, map[string]any{"kind": o.Kind, "name": o.Name})
-	}
-	// Pods don't have a "ready replica" semantic — use ready-container count
-	// for ready_pods and 1 for total_pods (it's a single pod). The UI uses
-	// these for service-detail rollups.
-	readyContainers := int32(0)
-	for _, cs := range p.Status.ContainerStatuses {
-		if cs.Ready {
-			readyContainers++
+	return newPodConverter(nil)(obj)
+}
+
+// newPodConverter binds a ReplicaSet lookup so the Pod's `owner` field
+// can be resolved up one hop to the controlling Deployment. See
+// ownerInfosWithRSLookup for the resolution rule; without rsLookup the
+// emitted owner remains the immediate ReplicaSet, which breaks all
+// downstream workload-keyed views (k8s_pods.workload_type stays
+// "ReplicaSet" forever).
+func newPodConverter(rsLookup replicaSetLookupFn) func(any) (any, bool) {
+	return func(obj any) (any, bool) {
+		p, ok := obj.(*corev1.Pod)
+		if !ok {
+			return nil, false
 		}
+		containers := make([]map[string]any, 0, len(p.Spec.Containers))
+		for _, c := range p.Spec.Containers {
+			containers = append(containers, map[string]any{
+				"name":  c.Name,
+				"image": c.Image,
+			})
+		}
+		// Pods don't have a "ready replica" semantic — use ready-container count
+		// for ready_pods and 1 for total_pods (it's a single pod). The UI uses
+		// these for service-detail rollups.
+		readyContainers := int32(0)
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Ready {
+				readyContainers++
+			}
+		}
+		return map[string]any{
+			"name":             p.Name,
+			"namespace":        p.Namespace,
+			"type":             "Pod",
+			"service_key":      p.Namespace + "/Pod/" + p.Name,
+			"resource_version": parseResourceVersion(p.ObjectMeta),
+			"creation_time":    p.CreationTimestamp.UTC().Format(time.RFC3339),
+			"update_time":      time.Now().UTC().UnixMilli(),
+			"deleted":          false,
+			"classification":   "None",
+			"total_pods":       1,
+			"ready_pods":       readyContainers,
+			"is_helm_release":  isHelmRelease(p.Labels, p.Annotations),
+			"node_name":        p.Spec.NodeName,
+			"status":           string(p.Status.Phase),
+			"restart_count":    podRestartCounts(p),
+			"status_dict":      nil,
+			"config": map[string]any{
+				"labels":     nonNilLabels(p.Labels),
+				"containers": containers,
+				"owner":      ownerInfosWithRSLookup(p.OwnerReferences, p.Namespace, rsLookup),
+			},
+		}, true
 	}
-	return map[string]any{
-		"name":             p.Name,
-		"namespace":        p.Namespace,
-		"type":             "Pod",
-		"service_key":      p.Namespace + "/Pod/" + p.Name,
-		"resource_version": parseResourceVersion(p.ObjectMeta),
-		"creation_time":    p.CreationTimestamp.UTC().Format(time.RFC3339),
-		"update_time":      time.Now().UTC().UnixMilli(),
-		"deleted":          false,
-		"classification":   "None",
-		"total_pods":       1,
-		"ready_pods":       readyContainers,
-		"is_helm_release":  isHelmRelease(p.Labels, p.Annotations),
-		"node_name":        p.Spec.NodeName,
-		"status":           string(p.Status.Phase),
-		"restart_count":    podRestartCounts(p),
-		"status_dict":      nil,
-		"config": map[string]any{
-			"labels":     nonNilLabels(p.Labels),
-			"containers": containers,
-			"owner":      owners,
-		},
-	}, true
 }
 
 // podRestartCounts produces the per-container restart_count map.
