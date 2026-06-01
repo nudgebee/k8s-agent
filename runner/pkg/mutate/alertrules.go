@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 )
 
 // PrometheusRule CRD GVR. Standard prometheus-operator group.
@@ -146,43 +147,62 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 	}
 
 	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(m.Namespace)
-	existing, err := ri.Get(ctx, LegacyAlertRuleCRDName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		u := newLegacyAlertRuleCR(m.Namespace, []any{rule})
-		created, cerr := ri.Create(ctx, u, metav1.CreateOptions{})
-		if cerr != nil {
-			return nil, cerr
+	// Shared CR + concurrent UI sessions → 409 Conflict whenever two callers
+	// land between Get and Update. RetryOnConflict re-reads + re-applies the
+	// patch on each conflict; the AlreadyExists branch covers the rare case
+	// where two callers race to create the CR at once (we surface that as a
+	// Conflict so the retry loop handles it the same way).
+	var result *unstructured.Unstructured
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, gerr := ri.Get(ctx, LegacyAlertRuleCRDName, metav1.GetOptions{})
+		if apierrors.IsNotFound(gerr) {
+			u := newLegacyAlertRuleCR(m.Namespace, []any{rule})
+			created, cerr := ri.Create(ctx, u, metav1.CreateOptions{})
+			if cerr != nil {
+				if apierrors.IsAlreadyExists(cerr) {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: prometheusRuleGVR.Group, Resource: prometheusRuleGVR.Resource},
+						LegacyAlertRuleCRDName, cerr)
+				}
+				return cerr
+			}
+			result = created
+			return nil
 		}
-		return created.UnstructuredContent(), nil
-	}
+		if gerr != nil {
+			return gerr
+		}
+
+		groups, _, _ := unstructured.NestedSlice(existing.Object, "spec", "groups")
+		if len(groups) == 0 {
+			groups = []any{map[string]any{
+				"name":  LegacyAlertRuleGroupName,
+				"rules": []any{rule},
+			}}
+		} else if !replaceLegacyRuleInPlace(groups, p.Alert, rule) {
+			first, _ := groups[0].(map[string]any)
+			if first == nil {
+				first = map[string]any{"name": LegacyAlertRuleGroupName}
+			}
+			rules, _ := first["rules"].([]any)
+			first["rules"] = append(rules, rule)
+			groups[0] = first
+		}
+		if serr := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); serr != nil {
+			return serr
+		}
+
+		updated, uerr := ri.Update(ctx, existing, metav1.UpdateOptions{})
+		if uerr != nil {
+			return uerr
+		}
+		result = updated
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	groups, _, _ := unstructured.NestedSlice(existing.Object, "spec", "groups")
-	if len(groups) == 0 {
-		groups = []any{map[string]any{
-			"name":  LegacyAlertRuleGroupName,
-			"rules": []any{rule},
-		}}
-	} else if !replaceLegacyRuleInPlace(groups, p.Alert, rule) {
-		first, _ := groups[0].(map[string]any)
-		if first == nil {
-			first = map[string]any{"name": LegacyAlertRuleGroupName}
-		}
-		rules, _ := first["rules"].([]any)
-		first["rules"] = append(rules, rule)
-		groups[0] = first
-	}
-	if err := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); err != nil {
-		return nil, err
-	}
-
-	updated, err := ri.Update(ctx, existing, metav1.UpdateOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return updated.UnstructuredContent(), nil
+	return result.UnstructuredContent(), nil
 }
 
 // DeleteAlertRule removes a single rule by `alert` name from the canonical
@@ -199,41 +219,45 @@ func (m *Mutator) DeleteAlertRule(ctx context.Context, alert string) error {
 		return errors.New("mutate: alert name required")
 	}
 	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(m.Namespace)
-	existing, err := ri.Get(ctx, LegacyAlertRuleCRDName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	groups, _, _ := unstructured.NestedSlice(existing.Object, "spec", "groups")
-	changed := false
-	for gi := range groups {
-		g, _ := groups[gi].(map[string]any)
-		if g == nil {
-			continue
+	// Same conflict story as CreateOrReplaceAlertRule: shared CR, concurrent
+	// writers. Retry re-reads + re-applies the deletion on 409.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, gerr := ri.Get(ctx, LegacyAlertRuleCRDName, metav1.GetOptions{})
+		if apierrors.IsNotFound(gerr) {
+			return nil
 		}
-		rules, _ := g["rules"].([]any)
-		kept := make([]any, 0, len(rules))
-		for _, raw := range rules {
-			r, _ := raw.(map[string]any)
-			if r != nil && r["alert"] == alert {
-				changed = true
+		if gerr != nil {
+			return gerr
+		}
+		groups, _, _ := unstructured.NestedSlice(existing.Object, "spec", "groups")
+		changed := false
+		for gi := range groups {
+			g, _ := groups[gi].(map[string]any)
+			if g == nil {
 				continue
 			}
-			kept = append(kept, raw)
+			rules, _ := g["rules"].([]any)
+			kept := make([]any, 0, len(rules))
+			for _, raw := range rules {
+				r, _ := raw.(map[string]any)
+				if r != nil && str(r, "alert") == alert {
+					changed = true
+					continue
+				}
+				kept = append(kept, raw)
+			}
+			g["rules"] = kept
+			groups[gi] = g
 		}
-		g["rules"] = kept
-		groups[gi] = g
-	}
-	if !changed {
-		return nil
-	}
-	if err := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); err != nil {
-		return err
-	}
-	_, err = ri.Update(ctx, existing, metav1.UpdateOptions{})
-	return err
+		if !changed {
+			return nil
+		}
+		if serr := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); serr != nil {
+			return serr
+		}
+		_, uerr := ri.Update(ctx, existing, metav1.UpdateOptions{})
+		return uerr
+	})
 }
 
 // replaceLegacyRuleInPlace walks each group's rules and replaces the first
@@ -248,7 +272,7 @@ func replaceLegacyRuleInPlace(groups []any, alert string, rule map[string]any) b
 		rules, _ := g["rules"].([]any)
 		for ri := range rules {
 			r, _ := rules[ri].(map[string]any)
-			if r == nil || r["alert"] != alert {
+			if r == nil || str(r, "alert") != alert {
 				continue
 			}
 			rules[ri] = rule

@@ -486,6 +486,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if installNs == "" {
 			installNs = cfg.ScannerNamespace
 		}
+		if installNs == "" {
+			logger.Warn("install namespace is empty (neither INSTALLATION_NAMESPACE nor SCANNER_NAMESPACE set) — legacy alert-rule actions will error at request time")
+		}
 		mut.SetNamespace(installNs)
 		if cfg.LokiRulesURL != "" {
 			lokiRulesHeaders := map[string]string{}
