@@ -19,6 +19,16 @@ import (
 // "absent" and emit null defaults.
 type podLookupFn func(namespace string, selector labels.Selector) *corev1.Pod
 
+// replicaSetLookupFn fetches a ReplicaSet by (namespace, name) out of the
+// shared informer cache. Used by the Pod converter to resolve a Pod's
+// immediate ReplicaSet owner up to its controlling Deployment by
+// reading the ReplicaSet's own ownerReferences — the authoritative
+// answer, vs. heuristically stripping a pod-template-hash suffix from
+// the RS name. Returns nil when the RS isn't (yet) in cache; callers
+// fall back to emitting the RS as-is and rely on the next status event
+// to self-heal once the cache syncs.
+type replicaSetLookupFn func(namespace, name string) *appsv1.ReplicaSet
+
 // Converters for each resource type. The collector reads keys like
 // `service_key`, `node_creation_time`, `workload_count` directly and
 // crashes with KeyError when they're missing — emit every documented
@@ -624,11 +634,48 @@ func containersFromTemplate(tpl corev1.PodTemplateSpec) []map[string]any {
 }
 
 func ownerInfos(owners []metav1.OwnerReference) []map[string]any {
+	return ownerInfosWithRSLookup(owners, "", nil)
+}
+
+// ownerInfosWithRSLookup is the Pod-path variant: when an owner ref is a
+// ReplicaSet and the RS is in the informer cache, the RS's own
+// controller ownerReference (typically a Deployment) is emitted
+// instead. This is the authoritative ReplicaSet→Deployment resolution
+// — no name-suffix heuristics. When rsLookup is nil or the RS isn't in
+// cache, falls back to passing the owner ref through unchanged; the
+// next pod-status event self-heals once the RS cache syncs.
+//
+// `namespace` is the namespace of the owned object (OwnerReference is
+// always same-namespace per K8s rules), used to scope the RS lookup.
+func ownerInfosWithRSLookup(owners []metav1.OwnerReference, namespace string, rsLookup replicaSetLookupFn) []map[string]any {
 	out := make([]map[string]any, 0, len(owners))
 	for _, o := range owners {
+		if rsLookup != nil && o.Kind == "ReplicaSet" {
+			if rs := rsLookup(namespace, o.Name); rs != nil {
+				if ctrl, ok := controllerOwner(rs.OwnerReferences); ok {
+					out = append(out, map[string]any{"kind": ctrl.Kind, "name": ctrl.Name})
+					continue
+				}
+			}
+		}
 		out = append(out, map[string]any{"kind": o.Kind, "name": o.Name})
 	}
 	return out
+}
+
+// controllerOwner returns the controller=true OwnerReference, or the
+// first ref when none is explicitly marked (pre-1.16 manifests / some
+// operators omit the field). The bool is false when refs is empty.
+func controllerOwner(refs []metav1.OwnerReference) (metav1.OwnerReference, bool) {
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller {
+			return ref, true
+		}
+	}
+	if len(refs) > 0 {
+		return refs[0], true
+	}
+	return metav1.OwnerReference{}, false
 }
 
 // isHelmRelease checks the standard label/annotation conventions.

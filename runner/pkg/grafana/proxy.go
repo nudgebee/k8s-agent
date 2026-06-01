@@ -142,7 +142,7 @@ func (p *Proxy) HandlePrometheus(ctx context.Context, req *Request) *Response {
 // callers can carry their own X-Scope-OrgID while the agent's
 // configured PROMETHEUS_HEADERS pile on too). Nil-safe in both args.
 func mergeHeaders(base, extras http.Header) map[string][]string {
-	out := make(map[string][]string, len(base)+len(extras))
+	out := make(map[string][]string, len(base))
 	for k, vs := range base {
 		out[k] = append([]string(nil), vs...)
 	}
