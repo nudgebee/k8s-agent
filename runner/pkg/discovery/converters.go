@@ -652,7 +652,7 @@ func ownerInfosWithRSLookup(owners []metav1.OwnerReference, namespace string, rs
 	for _, o := range owners {
 		if rsLookup != nil && o.Kind == "ReplicaSet" {
 			if rs := rsLookup(namespace, o.Name); rs != nil {
-				if ctrl := controllerOwner(rs.OwnerReferences); ctrl != nil {
+				if ctrl, ok := controllerOwner(rs.OwnerReferences); ok {
 					out = append(out, map[string]any{"kind": ctrl.Kind, "name": ctrl.Name})
 					continue
 				}
@@ -665,17 +665,17 @@ func ownerInfosWithRSLookup(owners []metav1.OwnerReference, namespace string, rs
 
 // controllerOwner returns the controller=true OwnerReference, or the
 // first ref when none is explicitly marked (pre-1.16 manifests / some
-// operators omit the field).
-func controllerOwner(refs []metav1.OwnerReference) *metav1.OwnerReference {
-	for i := range refs {
-		if refs[i].Controller != nil && *refs[i].Controller {
-			return &refs[i]
+// operators omit the field). The bool is false when refs is empty.
+func controllerOwner(refs []metav1.OwnerReference) (metav1.OwnerReference, bool) {
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller {
+			return ref, true
 		}
 	}
 	if len(refs) > 0 {
-		return &refs[0]
+		return refs[0], true
 	}
-	return nil
+	return metav1.OwnerReference{}, false
 }
 
 // isHelmRelease checks the standard label/annotation conventions.

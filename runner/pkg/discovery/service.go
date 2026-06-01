@@ -247,9 +247,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.factory.Start(stopCh)
 
-	// Wait for all caches to sync before emitting the first full snapshot.
-	if !cache.WaitForCacheSync(stopCh, s.cacheSyncFuncs()...) {
-		return errors.New("discovery: cache sync timed out")
+	// Wait at the factory level (not just on handler-bound informers) so
+	// auxiliary informers instantiated via lookup closures — replicaSetLookup,
+	// podLookup — are synced before the initial snapshot. Otherwise, a caller
+	// that wires RegisterPods without RegisterReplicaSets would race: the RS
+	// informer would still be started (factory tracks any informer ever
+	// requested), but a handler-only sync wait wouldn't include it, and the
+	// first pod snapshot could fire with unresolved ReplicaSet owners.
+	for typ, ok := range s.factory.WaitForCacheSync(stopCh) {
+		if !ok {
+			return fmt.Errorf("discovery: cache sync timed out for %v", typ)
+		}
 	}
 	s.logger.Info("discovery caches synced", "handlers", len(s.handlers))
 
@@ -292,14 +300,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return nil
-}
-
-func (s *Service) cacheSyncFuncs() []cache.InformerSynced {
-	out := make([]cache.InformerSynced, 0, len(s.handlers))
-	for _, h := range s.handlers {
-		out = append(out, h.informer.HasSynced)
-	}
-	return out
 }
 
 // emitAllSnapshots posts one full-load envelope per resource type by walking
