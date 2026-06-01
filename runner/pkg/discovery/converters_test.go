@@ -370,6 +370,119 @@ func TestConvertDeployment_EmitsAll11ConfigKeys(t *testing.T) {
 	}
 }
 
+// Regression: with the Go-agent cutover, Deployment-owned pods were
+// being emitted with owner=[{ReplicaSet, <hash-named-rs>}] because the
+// converter forwarded raw OwnerReferences. The collector keys
+// k8s_pods.workload_{type,name} off owner[0], so every UI/triage query
+// filtered by workload_type="Deployment" started returning empty. The
+// fix: when the immediate owner is a ReplicaSet, walk one hop via the
+// RS informer and emit the RS's controller (the Deployment) instead.
+//
+// This authoritative lookup avoids the legacy regex heuristic
+// (strip-pod-template-hash) used by trigger fingerprinting — works
+// correctly for RSes created outside the Deployment controller
+// (manual / operator-owned RSes whose names don't end in a hash) and
+// doesn't break if the controller's hash format ever changes.
+func TestPodConverter_ResolvesReplicaSetOwnerToDeployment(t *testing.T) {
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-7f9d8c5b6",
+			Namespace: "shop",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind:       "Deployment",
+				Name:       "checkout",
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: appsv1.ReplicaSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-7f9d8c5b6-w8pqw",
+			Namespace: "shop",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind:       "ReplicaSet",
+				Name:       "checkout-7f9d8c5b6",
+				Controller: ptr.To(true),
+			}},
+		},
+	}
+
+	lookup := func(ns, name string) *appsv1.ReplicaSet {
+		if ns == "shop" && name == "checkout-7f9d8c5b6" {
+			return rs
+		}
+		return nil
+	}
+
+	got, ok := newPodConverter(lookup)(pod)
+	if !ok {
+		t.Fatal("converter ok=false")
+	}
+	cfg := got.(map[string]any)["config"].(map[string]any)
+	owners := cfg["owner"].([]map[string]any)
+	if len(owners) != 1 {
+		t.Fatalf("owners = %v; want one resolved entry", owners)
+	}
+	if owners[0]["kind"] != "Deployment" || owners[0]["name"] != "checkout" {
+		t.Errorf("owners[0] = %v; want {kind: Deployment, name: checkout}", owners[0])
+	}
+}
+
+// When the RS isn't (yet) in cache, the converter must fall back to
+// emitting the immediate ReplicaSet owner unchanged. The next
+// pod-status event self-heals once WaitForCacheSync completes. Without
+// this fallback, a startup race could drop pods entirely.
+func TestPodConverter_FallsBackWhenReplicaSetMissing(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "p",
+			Namespace: "shop",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet", Name: "missing-rs",
+			}},
+		},
+	}
+	got, ok := newPodConverter(func(string, string) *appsv1.ReplicaSet { return nil })(pod)
+	if !ok {
+		t.Fatal("converter ok=false")
+	}
+	cfg := got.(map[string]any)["config"].(map[string]any)
+	owners := cfg["owner"].([]map[string]any)
+	if len(owners) != 1 || owners[0]["kind"] != "ReplicaSet" || owners[0]["name"] != "missing-rs" {
+		t.Errorf("fallback owners = %v; want immediate RS unchanged", owners)
+	}
+}
+
+// Non-Deployment workloads (DaemonSet, StatefulSet, Job, operator CRs)
+// own pods directly. The converter must NOT touch those owner refs.
+func TestPodConverter_PassesThroughNonReplicaSetOwners(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node-exporter-abc",
+			Namespace: "kube-system",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "DaemonSet", Name: "node-exporter",
+			}},
+		},
+	}
+	// Provide a lookup that would panic if invoked — proves the
+	// converter short-circuits on non-RS kinds.
+	lookup := func(string, string) *appsv1.ReplicaSet {
+		t.Fatal("rsLookup should not be called for non-ReplicaSet owners")
+		return nil
+	}
+	got, ok := newPodConverter(lookup)(pod)
+	if !ok {
+		t.Fatal("converter ok=false")
+	}
+	cfg := got.(map[string]any)["config"].(map[string]any)
+	owners := cfg["owner"].([]map[string]any)
+	if len(owners) != 1 || owners[0]["kind"] != "DaemonSet" || owners[0]["name"] != "node-exporter" {
+		t.Errorf("daemonset passthrough owners = %v", owners)
+	}
+}
+
 // When a Pod owned by the workload has reported status, qos_class / ip
 // / conditions come from that Pod.
 func TestServiceDict_PodLookupFillsRuntimeFields(t *testing.T) {
