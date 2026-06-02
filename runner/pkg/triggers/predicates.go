@@ -23,7 +23,6 @@ func Builtins() []MatcherSpec {
 		imagePullBackoffMatcher(),
 		jobFailureMatcher(),
 		nodeNotReadyMatcher(),
-		warningEventMatcher(),
 	}
 	// One matcher per babysitter-watched kind. We register them as
 	// separate specs (rather than `Kind: "Any"` with an in-predicate
@@ -421,44 +420,6 @@ func nodeNotReadyMatcher() MatcherSpec {
 			// distinct Findings per transition rather than one forever.
 			ts := nodeReadyLastTransition(obj)
 			return fp("node_not_ready", name, ts)
-		},
-	}
-}
-
-// ------- Warning Event -------
-
-// warningEventMatcher fires for K8s Event resources of type=Warning.
-// Emits aggregation_key "Kubernetes Warning Event" (literal string with
-// capitalization).
-//
-// Requires kubewatch's chart to subscribe to events
-// (k8s-agent/charts/nudgebee-agent/values.yaml has `event: true` at
-// the resource block). Verified live before adding this matcher.
-func warningEventMatcher() MatcherSpec {
-	return MatcherSpec{
-		Name:           "warning_event",
-		Kind:           "Event",
-		Operations:     []string{"create"},
-		AggregationKey: "Kubernetes Warning Event",
-		Priority:       "MEDIUM",
-		FindingType:    "issue",
-		RateLimit:      5 * time.Minute,
-		Predicate: func(obj, _ map[string]any) bool {
-			t, _ := obj["type"].(string)
-			return t == "Warning"
-		},
-		FingerprintFn: func(obj map[string]any) string {
-			// involvedObject (core/v1) or regarding (events.k8s.io/v1)
-			// is the resource the event describes.
-			io, _ := obj["involvedObject"].(map[string]any)
-			if io == nil {
-				io, _ = obj["regarding"].(map[string]any)
-			}
-			ioKind, _ := io["kind"].(string)
-			ioNS, _ := io["namespace"].(string)
-			ioName, _ := io["name"].(string)
-			reason, _ := obj["reason"].(string)
-			return fp("Kubernetes Warning Event", ioKind, ioNS, ioName, reason)
 		},
 	}
 }

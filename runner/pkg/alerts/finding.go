@@ -110,7 +110,7 @@ func (b *Builder) FromMatchedTrigger(matchSpec MatchedTrigger, rawData []byte) (
 	// Owner-aware subject — the UI groups findings by service_key, which
 	// is namespace/owner-or-pod. Use the resolved owner when the matcher
 	// walked one (most Pod-based matchers do); fall back to the raw
-	// subject otherwise (warning_event, node_not_ready).
+	// subject otherwise (node_not_ready).
 	subjectOwner, subjectOwnerKind := matchSpec.Owner.Name, matchSpec.Owner.Kind
 	if subjectOwner != "" {
 		serviceKey = matchSpec.SubjectNamespace + "/" + subjectOwner
@@ -194,8 +194,6 @@ func (m MatchedTrigger) Title() string {
 		return fmt.Sprintf("Job %s/%s failed", m.SubjectNamespace, m.SubjectName)
 	case "node_not_ready":
 		return fmt.Sprintf("Node %s is NotReady", m.SubjectName)
-	case "Kubernetes Warning Event":
-		return fmt.Sprintf("Warning Event on %s %s/%s", m.SubjectKind, m.SubjectNamespace, m.SubjectName)
 	default:
 		return fmt.Sprintf("%s on %s/%s", m.AggregationKey, m.SubjectNamespace, m.SubjectName)
 	}
