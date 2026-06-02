@@ -473,6 +473,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// the cluster". Allowlist it here to close the gap without forcing
 		// signing into api-server's relay client. pod_bash_enricher / pod_profiler
 		// stay OUT — they have no unsigned api-server caller.
+		// TODO(security): this trades per-request HMAC/RSA verification for the
+		// relay's shared-secret gate, so a relay/secret compromise yields
+		// arbitrary in-cluster command execution. Remove this entry once
+		// api-server's relay client signs pod_script_run_enricher.
 		lightActions["pod_script_run_enricher"] = struct{}{}
 		logger.Info("pod-runner enabled",
 			"default_namespace", cfg.ScannerNamespace,
