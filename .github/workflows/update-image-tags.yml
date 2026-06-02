@@ -53,6 +53,15 @@ jobs:
           echo "nudgebee_kubewatch_image: $nudgebee_kubewatch_image"
           yq -i ".kubewatch.image.tag=\"$nudgebee_kubewatch_image\"" values.yaml
 
+          # application-profiler: newest short-SHA tag from GHCR (bpf is canonical;
+          # all variants share the same SHA since release.yml builds them together).
+          # The `{}` placeholder is preserved — the agent substitutes it per variant at runtime.
+          nudgebee_profiler_sha=$(gh api -H "Accept: application/vnd.github+json" \
+            "/orgs/nudgebee/packages/container/application-profiler-bpf/versions?per_page=20" \
+            --jq '[.[].metadata.container.tags[]] | map(select(test("^[0-9a-f]{7}$"))) | .[0]')
+          echo "nudgebee_profiler_sha: $nudgebee_profiler_sha"
+          yq -i ".runner.profilerImage=\"ghcr.io/nudgebee/application-profiler-{}:$nudgebee_profiler_sha\"" values.yaml
+
       - name: Commit updated image tags
         env:
           BASE_REF: ${{ github.base_ref }}
