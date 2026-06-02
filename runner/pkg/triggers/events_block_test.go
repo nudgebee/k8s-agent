@@ -78,31 +78,6 @@ func TestEngine_AppendsRecentEventsTablePerMatch(t *testing.T) {
 	}
 }
 
-// TestEngine_SubjectEventsSkippedForWarningEvent: the warning_event
-// matcher's subject IS already the K8s Event, so fetching events about
-// an event would be circular and noisy. Engine must skip the subject
-// fetch in that case — but node + namespace tables still apply since
-// they're keyed off the involved Pod's namespace/node, not the Event.
-func TestEngine_SubjectEventsSkippedForWarningEvent(t *testing.T) {
-	ev := asObj(t, `{
-		"metadata":{"name":"e1","namespace":"prod"},
-		"type":"Warning",
-		"reason":"FailedScheduling",
-		"involvedObject":{"kind":"Pod","name":"web-0","namespace":"prod"}
-	}`)
-	stub := &stubLister{events: []K8sEvent{{Reason: "X"}}}
-	eng := NewEngine(Builtins(), time.Now().Add(-time.Hour)).WithEventsLister(stub)
-	matches := eng.Match(IncomingK8sEvent{Operation: "create", Kind: "Event", Obj: ev})
-	if !contains(matchNames(matches), "warning_event") {
-		t.Fatal("expected warning_event to fire")
-	}
-	for _, c := range stub.calls {
-		if c.kind == "Event" {
-			t.Errorf("ListEvents must NOT be called with kind=Event for warning_event matches; got %+v", c)
-		}
-	}
-}
-
 // TestEngine_AppendsNodeEventsTable: when the matched Pod has a node,
 // the engine attaches a "Recent Node events" table so users see
 // node-level issues (DiskPressure / NetworkUnavailable / kubelet

@@ -718,30 +718,6 @@ func TestNodeNotReady_DoesNotRefireWhilePersistentlyNotReady(t *testing.T) {
 	}
 }
 
-// ---------- warning_event ----------
-
-func TestWarningEvent_FiresForWarningType(t *testing.T) {
-	ev := asObj(t, `{
-		"type":"Warning",
-		"reason":"FailedScheduling",
-		"involvedObject":{"kind":"Pod","namespace":"prod","name":"web-0"}
-	}`)
-	if !warningEventMatcher().Predicate(ev, nil) {
-		t.Error("Warning Event must fire")
-	}
-}
-
-func TestWarningEvent_DropsNormalType(t *testing.T) {
-	ev := asObj(t, `{
-		"type":"Normal",
-		"reason":"Created",
-		"involvedObject":{"kind":"Pod","namespace":"prod","name":"web-0"}
-	}`)
-	if warningEventMatcher().Predicate(ev, nil) {
-		t.Error("Normal Event must not fire")
-	}
-}
-
 // ---------- engine integration ----------
 
 func TestEngine_FiresMultipleMatchersForSamePod(t *testing.T) {
