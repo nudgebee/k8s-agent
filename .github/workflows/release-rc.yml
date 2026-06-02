@@ -90,6 +90,8 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
 
       - name: Sign chart packages (cosign keyless)
         env:
@@ -98,7 +100,9 @@ jobs:
         run: |
           # chart-releaser stages each packaged chart under .cr-release-packages/
           # and names the GitHub release after the tarball. Sign each blob
-          # keyless (Fulcio/Rekor) and attach the signature + cert.
+          # keyless (Fulcio/Rekor) into a Sigstore bundle (.sigstore.json:
+          # signature + cert + transparency-log entry). cosign v3 deprecated
+          # --output-signature/-certificate in favour of this bundle format.
           shopt -s nullglob
           pkgs=(.cr-release-packages/*.tgz)
           if [ ${#pkgs[@]} -eq 0 ]; then
@@ -109,10 +113,10 @@ jobs:
             tag="$(basename "${pkg%.tgz}")"
             echo "Signing $pkg -> release $tag"
             cosign sign-blob --yes \
-              --output-signature "${pkg}.sig" \
-              --output-certificate "${pkg}.pem" \
+              --new-bundle-format \
+              --bundle "${pkg}.sigstore.json" \
               "$pkg"
-            gh release upload "$tag" "${pkg}.sig" "${pkg}.pem" --clobber
+            gh release upload "$tag" "${pkg}.sigstore.json" --clobber
           done
 
       - name: Mark release as pre-release  
