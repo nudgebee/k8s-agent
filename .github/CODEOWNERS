@@ -1,9 +1,10 @@
 # Default reviewers for all changes in this repo.
-# Adjust the team handle below to match your GitHub org/team.
+# Owners must have write access; a PR author cannot satisfy their own
+# code-owner review, so listing two owners means each reviews the other's PRs.
 
-*                               @nudgebee/maintainers
+*                               @blue4209211 @mayankpande88
 
 # Chart-specific
-/charts/                        @nudgebee/maintainers
-/.github/workflows/             @nudgebee/maintainers
-/installation.sh                @nudgebee/maintainers
+/charts/                        @blue4209211 @mayankpande88
+/.github/workflows/             @blue4209211 @mayankpande88
+/installation.sh                @blue4209211 @mayankpande88
