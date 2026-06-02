@@ -64,7 +64,7 @@ curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz.pem"
 cosign verify-blob \
   --certificate "nudgebee-agent-${VERSION}.tgz.pem" \
   --signature "nudgebee-agent-${VERSION}.tgz.sig" \
-  --certificate-identity-regexp "https://github.com/nudgebee/k8s-agent/.github/workflows/release(-rc)?.yml@.*" \
+  --certificate-identity-regexp "^https://github\.com/nudgebee/k8s-agent/\.github/workflows/release(-rc)?\.yml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "nudgebee-agent-${VERSION}.tgz"
 ```
