@@ -50,20 +50,18 @@ curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation
 ### Verifying chart signatures
 
 Chart packages are signed with [cosign](https://github.com/sigstore/cosign)
-keyless signing. Each GitHub release attaches `<chart>.tgz.sig` and
-`<chart>.tgz.pem` alongside the chart tarball. To verify a downloaded
-package:
+keyless signing. Each GitHub release attaches a `<chart>.tgz.sigstore.json`
+Sigstore bundle (signature + certificate + transparency-log entry) alongside
+the chart tarball. To verify a downloaded package (requires cosign v3+):
 
 ```bash
 VERSION=0.1.1
 BASE="https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-${VERSION}"
 curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz"
-curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz.sig"
-curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz.pem"
+curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz.sigstore.json"
 
 cosign verify-blob \
-  --certificate "nudgebee-agent-${VERSION}.tgz.pem" \
-  --signature "nudgebee-agent-${VERSION}.tgz.sig" \
+  --bundle "nudgebee-agent-${VERSION}.tgz.sigstore.json" \
   --certificate-identity-regexp "^https://github\.com/nudgebee/k8s-agent/\.github/workflows/release(-rc)?\.yml@.*" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "nudgebee-agent-${VERSION}.tgz"
