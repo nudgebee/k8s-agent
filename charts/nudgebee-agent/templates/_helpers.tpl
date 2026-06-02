@@ -91,9 +91,19 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
     {{- end }}
-    {{- if .Values.rsa }}
+    # MUTATE_ENABLED gates the runner's mutate subsystem (delete_pod,
+    # cordon, rollout_restart, PrometheusRule CRUD, AlertManager silences,
+    # Loki rules, ...). The auth boundary lives inside the runner — only
+    # the explicitly-allowlisted light actions accept unsigned requests;
+    # every other mutate action falls through to the validator's
+    # HMAC/RSA-partial-keys path and is rejected without a signed request.
+    # So enabling the subsystem here does NOT loosen the security posture
+    # on installations that omit `.Values.rsa`; it only makes the
+    # light-action carve-outs (currently create_or_replace_alert_rule /
+    # delete_alert_rule) reachable end-to-end.
     - name: MUTATE_ENABLED
       value: "true"
+    {{- if .Values.rsa }}
     - name: RSA_PRIVATE_KEY_PATH
       value: /etc/nudgebee/auth/prv
     {{- end }}
