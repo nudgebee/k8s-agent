@@ -461,7 +461,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		runner := podrunner.New(typedKube, cfg.ScannerNamespace, cfg.ScannerServiceAccount, cfg.AccountID)
 		rh := podrunner.Handlers(runner)
 		maps.Copy(handlers, rh)
-		// NOT a light-action — same trust posture as pod_bash_enricher.
+		// By trust posture pod_script_run_enricher belongs with pod_bash_enricher
+		// (arbitrary command execution → HMAC/RSA only). But api-server's
+		// relay.CommandExecutor dispatches it UNSIGNED behind the relay's
+		// shared-secret gate — the k8s-mode DB integration connection tests
+		// (postgresql/mysql/clickhouse/mssql/oracle), runbook-server, and
+		// llm-server all reach it this way and none of them sign. Same situation
+		// as the PrometheusRule actions carved in below. Without this the
+		// dispatcher rejects every such request with "not in light-action
+		// allowlist", surfacing in the UI as a misleading "failed to connect to
+		// the cluster". Allowlist it here to close the gap without forcing
+		// signing into api-server's relay client. pod_bash_enricher / pod_profiler
+		// stay OUT — they have no unsigned api-server caller.
+		lightActions["pod_script_run_enricher"] = struct{}{}
 		logger.Info("pod-runner enabled",
 			"default_namespace", cfg.ScannerNamespace,
 			"service_account", cfg.ScannerServiceAccount,
