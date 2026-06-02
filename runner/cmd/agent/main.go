@@ -478,6 +478,18 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		mut := mutate.New(typedKube, cfg.AlertManagerURL, amHeaders)
 		mut.SetDynamic(dynamicKube) // unlocks PrometheusRule CRUD actions
+		// INSTALLATION_NAMESPACE is set by the chart via the downward API.
+		// Required by the legacy alert-rule path; falls back to the scanner
+		// namespace (also chart-set) so a hand-rolled deployment without
+		// INSTALLATION_NAMESPACE still resolves to the right namespace.
+		installNs := os.Getenv("INSTALLATION_NAMESPACE")
+		if installNs == "" {
+			installNs = cfg.ScannerNamespace
+		}
+		if installNs == "" {
+			logger.Warn("install namespace is empty (neither INSTALLATION_NAMESPACE nor SCANNER_NAMESPACE set) — legacy alert-rule actions will error at request time")
+		}
+		mut.SetNamespace(installNs)
 		if cfg.LokiRulesURL != "" {
 			lokiRulesHeaders := map[string]string{}
 			for k, v := range config.ParseHeaders(os.Getenv("LOKI_RULES_HEADERS")) {
@@ -489,10 +501,18 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		mh := mutate.Handlers(mut)
 		maps.Copy(handlers, mh)
-		// Mutations REQUIRE RSA partial-keys in production. NOT light-action.
+		// Most Group-D mutations REQUIRE RSA partial-keys in production and
+		// stay out of lightActions. The two PrometheusRule legacy actions are
+		// the exception: api-server → relay → agent today sends them unsigned
+		// behind the relay's shared-secret gate, same posture as the read
+		// primitives. Carving them in here closes the gap without forcing
+		// signing into api-server's relay client.
+		lightActions["create_or_replace_alert_rule"] = struct{}{}
+		lightActions["delete_alert_rule"] = struct{}{}
 		logger.Info("mutate enabled",
 			"alertmanager_url", cfg.AlertManagerURL,
 			"loki_rules_url", cfg.LokiRulesURL,
+			"install_namespace", installNs,
 			"actions", len(mh))
 	}
 

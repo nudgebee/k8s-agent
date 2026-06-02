@@ -108,7 +108,23 @@ func getBool(m map[string]any, k string, fallback bool) bool {
 	return fallback
 }
 
+// handleCreateOrReplacePromRule accepts two payload shapes:
+//
+//  1. Full PrometheusRule manifest at the top level (or under `rule`) —
+//     used by callers that own the CR shape directly.
+//  2. Legacy api-server / Robusta shape: a flat {alert, expr, duration,
+//     annotations, labels} map. Detected by the presence of a non-empty
+//     `alert` string AND the absence of an `apiVersion`. We translate it
+//     into a single rule appended to the canonical CR — see
+//     CreateOrReplaceAlertRule.
+//
+// Keeping both behind one action name avoids a coordinated rollout with the
+// api-server: today's callers send the legacy shape; future callers can opt
+// into the manifest shape without a new wire action.
 func handleCreateOrReplacePromRule(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	if isLegacyAlertRulePayload(p) {
+		return m.CreateOrReplaceAlertRule(ctx, parseLegacyAlertRuleParams(p))
+	}
 	rule, ok := p["rule"]
 	if !ok {
 		// Allow the caller to pass the manifest at the top level too.
@@ -117,8 +133,47 @@ func handleCreateOrReplacePromRule(ctx context.Context, m *Mutator, p map[string
 	return m.CreateOrReplacePrometheusRule(ctx, rule)
 }
 
+// handleDeletePromRule accepts two payload shapes that mirror
+// handleCreateOrReplacePromRule: full manifest delete (by namespace+name)
+// or the legacy `alert`-only shape (drops a single rule from the canonical
+// CR).
 func handleDeletePromRule(ctx context.Context, m *Mutator, p map[string]any) error {
+	if alert := str(p, "alert"); alert != "" {
+		return m.DeleteAlertRule(ctx, alert)
+	}
 	return m.DeletePrometheusRule(ctx, str(p, "namespace"), str(p, "name"))
+}
+
+// isLegacyAlertRulePayload detects the flat Robusta shape: `alert` set and
+// no `apiVersion`. We also accept the shape when `rule` is absent — a
+// caller wrapping the full manifest under `rule` is treating it as a
+// manifest no matter the rest of the keys.
+func isLegacyAlertRulePayload(p map[string]any) bool {
+	if p == nil {
+		return false
+	}
+	if _, hasRule := p["rule"]; hasRule {
+		return false
+	}
+	if _, hasAV := p["apiVersion"]; hasAV {
+		return false
+	}
+	return str(p, "alert") != ""
+}
+
+func parseLegacyAlertRuleParams(p map[string]any) LegacyAlertRuleParams {
+	out := LegacyAlertRuleParams{
+		Alert:    str(p, "alert"),
+		Expr:     str(p, "expr"),
+		Duration: str(p, "duration"),
+	}
+	if a, ok := p["annotations"].(map[string]any); ok {
+		out.Annotations = a
+	}
+	if l, ok := p["labels"].(map[string]any); ok {
+		out.Labels = l
+	}
+	return out
 }
 
 // handleReplaceWorkload accepts the body as either:

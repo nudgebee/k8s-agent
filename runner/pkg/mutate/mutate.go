@@ -36,6 +36,11 @@ type Mutator struct {
 	LokiRulesURL     string
 	LokiRulesHeaders map[string]string
 
+	// Namespace is the agent's install namespace. Required by the legacy
+	// alert-rule path (CreateOrReplaceAlertRule / DeleteAlertRule), which
+	// locates the canonical PrometheusRule CR there.
+	Namespace string
+
 	// dynamic is the dynamic client used for CRD operations like
 	// PrometheusRule. Set via SetDynamic.
 	dynamic dynamic.Interface
@@ -54,6 +59,10 @@ func (m *Mutator) SetLokiRules(url string, headers map[string]string) {
 	m.LokiRulesURL = url
 	m.LokiRulesHeaders = headers
 }
+
+// SetNamespace records the agent's install namespace. Required by the legacy
+// alert-rule path; everything else is independent of it.
+func (m *Mutator) SetNamespace(ns string) { m.Namespace = ns }
 
 // DeletePod removes one pod. namespace + name required.
 func (m *Mutator) DeletePod(ctx context.Context, namespace, name string, gracePeriodSec *int64) error {
