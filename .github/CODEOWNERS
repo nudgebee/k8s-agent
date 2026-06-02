@@ -1,9 +1,10 @@
 # Default reviewers for all changes in this repo.
-# Adjust the team handle below to match your GitHub org/team.
+# @nudgebee/oss is the maintainers team (must have write access). A PR
+# author cannot satisfy their own code-owner review, so a teammate reviews.
 
-*                               @nudgebee/maintainers
+*                               @nudgebee/oss
 
 # Chart-specific
-/charts/                        @nudgebee/maintainers
-/.github/workflows/             @nudgebee/maintainers
-/installation.sh                @nudgebee/maintainers
+/charts/                        @nudgebee/oss
+/.github/workflows/             @nudgebee/oss
+/installation.sh                @nudgebee/oss
