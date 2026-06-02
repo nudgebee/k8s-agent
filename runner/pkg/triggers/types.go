@@ -2,8 +2,7 @@
 // side. Most kubewatch events match nothing and are silently dropped;
 // the few that match a registered trigger emit a Finding with a
 // specific aggregation_key (`report_crash_loop`, `pod_oom_killer_enricher`,
-// `image_pull_backoff_reporter`, `job_failure`, `node_not_ready`,
-// `Kubernetes Warning Event`, …).
+// `image_pull_backoff_reporter`, `job_failure`, `node_not_ready`, …).
 //
 // Matchers are declared as data-driven MatcherSpec values rather than
 // hardcoded if-blocks so when stage 2.3 ships DB-stored playbook config
@@ -170,9 +169,7 @@ type Match struct {
 	// bare Pod) or when the chain doesn't terminate at a known kind.
 	Owner OwnerRef
 
-	// SubjectName / SubjectNamespace come from obj.metadata. The matcher
-	// may override SubjectName for special cases (warning_event uses
-	// involvedObject.name, not obj.metadata.name).
+	// SubjectName / SubjectNamespace come from obj.metadata.
 	SubjectName      string
 	SubjectNamespace string
 	SubjectKind      string // lowercased; "pod" | "deployment" | etc.

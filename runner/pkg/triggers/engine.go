@@ -1,7 +1,6 @@
 package triggers
 
 import (
-	"strings"
 	"time"
 )
 
@@ -48,19 +47,14 @@ func (e *Engine) WithEventsLister(l K8sEventsLister) *Engine {
 }
 
 // fetchSubjectEvents builds a "Recent <Kind> events" table for the
-// matched object. Skipped when the lister is unwired (unit tests),
-// when the matched kind is Event (the warning_event matcher's subject
-// IS the event already, no point fetching events about an event), or
+// matched object. Skipped when the lister is unwired (unit tests) or
 // when the namespace/name pair can't be resolved.
 //
 // Centralizing this in the engine — rather than per-matcher EnrichBlocks
 // — lets every matcher (current + future) inherit the evidence without
 // repeating the same recentEventsTable call.
-func (e *Engine) fetchSubjectEvents(matcherName, kind, namespace, name string) []EvidenceBlock {
+func (e *Engine) fetchSubjectEvents(kind, namespace, name string) []EvidenceBlock {
 	if e.eventsLister == nil || namespace == "" || name == "" || kind == "" {
-		return nil
-	}
-	if matcherName == "warning_event" {
 		return nil
 	}
 	return recentEventsTable(EnrichContext{EventsLister: e.eventsLister},
@@ -134,20 +128,6 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		}
 
 		name, namespace, lowerKind, node := SubjectFromObj(ev.Kind, ev.Obj)
-		// Warning Event: subject is the involvedObject, not the Event itself.
-		if spec.Name == "warning_event" {
-			if io, _ := ev.Obj["involvedObject"].(map[string]any); io != nil {
-				if v, _ := io["name"].(string); v != "" {
-					name = v
-				}
-				if v, _ := io["namespace"].(string); v != "" {
-					namespace = v
-				}
-				if v, _ := io["kind"].(string); v != "" {
-					lowerKind = strings.ToLower(v)
-				}
-			}
-		}
 		var extra []EvidenceBlock
 		if spec.EnrichBlocks != nil {
 			extra = spec.EnrichBlocks(ev.Obj, ev.OldObj, EnrichContext{
@@ -163,7 +143,7 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		// the primary finding (sick node, sibling-pod failures) so users
 		// don't have to leave the Finding card to triage. All three are
 		// skipped when the lister isn't wired (unit tests / no K8s client).
-		extra = append(extra, e.fetchSubjectEvents(spec.Name, ev.Kind, namespace, name)...)
+		extra = append(extra, e.fetchSubjectEvents(ev.Kind, namespace, name)...)
 		extra = append(extra, e.fetchNodeEvents(node)...)
 		extra = append(extra, e.fetchNamespaceEvents(namespace)...)
 		matches = append(matches, Match{
