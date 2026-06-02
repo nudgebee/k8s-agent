@@ -1,10 +1,10 @@
 # Default reviewers for all changes in this repo.
-# Owners must have write access; a PR author cannot satisfy their own
-# code-owner review, so listing two owners means each reviews the other's PRs.
+# @nudgebee/oss is the maintainers team (must have write access). A PR
+# author cannot satisfy their own code-owner review, so a teammate reviews.
 
-*                               @blue4209211 @mayankpande88
+*                               @nudgebee/oss
 
 # Chart-specific
-/charts/                        @blue4209211 @mayankpande88
-/.github/workflows/             @blue4209211 @mayankpande88
-/installation.sh                @blue4209211 @mayankpande88
+/charts/                        @nudgebee/oss
+/.github/workflows/             @nudgebee/oss
+/installation.sh                @nudgebee/oss
