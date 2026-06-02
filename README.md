@@ -47,6 +47,28 @@ curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation
   | bash -s -- -a "<your-auth-key>"
 ```
 
+### Verifying chart signatures
+
+Chart packages are signed with [cosign](https://github.com/sigstore/cosign)
+keyless signing. Each GitHub release attaches `<chart>.tgz.sig` and
+`<chart>.tgz.pem` alongside the chart tarball. To verify a downloaded
+package:
+
+```bash
+VERSION=0.1.1
+BASE="https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-${VERSION}"
+curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz"
+curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz.sig"
+curl -sSLO "${BASE}/nudgebee-agent-${VERSION}.tgz.pem"
+
+cosign verify-blob \
+  --certificate "nudgebee-agent-${VERSION}.tgz.pem" \
+  --signature "nudgebee-agent-${VERSION}.tgz.sig" \
+  --certificate-identity-regexp "^https://github\.com/nudgebee/k8s-agent/\.github/workflows/release(-rc)?\.yml@.*" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "nudgebee-agent-${VERSION}.tgz"
+```
+
 ## Configuration
 
 All configurable values live in [`charts/nudgebee-agent/values.yaml`](charts/nudgebee-agent/values.yaml). Common overrides:
