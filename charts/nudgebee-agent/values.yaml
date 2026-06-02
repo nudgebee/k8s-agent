@@ -81,6 +81,13 @@ runner:
   # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
   # statefulset scaling, workload creation, and rollout lifecycle management.
   enableWritePermissions: false
+  # Kill-switch for the runner's mutate subsystem (delete_pod, cordon,
+  # rollout_restart, PrometheusRule CRUD, AlertManager silences, Loki rules).
+  # Default is true so the light-action alert-rule path (driven by the UI)
+  # works without extra configuration; the auth boundary lives in the runner,
+  # not here. Set to false for a strictly read-only deployment where every
+  # mutate action — light-action or not — is unregistered at startup.
+  mutateEnabled: true
   customClusterRoleRules: []
   imagePullSecrets: []
   extraVolumes: []
