@@ -563,7 +563,16 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 			if len(chunk) >= batchSize && emitted < total {
 				flush(false)
 				if firstErr != nil {
-					s.sendAbort(ctx, typ, batchID, seq)
+					// Abort WITHOUT sending a terminal is_last_batch envelope.
+					// The collector triggers its stale-cleanup on is_last_batch
+					// (should_cleanup = is_last_batch) and has no "aborted"
+					// concept, so emitting a last batch here would reconcile
+					// against a partial snapshot and mass-deactivate live
+					// resources. Stopping silently leaves the already-sent
+					// batches' upserts in place; the next resync re-runs the
+					// full sync (its is_first_batch restarts the cycle).
+					s.logger.Error("snapshot batch failed mid-stream; aborting without cleanup",
+						"type", typ, "batch_id", batchID, "sent_batches", seq, "err", firstErr)
 					return firstErr
 				}
 			}
@@ -572,24 +581,6 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 	// Final (or only / empty) chunk carries is_last_batch=true.
 	flush(true)
 	return firstErr
-}
-
-// sendAbort tells the collector to discard a partially-sent batch set without
-// running its deletion-reconcile (a half-sent snapshot must never delete live
-// resources). Best-effort.
-func (s *Service) sendAbort(ctx context.Context, typ Type, batchID string, lastSeq int) {
-	env := &Envelope{
-		Type:          typ,
-		Data:          []any{},
-		FullLoad:      true,
-		BatchID:       batchID,
-		BatchSequence: lastSeq + 1,
-		IsLastBatch:   true,
-		Metadata:      map[string]any{"aborted": true},
-	}
-	if err := s.sink.Post(ctx, env); err != nil {
-		s.logger.Error("snapshot abort post failed", "type", typ, "batch_id", batchID, "err", err)
-	}
 }
 
 func maxInt(a, b int) int {
