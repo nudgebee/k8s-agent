@@ -79,7 +79,7 @@ type Config struct {
 	// that controls the rest of the discovery push loop).
 	AlertRulesInterval time.Duration
 
-	// Scalability knobs (see runner/docs/SCALABILITY_AUDIT.md).
+	// Scalability knobs for large clusters (1k nodes / 100k workloads).
 	//
 	// DiscoverySnapshotBatching turns the full-load snapshot into N-item
 	// batches (DiscoveryBatchSize each) using the envelope's batch fields.
@@ -183,7 +183,7 @@ func FromEnv() (*Config, error) {
 		DiscoveryResync:    parseDuration(os.Getenv("DISCOVERY_RESYNC"), 30*time.Minute),
 		AlertRulesInterval: parseDuration(os.Getenv("ALERT_RULES_INTERVAL"), 30*time.Minute),
 		// Scalability knobs — wire-changing features OFF by default (need
-		// collector support); see runner/docs/SCALABILITY_AUDIT.md.
+		// collector support).
 		DiscoverySnapshotBatching: envBool("DISCOVERY_SNAPSHOT_BATCHING", false),
 		DiscoveryBatchSize:        envInt("DISCOVERY_BATCH_SIZE", 1000),
 		IncrementalBatchSize:      envInt("DISCOVERY_INCREMENTAL_BATCH_SIZE", 1),

@@ -73,7 +73,7 @@ runner:
       memory: 1000Mi
     limits:
       cpu: ~
-      # Memory limit caps a runaway informer cache (see SCALABILITY_AUDIT.md #2).
+      # Memory limit caps a runaway informer cache on large clusters.
       # 2000Mi is generous headroom for small/medium clusters. SIZING: large
       # clusters need more — budget ~1Gi per ~50k watched objects:
       #   <100 nodes / <10k workloads   : 2000Mi
@@ -93,7 +93,7 @@ runner:
       periodSeconds: 20
       timeoutSeconds: 5
       failureThreshold: 6
-  # Scalability tunables (see runner/SCALABILITY_AUDIT.md). All optional — unset
+  # Scalability tunables for large clusters. All optional — unset
   # keys fall back to the binary defaults. The wire-changing knobs
   # (snapshotBatching, incrementalBatchSize > 1, emitTombstones) require matching
   # collector support and MUST stay off until the collector ships it.

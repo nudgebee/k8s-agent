@@ -62,7 +62,7 @@ type Service struct {
 type Options struct {
 	// SnapshotBatching emits the full-load snapshot in BatchSize chunks using
 	// the envelope batch fields. Requires collector support for batch
-	// reassembly + deferred deletion-reconcile (see SCALABILITY_AUDIT.md).
+	// reassembly + deferred deletion-reconcile.
 	SnapshotBatching bool
 	BatchSize        int
 	// IncrementalBatch coalesces up to N queued events into one incremental
@@ -484,7 +484,7 @@ func (s *Service) emitSingle(ctx context.Context) error {
 // emitBatched streams each Type's snapshot in BatchSize chunks so the agent
 // never materializes the whole world in memory or in one POST. Requires the
 // collector to reassemble batches by batch_id and defer its deletion-reconcile
-// until is_last_batch (see runner/docs/SCALABILITY_AUDIT.md, Phase B / B1).
+// until is_last_batch (the collector's should_cleanup = is_last_batch).
 func (s *Service) emitBatched(ctx context.Context) error {
 	handlersByType := map[Type][]*resourceHandler{}
 	var order []Type
