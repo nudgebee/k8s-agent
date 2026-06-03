@@ -185,14 +185,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Info("alertmanager auto-discovered", "url", u)
 		}
 	}
-	// Mirrors OpenCostDiscovery.find_open_cost_url.
-	// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
-	opencostURL := os.Getenv("OPENCOST_ENDPOINT")
-	if opencostURL == "" {
-		if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
-			opencostURL = u
-			logger.Info("opencost auto-discovered", "url", u)
+	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
+	// computed centrally on the server side. When disabled, skip BOTH the
+	// OPENCOST_ENDPOINT env and the cluster-wide Service autodiscovery: discovery
+	// matches `app=opencost` across all namespaces, so otherwise the agent latches
+	// onto a neighbouring namespace's OpenCost and keeps reporting itself
+	// cost-enabled, which suppresses the server-side takeover. Defaults to enabled.
+	opencostEnabled := true
+	if v := os.Getenv("OPENCOST_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			opencostEnabled = b
 		}
+	}
+	opencostURL := ""
+	if opencostEnabled {
+		// Mirrors OpenCostDiscovery.find_open_cost_url.
+		// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
+		opencostURL = os.Getenv("OPENCOST_ENDPOINT")
+		if opencostURL == "" {
+			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
+				opencostURL = u
+				logger.Info("opencost auto-discovered", "url", u)
+			}
+		}
+	} else {
+		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
 	}
 
 	var promClient *prometheus.Client
