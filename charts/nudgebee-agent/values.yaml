@@ -61,7 +61,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-06-02T08-54-58_42d1e24062422e1fca0bd5e40c4a13deb7636e34
+    tag: 2026-06-02T11-50-30_5b2521dc3f06edea44f5a89479ff65a0380c3a7a
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -81,6 +81,13 @@ runner:
   # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
   # statefulset scaling, workload creation, and rollout lifecycle management.
   enableWritePermissions: false
+  # Kill-switch for the runner's mutate subsystem (delete_pod, cordon,
+  # rollout_restart, PrometheusRule CRUD, AlertManager silences, Loki rules).
+  # Default is true so the light-action alert-rule path (driven by the UI)
+  # works without extra configuration; the auth boundary lives in the runner,
+  # not here. Set to false for a strictly read-only deployment where every
+  # mutate action — light-action or not — is unregistered at startup.
+  mutateEnabled: true
   customClusterRoleRules: []
   imagePullSecrets: []
   extraVolumes: []
