@@ -673,12 +673,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// small, heap_sys spikes to >1.5GB then releases). Expose the
 		// standard profiles so `go tool pprof` can attribute allocations —
 		// /debug/pprof/allocs is cumulative and survives the burst, which a
-		// point-in-time heap snapshot does not.
-		mux.HandleFunc("/debug/pprof/", pprof.Index)
-		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		// point-in-time heap snapshot does not. Gated off by default: the
+		// endpoints are unauthenticated and abusable for DoS/info-disclosure,
+		// so enable via PPROF_ENABLED only for active debugging.
+		if cfg.PprofEnabled {
+			logger.Info("pprof endpoints enabled", "path", "/debug/pprof/")
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		}
 		mux.HandleFunc("/api/actions", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -69,6 +69,11 @@ type Config struct {
 	// HTTP server (alerts intake + healthz). Default :5000.
 	HTTPListenAddr string
 
+	// PprofEnabled exposes net/http/pprof on the HTTP listener. Off by
+	// default — the profiling endpoints are unauthenticated and can be
+	// abused for DoS/info-disclosure, so enable only for active debugging.
+	PprofEnabled bool
+
 	// Discovery: enabled when DiscoveryEnabled=true. Resync interval is
 	// DISCOVERY_RESYNC (default 30m); KUBECONFIG env is honoured by client-go.
 	DiscoveryEnabled bool
@@ -144,6 +149,7 @@ func FromEnv() (*Config, error) {
 		HTTPProxyTargets:      os.Getenv("HTTP_PROXY_TARGETS"),
 		LokiRulesURL:          os.Getenv("LOKI_RULES_URL"),
 		HTTPListenAddr:        cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
+		PprofEnabled:          envBool("PPROF_ENABLED", false),
 		// K8s subsystems default-on so the agent is drop-in compatible with
 		// the legacy runner Deployment — no env additions needed for cutover.
 		// Operators can opt out per-subsystem via DISCOVERY_ENABLED=false etc.
