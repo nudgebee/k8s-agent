@@ -189,21 +189,23 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       exec:
         command: ["bash", "-c", "kill -SIGINT 1"]
   {{- if and .Values.runner.probes .Values.runner.probes.enabled }}
+  {{- $readiness := .Values.runner.probes.readiness | default dict }}
+  {{- $liveness := .Values.runner.probes.liveness | default dict }}
   readinessProbe:
     httpGet:
       path: /healthz
       port: 5000
-    initialDelaySeconds: {{ dig "runner" "probes" "readiness" "initialDelaySeconds" 5 .Values }}
-    periodSeconds: {{ dig "runner" "probes" "readiness" "periodSeconds" 10 .Values }}
-    timeoutSeconds: {{ dig "runner" "probes" "readiness" "timeoutSeconds" 3 .Values }}
+    initialDelaySeconds: {{ $readiness.initialDelaySeconds | default 5 }}
+    periodSeconds: {{ $readiness.periodSeconds | default 10 }}
+    timeoutSeconds: {{ $readiness.timeoutSeconds | default 3 }}
   livenessProbe:
     httpGet:
       path: /healthz
       port: 5000
-    initialDelaySeconds: {{ dig "runner" "probes" "liveness" "initialDelaySeconds" 15 .Values }}
-    periodSeconds: {{ dig "runner" "probes" "liveness" "periodSeconds" 20 .Values }}
-    timeoutSeconds: {{ dig "runner" "probes" "liveness" "timeoutSeconds" 5 .Values }}
-    failureThreshold: {{ dig "runner" "probes" "liveness" "failureThreshold" 6 .Values }}
+    initialDelaySeconds: {{ $liveness.initialDelaySeconds | default 15 }}
+    periodSeconds: {{ $liveness.periodSeconds | default 20 }}
+    timeoutSeconds: {{ $liveness.timeoutSeconds | default 5 }}
+    failureThreshold: {{ $liveness.failureThreshold | default 6 }}
   {{- end }}
   resources:
     requests:
