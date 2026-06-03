@@ -503,27 +503,33 @@ func (s *Service) emitBatched(ctx context.Context) error {
 	return firstErr
 }
 
-// emitTypeBatched emits one Type's full-load snapshot in chunks. Two passes:
-// pass 1 counts items that convert ok (holding ≤1 converted item at a time, so
-// memory stays bounded); pass 2 converts again and POSTs chunks. Converters are
-// pure (read cache pointers, build fresh maps) so double-conversion is safe.
-// total_batches is advisory — the collector triggers its reconcile on
-// is_last_batch, which the final chunk always carries, so a small count drift
-// under concurrent cache mutation is tolerated (resync self-heals).
+// emitTypeBatched emits one Type's full-load snapshot in chunks. It flattens
+// the type's handlers into one slice of raw cache pointers (cheap — no copies),
+// then converts each exactly once while chunking. total_batches is advisory:
+// the collector triggers its reconcile on is_last_batch (which the final chunk
+// always carries), so we estimate it from the raw count rather than paying a
+// second conversion pass to get an exact figure.
 func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceHandler) error {
 	batchSize := s.batchSize
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
-	// Pass 1: count.
-	total := 0
+
+	// Flatten raw items (shared cache pointers, ~one word each) so we convert
+	// only once below. The estimate may exceed the converted count (some
+	// converters drop items, e.g. replicas==0 ReplicaSets); that's fine since
+	// total_batches is advisory.
+	type rawItem struct {
+		raw any
+		h   *resourceHandler
+	}
+	var items []rawItem
 	for _, h := range hs {
 		for _, raw := range h.informer.GetIndexer().List() {
-			if _, ok := h.converter(raw); ok {
-				total++
-			}
+			items = append(items, rawItem{raw: raw, h: h})
 		}
 	}
+	totalEstimate := len(items)
 	batchID := fmt.Sprintf("snap-%s-%d", typ, time.Now().UnixNano())
 
 	chunk := make([]any, 0, batchSize)
@@ -537,7 +543,7 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 			FullLoad:      true,
 			BatchID:       batchID,
 			BatchSequence: seq,
-			TotalBatches:  maxInt(total+batchSize-1, 0) / maxInt(batchSize, 1),
+			TotalBatches:  maxInt(totalEstimate+batchSize-1, 0) / maxInt(batchSize, 1),
 			IsFirstBatch:  seq == 1,
 			IsLastBatch:   last,
 		}
@@ -550,31 +556,25 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 		chunk = chunk[:0]
 	}
 
-	// Pass 2: convert + chunk + POST.
-	emitted := 0
-	for _, h := range hs {
-		for _, raw := range h.informer.GetIndexer().List() {
-			item, ok := h.converter(raw)
-			if !ok {
-				continue
-			}
-			chunk = append(chunk, item)
-			emitted++
-			if len(chunk) >= batchSize && emitted < total {
-				flush(false)
-				if firstErr != nil {
-					// Abort WITHOUT sending a terminal is_last_batch envelope.
-					// The collector triggers its stale-cleanup on is_last_batch
-					// (should_cleanup = is_last_batch) and has no "aborted"
-					// concept, so emitting a last batch here would reconcile
-					// against a partial snapshot and mass-deactivate live
-					// resources. Stopping silently leaves the already-sent
-					// batches' upserts in place; the next resync re-runs the
-					// full sync (its is_first_batch restarts the cycle).
-					s.logger.Error("snapshot batch failed mid-stream; aborting without cleanup",
-						"type", typ, "batch_id", batchID, "sent_batches", seq, "err", firstErr)
-					return firstErr
-				}
+	for i, it := range items {
+		item, ok := it.h.converter(it.raw)
+		if !ok {
+			continue
+		}
+		chunk = append(chunk, item)
+		if len(chunk) >= batchSize && i < len(items)-1 {
+			flush(false)
+			if firstErr != nil {
+				// Abort WITHOUT sending a terminal is_last_batch envelope. The
+				// collector triggers its stale-cleanup on is_last_batch
+				// (should_cleanup = is_last_batch) and has no "aborted" concept,
+				// so emitting a last batch here would reconcile against a partial
+				// snapshot and mass-deactivate live resources. Stopping silently
+				// leaves the already-sent batches' upserts in place; the next
+				// resync re-runs the full sync (its is_first_batch restarts it).
+				s.logger.Error("snapshot batch failed mid-stream; aborting without cleanup",
+					"type", typ, "batch_id", batchID, "sent_batches", seq, "err", firstErr)
+				return firstErr
 			}
 		}
 	}
