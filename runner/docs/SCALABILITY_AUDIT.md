@@ -5,11 +5,15 @@ whether the agent survives a 1,000-node / ~100k-workload cluster, with
 attention to **event frequency** and **update (resync) frequency**.
 
 **Verdict:** The agent will **not** survive a cluster this size without
-changes. There are three hard blockers (full-snapshot fan-in, informer
-cache memory with no limit, and the per-event API-server amplification on
-the event path) and a set of secondary scaling issues. Below is the
+changes. There are **two day-one blockers** that bite simply by the agent
+existing in the cluster — the full-snapshot fan-in (§1) and informer-cache
+memory with no memory limit (§2) — plus a set of throughput/burst issues
+(§3–§8) that degrade the agent under churn and incidents. Below is the
 detailed breakdown, ordered by severity, each with the exact code path,
-what breaks, the failure mode at scale, and the fix.
+what breaks, the failure mode at scale, and the fix. Severities were
+re-verified against the rendered chart manifests and the actual code paths;
+§3 was downgraded from blocker to High after confirming the event-path
+amplification is gated by matcher predicates + rate limits (not per-event).
 
 ---
 
@@ -108,7 +112,7 @@ budget **1–2 GB** resident just for the pod+RS caches.
 
 ---
 
-## 3. BLOCKER — Event path amplifies every matched event into 3 apiserver LISTs
+## 3. HIGH — Each matched finding does 3 etcd-backed Event LISTs (burst-sensitive)
 
 **Code:** `pkg/triggers/engine.go:146-148` →
 `fetchSubjectEvents` + `fetchNodeEvents` + `fetchNamespaceEvents`, each calling
@@ -116,37 +120,46 @@ budget **1–2 GB** resident just for the pod+RS caches.
 (`cmd/agent/k8s_events_lister.go:42`) which does a **live**
 `CoreV1().Events(ns).List(...)`.
 
-For every kubewatch event that matches a trigger, the engine issues **three
-synchronous List calls to the apiserver** (subject events, node events, and a
-**namespace-wide** events list with *no* field selector — engine.go:80-86).
-`kubewatch` is configured with `event: true`
-(`charts/.../values.yaml` kubewatch.config.resource.event), so it streams
-**all** cluster Events to `/api/handle`.
+**Important gating (this is NOT per-event).** kubewatch forwards resource
+UPDATEs to `/api/handle`; the engine runs them through matchers gated by
+Kind + operation + predicate + rate limit (engine.go:103-128). The builtins
+fire only on genuinely-bad state — `pod_crash_loop`/`pod_oom_killed`
+(rate-limit **1h**), `image_pull_backoff` (**10m**), `job_failure`,
+`node_not_ready`, and `babysitter_*` which fires **only on an actual spec
+diff** (predicates.go:462), rate-limited **30s**. So ordinary healthy pod
+churn — the bulk of update volume — matches nothing and triggers **zero**
+LISTs. The 3 LISTs happen **per matched, non-rate-limited finding**, not per
+event.
+
+**Why it's still a real cost:** each of the 3 calls is a typed
+`clientset` LIST with no `resourceVersion` and a `Limit` set
+(lister.go:56-59), so it's served from **etcd, not the watch cache**. The
+subject/node calls use **field selectors on Events**, which aren't indexed —
+the apiserver scans the namespace's events to satisfy them. (The
+namespace-wide call is *not* a huge page — it's capped at `Limit: 20` /
+`supplementaryEventsLimit*2`; I corrected an earlier overstatement here.)
+Three etcd reads-with-scan per finding.
 
 **What breaks at scale:**
-- In a 1,000-node cluster, Events run from hundreds/sec at baseline to
-  thousands/sec during a rollout or incident (image pulls, scheduling,
-  probes, OOMs). Each *matched* event triggers 3 apiserver LISTs — the
-  namespace-wide one can return a large unfiltered page (`Limit: limit*2`,
-  lister.go:58) in a busy namespace.
-- This adds apiserver read load **precisely when the apiserver is already hot**
-  (incident/rollout), i.e. the agent makes a bad situation worse and can trip
-  apiserver priority-and-fairness throttling for the runner's SA.
+- The danger is **incident / mass-rollout bursts**: hundreds of *distinct*
+  pods going bad at once = hundreds of distinct fingerprints = rate limiting
+  doesn't dedup them → a burst of findings, each doing 3 etcd LISTs, against
+  an apiserver that's already hot. Can trip API priority-and-fairness
+  throttling for the runner's SA exactly when triage is happening.
 - `handleK8sEvent` does `w.WriteHeader(202)` and then spawns an **unbounded
   goroutine per matched event** for forwarding (alerts/server.go:197) — no
   worker pool, no backpressure. A burst → goroutine and connection pileup.
+- Steady-state (no incident) cost is modest — this is a tail/burst risk, not a
+  constant load, which is why it's High and not a day-one blocker like §1/§2.
 
 **Fixes:**
-- Serve recent-events evidence from the **informer cache**, not live LISTs:
-  add an Events informer (or reuse one) and read from its indexer — turns 3
-  network calls per match into in-memory lookups.
-- Drop the unconditional **namespace-wide** events table (or make it
-  opt-in / heavily capped) — it's the most expensive and least targeted.
+- Serve recent-events evidence from an **Events informer cache** (RV=0 list
+  semantics) instead of etcd field-selector LISTs — turns 3 etcd reads per
+  finding into in-memory lookups.
 - Bound the forward fan-out with a worker pool + queue; shed load (and meter
   it) instead of spawning goroutines without limit.
-- Consider turning `kubewatch event: true` **off** by default at this scale
-  and relying on targeted Event matching, or pre-filter event reasons at the
-  kubewatch layer.
+- Consider gating the supplementary (node + namespace) event tables behind a
+  per-cluster budget so an incident burst can't multiply apiserver load.
 
 ---
 
@@ -284,7 +297,7 @@ is available.
 |---|----------|-------|-------------|
 | 1 | Blocker | Full snapshot = one in-mem, one-POST fan-in | Batch via existing envelope fields + streaming marshal |
 | 2 | Blocker | Informer cache memory, 1 replica, no mem limit | Transform/trim cache, scope ReplicaSets, set limits + sizing, readiness probe |
-| 3 | Blocker | 3 live apiserver LISTs per matched event | Serve events from informer cache; drop ns-wide table; bound forward pool |
+| 3 | High | 3 etcd-backed Event LISTs per matched finding (burst-sensitive, gated by predicate + rate limit) | Serve events from informer cache; bound forward pool; budget supplementary tables |
 | 4 | High | 1 synchronous POST per object event, single worker | Batch+debounce emits, worker pool, tuned transport |
 | 5 | High | `podLookup` O(workloads×pods) per snapshot | Precompute owner→pod index |
 | 6 | Medium | Unbounded goroutine per WS message | Bound reader concurrency, fast-fail 503 |
