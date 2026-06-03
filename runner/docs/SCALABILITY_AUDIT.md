@@ -278,7 +278,61 @@ is available.
 
 ---
 
-## 9. LOW / positives worth keeping
+## 9. ARCHITECTURE — Horizontal scaling (more runner replicas) does not work today
+
+A natural reaction to the event load is "the runner is behind a Service, so
+add replicas." **It doesn't help and it actively breaks correctness**, because
+the runner is a stateful singleton with **no leader election** anywhere in the
+codebase (verified: no `Lease` / `leaderelection` / `resourcelock` usage).
+
+The event ingestion path *would* spread — kubewatch posts to the ClusterIP
+Service `…-runner:80/api/handle` (`charts/.../kubewatch-configmap.yaml:13`),
+which round-robins across pods. But every other subsystem assumes it is the
+only instance, so a second replica produces **duplicate side-effects and
+broken dedup**:
+
+1. **Finding dedup breaks.** The trigger rate-limiter is in-memory **per
+   process** (`pkg/triggers/ratelimit.go:13-15` — *"Single-replica agent
+   deployments mean we don't need cross-process coordination; in-memory is
+   enough"*). The same pod's UPDATE events land on different replicas via
+   Service round-robin; each replica has a cold limiter for that fingerprint
+   → **N× duplicate Findings**. The resync grace-window (`startTime` per
+   process, engine.go) has the same per-process flaw.
+2. **Discovery double-writes.** Each replica runs its own informers and emits
+   full snapshots + incrementals independently (`cmd/agent/main.go:866`,
+   unconditional). Two replicas = double LIST/WATCH on the apiserver **and**
+   two conflicting `service_key` upsert streams (each stamping its own
+   `update_time`). It duplicates; it does not shard.
+3. **Task poller double-runs.** Every replica drains `/v1/k8s/tasks`
+   (`main.go:851`, unconditional) → scan Jobs (Trivy/Popeye/KRR) created twice,
+   with potentially colliding Job names.
+4. **Pod-shell sessions break.** `podshell.Manager` holds SPDY exec streams in
+   memory on the pod that started the session; a follow-up `exec`/`read`
+   routed to the other replica has no session → intermittent shell failures.
+
+**Open dependency (out of this repo):** whether the relay even accepts two WS
+connections for the same `account_id`+`cluster`, or rejects/ambiguously routes
+the second. Confirm on the backend before assuming a second replica can
+register at all.
+
+**What real horizontal scale would require** (a project, not a replica bump):
+- **Leader-elect the singletons** via a k8s `Lease`: only the leader runs
+  discovery, the task poller, and the alert-rules collector. Followers serve
+  only stateless work (event matching, action proxies).
+- **Cross-replica finding dedup:** move the rate-limiter to a shared store, or
+  make emission idempotent and dedup by fingerprint **at the backend** so
+  duplicates collapse regardless of which replica fired.
+- **Shell sessions:** externalize session state, or accept session affinity
+  with its failure modes.
+
+**Until then: scale the runner vertically** (memory/CPU, after §1/§2), not
+horizontally. The event throughput ceiling is addressed by §3 + §4 (cache-
+served events, batched/debounced emits, bounded forward pool) within a single
+replica — not by adding replicas.
+
+---
+
+## 10. LOW / positives worth keeping
 
 - Shared informer factory dedups LIST/WATCH across handlers (service.go:62).
 - Workqueue key-coalescing damps duplicate updates (service.go:386).
@@ -303,9 +357,13 @@ is available.
 | 6 | Medium | Unbounded goroutine per WS message | Bound reader concurrency, fast-fail 503 |
 | 7 | Medium | Coarse synchronized 30m spikes, not tunable | Expose intervals as chart values |
 | 8 | Medium | Incremental deletes dropped (30m lag) | Emit tombstones on delete |
+| 9 | Architecture | Runner is a singleton; replicas duplicate (no leader election) | Leader-elect singletons + backend-side fingerprint dedup; scale vertically until then |
 
 ### Suggested sequencing
 1. Ship #1 (snapshot batching) and #2 (cache trim + memory limit) together —
    these are what make the agent *start* surviving the cluster.
-2. Then #3 + #4 (event/update throughput) for steady-state load.
+2. Then #3 + #4 (event/update throughput) for steady-state load — these raise
+   the single-replica ceiling, since #9 means you can't add replicas.
 3. Then #5–#8 as hardening.
+4. #9 (leader election + cross-replica dedup) is a separate, larger effort —
+   prerequisite for any future horizontal scale-out.
