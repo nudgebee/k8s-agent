@@ -31,6 +31,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 type Forwarder struct {
@@ -50,6 +52,49 @@ type Forwarder struct {
 	builder      *Builder
 	dropped      atomic.Uint64 // forward failures / unparseable input
 	k8sUnmatched atomic.Uint64 // kubewatch events received but no matcher fired
+
+	// sem bounds concurrent forward goroutines. nil = unbounded (the historical
+	// behavior; kept for tests). SetForwardPoolSize installs a bound; excess
+	// intake is shed (HTTP 202 was already returned, so no caller retry storm).
+	sem         *semaphore.Weighted
+	forwardShed atomic.Uint64
+	// OnShed, if set, is called on each shed event with the source label
+	// ("alertmanager"|"kubewatch") so main can bump a Prometheus counter.
+	OnShed func(source string)
+}
+
+// SetForwardPoolSize bounds concurrent event-forward goroutines. n<=0 leaves
+// the pool unbounded. Call once at construction.
+func (f *Forwarder) SetForwardPoolSize(n int) {
+	if n > 0 {
+		f.sem = semaphore.NewWeighted(int64(n))
+	}
+}
+
+// ForwardShed returns the number of intake events dropped because the forward
+// pool was saturated. Wire to a Prometheus counter in main.
+func (f *Forwarder) ForwardShed() uint64 { return f.forwardShed.Load() }
+
+// spawnForward runs fn in a goroutine under the (optional) pool bound. When the
+// pool is saturated it sheds (drops fn, increments the counter) rather than
+// queuing an unbounded goroutine.
+func (f *Forwarder) spawnForward(source string, fn func()) {
+	if f.sem == nil {
+		go fn()
+		return
+	}
+	if !f.sem.TryAcquire(1) {
+		f.forwardShed.Add(1)
+		if f.OnShed != nil {
+			f.OnShed(source)
+		}
+		f.Logger.Debug("forward shed: pool saturated", "source", source)
+		return
+	}
+	go func() {
+		defer f.sem.Release(1)
+		fn()
+	}()
 }
 
 // TriggerEngine is the subset of pkg/triggers.Engine the forwarder calls.
@@ -103,7 +148,7 @@ func (f *Forwarder) handleAlert(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusAccepted)
 
-	go func() {
+	f.spawnForward("alertmanager", func() {
 		envelopes, droppedSubjects, err := f.builder.FromAlertManager(body)
 		if err != nil {
 			f.recordDrop("alertmanager", err)
@@ -118,7 +163,7 @@ func (f *Forwarder) handleAlert(w http.ResponseWriter, r *http.Request) {
 				f.recordDrop("alertmanager", err)
 			}
 		}
-	}()
+	})
 }
 
 // handleK8sEvent receives a kubewatch payload at `/api/handle` (or alias)
@@ -193,8 +238,10 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 
 	// One Finding per match. The same kubewatch event can fire multiple
 	// matchers (e.g., a Pod that's both ImagePullBackOff and CrashLoopBackOff)
-	// — each produces its own Finding with its own aggregation_key.
-	go func() {
+	// — each produces its own Finding with its own aggregation_key. Acquire the
+	// pool slot ONCE per event (not per match) so a multi-finding event stays
+	// atomic and ordered.
+	f.spawnForward("kubewatch", func() {
 		for i := range matches {
 			env, err := f.builder.FromMatchedTrigger(matches[i], probe.Data)
 			if err != nil {
@@ -205,7 +252,7 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 				f.recordDrop("kubewatch_matcher_"+matches[i].MatcherName, err)
 			}
 		}
-	}()
+	})
 }
 
 // readBody enforces POST + a 5 MB cap. Returns (body, true) on success,

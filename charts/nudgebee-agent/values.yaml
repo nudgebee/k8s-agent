@@ -73,6 +73,37 @@ runner:
       memory: 1000Mi
     limits:
       cpu: ~
+      # Memory limit caps a runaway informer cache (see SCALABILITY_AUDIT.md #2).
+      # 2000Mi is generous headroom for small/medium clusters. SIZING: large
+      # clusters need more — budget ~1Gi per ~50k watched objects:
+      #   <100 nodes / <10k workloads   : 2000Mi
+      #   ~500 nodes / ~50k workloads   : 4000Mi
+      #   ~1000 nodes / ~100k workloads : 6000Mi+  (and enable runner.scaling below)
+      memory: 2000Mi
+  # Liveness/readiness probes hit the always-on /healthz endpoint on :5000 so a
+  # hung or restarting runner is detected and kept out of the Service.
+  probes:
+    enabled: true
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 6
+  # Scalability tunables (see runner/SCALABILITY_AUDIT.md). All optional — unset
+  # keys fall back to the binary defaults. The wire-changing knobs
+  # (snapshotBatching, incrementalBatchSize > 1, emitTombstones) require matching
+  # collector support and MUST stay off until the collector ships it.
+  scaling: {}
+    # snapshotBatching: false      # batch the full-load snapshot (needs collector batch reassembly)
+    # batchSize: 1000              # items per snapshot batch when snapshotBatching is on
+    # incrementalBatchSize: 1      # coalesce N informer events per incremental POST (>1 needs collector to iterate data)
+    # emitTombstones: false        # emit deleted:true on delete (needs collector incremental-delete support)
+    # forwardPoolSize: 64          # bound concurrent event-forward goroutines
+    # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
   tolerations: []
   annotations: {}
   nodeSelector: ~

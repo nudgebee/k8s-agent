@@ -87,6 +87,32 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    {{- with .Values.runner.scaling }}
+    {{- if hasKey . "snapshotBatching" }}
+    - name: DISCOVERY_SNAPSHOT_BATCHING
+      value: {{ .snapshotBatching | quote }}
+    {{- end }}
+    {{- if .batchSize }}
+    - name: DISCOVERY_BATCH_SIZE
+      value: {{ .batchSize | quote }}
+    {{- end }}
+    {{- if .incrementalBatchSize }}
+    - name: DISCOVERY_INCREMENTAL_BATCH_SIZE
+      value: {{ .incrementalBatchSize | quote }}
+    {{- end }}
+    {{- if hasKey . "emitTombstones" }}
+    - name: DISCOVERY_EMIT_TOMBSTONES
+      value: {{ .emitTombstones | quote }}
+    {{- end }}
+    {{- if .forwardPoolSize }}
+    - name: FORWARD_POOL_SIZE
+      value: {{ .forwardPoolSize | quote }}
+    {{- end }}
+    {{- if .relayHandlerPoolSize }}
+    - name: RELAY_HANDLER_POOL_SIZE
+      value: {{ .relayHandlerPoolSize | quote }}
+    {{- end }}
+    {{- end }}
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
@@ -143,6 +169,23 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     preStop:
       exec:
         command: ["bash", "-c", "kill -SIGINT 1"]
+  {{- if .Values.runner.probes.enabled }}
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: 5000
+    initialDelaySeconds: {{ .Values.runner.probes.readiness.initialDelaySeconds | default 5 }}
+    periodSeconds: {{ .Values.runner.probes.readiness.periodSeconds | default 10 }}
+    timeoutSeconds: {{ .Values.runner.probes.readiness.timeoutSeconds | default 3 }}
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 5000
+    initialDelaySeconds: {{ .Values.runner.probes.liveness.initialDelaySeconds | default 15 }}
+    periodSeconds: {{ .Values.runner.probes.liveness.periodSeconds | default 20 }}
+    timeoutSeconds: {{ .Values.runner.probes.liveness.timeoutSeconds | default 5 }}
+    failureThreshold: {{ .Values.runner.probes.liveness.failureThreshold | default 6 }}
+  {{- end }}
   resources:
     requests:
       cpu: {{ .Values.runner.resources.requests.cpu }}

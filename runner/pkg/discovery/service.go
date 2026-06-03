@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -41,6 +42,49 @@ type Service struct {
 	logger  *slog.Logger
 
 	handlers []*resourceHandler
+
+	// Scalability options (see Options / SetOptions). Defaults are set in
+	// NewService so the zero-config path stays wire-identical to before.
+	snapshotBatching  bool
+	batchSize         int
+	incrementalBatch  int
+	incrementalWindow time.Duration
+	emitTombstones    bool
+
+	// podIdx is the owner→representative-pod index, rebuilt at the start of
+	// every snapshot and published atomically so the per-event incremental
+	// workers can read it without locking. Never mutated after publish.
+	podIdx atomic.Pointer[podIndex]
+}
+
+// Options carries the scalability tunables. All are optional; unset fields
+// keep the historical (wire-identical) behavior.
+type Options struct {
+	// SnapshotBatching emits the full-load snapshot in BatchSize chunks using
+	// the envelope batch fields. Requires collector support for batch
+	// reassembly + deferred deletion-reconcile (see SCALABILITY_AUDIT.md).
+	SnapshotBatching bool
+	BatchSize        int
+	// IncrementalBatch coalesces up to N queued events into one incremental
+	// envelope. <=1 keeps the one-item-per-event behavior.
+	IncrementalBatch  int
+	IncrementalWindow time.Duration
+	// EmitTombstones emits a deleted:true item on resource deletion instead of
+	// waiting for the next full snapshot. Requires collector support.
+	EmitTombstones bool
+}
+
+// SetOptions applies scalability tunables. Call before Run().
+func (s *Service) SetOptions(o Options) {
+	s.snapshotBatching = o.SnapshotBatching
+	if o.BatchSize > 0 {
+		s.batchSize = o.BatchSize
+	}
+	if o.IncrementalBatch > 0 {
+		s.incrementalBatch = o.IncrementalBatch
+	}
+	s.incrementalWindow = o.IncrementalWindow
+	s.emitTombstones = o.EmitTombstones
 }
 
 // resourceHandler ties an informer to a workqueue and a converter.
@@ -49,6 +93,32 @@ type resourceHandler struct {
 	informer  cache.SharedIndexInformer
 	queue     workqueue.TypedRateLimitingInterface[string]
 	converter func(obj any) (wireItem any, ok bool)
+
+	// tomb stashes converted tombstone items keyed by cache key, populated by
+	// the informer DeleteFunc (which still has the deleted object) and drained
+	// by the worker when it sees the key is gone from the indexer. Only used
+	// when emitTombstones is on.
+	tombMu sync.Mutex
+	tomb   map[string]any
+}
+
+func (h *resourceHandler) stashTombstone(key string, item any) {
+	h.tombMu.Lock()
+	if h.tomb == nil {
+		h.tomb = map[string]any{}
+	}
+	h.tomb[key] = item
+	h.tombMu.Unlock()
+}
+
+func (h *resourceHandler) popTombstone(key string) (any, bool) {
+	h.tombMu.Lock()
+	defer h.tombMu.Unlock()
+	item, ok := h.tomb[key]
+	if ok {
+		delete(h.tomb, key)
+	}
+	return item, ok
 }
 
 func NewService(cs kubernetes.Interface, sink *Sink, resync time.Duration, logger *slog.Logger) *Service {
@@ -60,13 +130,20 @@ func NewService(cs kubernetes.Interface, sink *Sink, resync time.Duration, logge
 	}
 	// One factory shared across all resources; each resource registers its
 	// own informer + handler. SharedInformerFactory dedups list/watch traffic.
-	factory := informers.NewSharedInformerFactory(cs, resync)
+	// WithTransform strips fields no converter reads BEFORE objects enter the
+	// cache — the single biggest per-object memory win at 100k+ pods. See
+	// discoveryTransform; it is verified to preserve every field the converters
+	// read, so it's safe to apply unconditionally.
+	factory := informers.NewSharedInformerFactoryWithOptions(cs, resync,
+		informers.WithTransform(discoveryTransform))
 	return &Service{
-		cs:      cs,
-		sink:    sink,
-		factory: factory,
-		resync:  resync,
-		logger:  logger,
+		cs:               cs,
+		sink:             sink,
+		factory:          factory,
+		resync:           resync,
+		logger:           logger,
+		batchSize:        1000, // default chunk size when snapshotBatching is on
+		incrementalBatch: 1,    // default: one item per incremental envelope
 	}
 }
 
@@ -116,47 +193,78 @@ func (s *Service) RegisterReplicaSets() {
 	s.register(s.factory.Apps().V1().ReplicaSets().Informer(), TypeService, newReplicaSetConverter(s.podLookup()))
 }
 
-// podLookup builds a `(namespace, labels.Selector) -> *Pod` closure
-// backed by the Pod informer's indexer. Returns nil when the Pod
-// informer hasn't been registered (RegisterPods must run first; the
-// rest of RegisterAll already enforces that ordering).
-//
-// The closure scans namespace-scoped Pods and returns the first match
-// with a non-empty PodStatus — running Pods carry QOSClass / PodIP /
-// Conditions which are exactly what callers need. Returning the first
-// match is fine: for Deployments / StatefulSets / DaemonSets all
-// replicas share the same template, so qos_class is uniform per
-// workload, ip is per-replica but the UI only renders one workload
-// summary, and conditions reflect a single Pod's state.
+// podLookup returns the workload-UID → representative-Pod closure used by the
+// workload converters. It reads the snapshot-scoped index published in
+// s.podIdx (built by buildPodIndex at the start of every snapshot), making
+// workload conversion O(1) instead of the old O(workloads × pods-per-namespace)
+// selector scan. On a miss (e.g. a workload created since the last snapshot, on
+// the incremental path) it returns nil; qos_class/ip/conditions self-heal at
+// the next snapshot once a Pod reports status.
 func (s *Service) podLookup() podLookupFn {
-	// SharedInformerFactory.Pods().Informer() is idempotent and returns
-	// the same shared instance RegisterPods() wired up earlier, so this
-	// works regardless of registration order.
-	indexer := s.factory.Core().V1().Pods().Informer().GetIndexer()
-	return func(namespace string, selector labels.Selector) *corev1.Pod {
-		if indexer == nil || selector == nil {
+	return func(uid types.UID) *corev1.Pod {
+		idx := s.podIdx.Load()
+		if idx == nil {
 			return nil
 		}
-		items, err := indexer.ByIndex(cache.NamespaceIndex, namespace)
-		if err != nil {
-			return nil
+		return idx.byOwner[uid]
+	}
+}
+
+// podIndex maps a workload UID to one representative status-bearing Pod owned
+// by that workload (directly, or via a ReplicaSet for Deployment-owned pods).
+// Built once per snapshot and published atomically; never mutated after publish.
+type podIndex struct {
+	byOwner map[types.UID]*corev1.Pod
+}
+
+// buildPodIndex walks the Pod cache once (O(pods)) and indexes each
+// status-bearing Pod under every workload UID in its ownership chain — the
+// immediate controller (ReplicaSet / StatefulSet / DaemonSet) AND, for
+// ReplicaSet-owned pods, the controlling Deployment. This lets both a
+// Deployment record and its current ReplicaSet record resolve a representative
+// pod in O(1). First write per UID wins (any running replica is representative).
+func (s *Service) buildPodIndex() *podIndex {
+	idx := &podIndex{byOwner: make(map[types.UID]*corev1.Pod)}
+	podInf := s.factory.Core().V1().Pods().Informer()
+	rsIndexer := s.factory.Apps().V1().ReplicaSets().Informer().GetIndexer()
+	for _, raw := range podInf.GetIndexer().List() {
+		pod, ok := raw.(*corev1.Pod)
+		if !ok {
+			continue
 		}
-		for _, raw := range items {
-			pod, ok := raw.(*corev1.Pod)
-			if !ok {
-				continue
-			}
-			if !selector.Matches(labels.Set(pod.Labels)) {
-				continue
-			}
-			// Prefer a Pod that's actually had status reported — qos_class
-			// / ip / conditions stay empty on freshly-created Pods.
-			if pod.Status.QOSClass != "" || pod.Status.PodIP != "" || len(pod.Status.Conditions) > 0 {
-				return pod
+		// Only pods that have reported status carry qos_class / ip / conditions.
+		if pod.Status.QOSClass == "" && pod.Status.PodIP == "" && len(pod.Status.Conditions) == 0 {
+			continue
+		}
+		for _, uid := range workloadOwnerUIDs(pod, rsIndexer) {
+			if _, exists := idx.byOwner[uid]; !exists {
+				idx.byOwner[uid] = pod
 			}
 		}
+	}
+	return idx
+}
+
+// workloadOwnerUIDs returns the UIDs of the workload(s) a Pod belongs to: its
+// immediate controller, plus the controlling Deployment when the immediate
+// controller is a ReplicaSet (resolved via the RS cache — authoritative, no
+// name-suffix heuristics). Returns nil for unowned pods.
+func workloadOwnerUIDs(pod *corev1.Pod, rsIndexer cache.Indexer) []types.UID {
+	ctrl, ok := controllerOwner(pod.OwnerReferences)
+	if !ok {
 		return nil
 	}
+	uids := []types.UID{ctrl.UID}
+	if ctrl.Kind == "ReplicaSet" && rsIndexer != nil {
+		if obj, exists, err := rsIndexer.GetByKey(pod.Namespace + "/" + ctrl.Name); err == nil && exists {
+			if rs, ok := obj.(*appsv1.ReplicaSet); ok {
+				if rsCtrl, ok := controllerOwner(rs.OwnerReferences); ok {
+					uids = append(uids, rsCtrl.UID)
+				}
+			}
+		}
+	}
+	return uids
 }
 
 // replicaSetLookup returns a `(namespace, name) -> *ReplicaSet` closure
@@ -223,17 +331,43 @@ func (s *Service) RegisterAll() {
 // register is the common path for any resource type.
 func (s *Service) register(informer cache.SharedIndexInformer, typ Type, converter func(any) (any, bool)) {
 	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
-	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { enqueue(queue, obj) },
-		UpdateFunc: func(_, obj any) { enqueue(queue, obj) },
-		DeleteFunc: func(obj any) { enqueue(queue, obj) },
-	})
-	s.handlers = append(s.handlers, &resourceHandler{
+	h := &resourceHandler{
 		typ:       typ,
 		informer:  informer,
 		queue:     queue,
 		converter: converter,
+	}
+	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { enqueue(queue, obj) },
+		UpdateFunc: func(_, obj any) { enqueue(queue, obj) },
+		DeleteFunc: func(obj any) {
+			// When tombstones are enabled, capture a deleted:true item NOW —
+			// the DeleteFunc still has the object; once the key is gone from the
+			// indexer the worker can't reconstruct the wire shape (Kind etc.).
+			// Use the same key function as enqueue so stash + dequeue keys match.
+			if s.emitTombstones {
+				if key, err := cache.MetaNamespaceKeyFunc(obj); err == nil {
+					if item, ok := converter(unwrapDeleted(obj)); ok {
+						if m, ok := item.(map[string]any); ok {
+							m["deleted"] = true
+						}
+						h.stashTombstone(key, item)
+					}
+				}
+			}
+			enqueue(queue, obj)
+		},
 	})
+	s.handlers = append(s.handlers, h)
+}
+
+// unwrapDeleted returns the underlying object from a cache.DeletedFinalStateUnknown
+// tombstone, or the object itself otherwise.
+func unwrapDeleted(obj any) any {
+	if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		return d.Obj
+	}
+	return obj
 }
 
 // Run blocks until ctx is done.
@@ -302,11 +436,23 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// emitAllSnapshots posts one full-load envelope per resource type by walking
-// each handler's indexer cache.
+// emitAllSnapshots refreshes the owner→pod index, then posts the full-load
+// snapshot — either one envelope per type (legacy, wire-identical) or, when
+// snapshotBatching is on, BatchSize chunks per type using the envelope batch
+// fields. The index is rebuilt + published BEFORE conversion so converters see
+// a consistent representative-pod view.
 func (s *Service) emitAllSnapshots(ctx context.Context) error {
-	// Group items by Type since multiple handlers can share a Type (e.g.
-	// Pods + Deployments + StatefulSets all bucket under "service").
+	s.podIdx.Store(s.buildPodIndex())
+	if s.snapshotBatching {
+		return s.emitBatched(ctx)
+	}
+	return s.emitSingle(ctx)
+}
+
+// emitSingle is the historical path: one full-load envelope per resource type,
+// total_batches=1. Group items by Type since multiple handlers share a Type
+// (Pods + Deployments + StatefulSets all bucket under "service").
+func (s *Service) emitSingle(ctx context.Context) error {
 	byType := map[Type][]any{}
 	for _, h := range s.handlers {
 		for _, raw := range h.informer.GetIndexer().List() {
@@ -315,7 +461,6 @@ func (s *Service) emitAllSnapshots(ctx context.Context) error {
 			}
 		}
 	}
-
 	batchID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	var firstErr error
 	for typ, items := range byType {
@@ -336,49 +481,216 @@ func (s *Service) emitAllSnapshots(ctx context.Context) error {
 	return firstErr
 }
 
-// workerLoop processes one queue item at a time. Each item becomes a tiny
-// incremental update envelope (no batch metadata, so the collector treats it
-// as INCREMENTAL — no cleanup operations).
+// emitBatched streams each Type's snapshot in BatchSize chunks so the agent
+// never materializes the whole world in memory or in one POST. Requires the
+// collector to reassemble batches by batch_id and defer its deletion-reconcile
+// until is_last_batch (see runner/docs/SCALABILITY_AUDIT.md, Phase B / B1).
+func (s *Service) emitBatched(ctx context.Context) error {
+	handlersByType := map[Type][]*resourceHandler{}
+	var order []Type
+	for _, h := range s.handlers {
+		if _, seen := handlersByType[h.typ]; !seen {
+			order = append(order, h.typ)
+		}
+		handlersByType[h.typ] = append(handlersByType[h.typ], h)
+	}
+	var firstErr error
+	for _, typ := range order {
+		if err := s.emitTypeBatched(ctx, typ, handlersByType[typ]); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// emitTypeBatched emits one Type's full-load snapshot in chunks. Two passes:
+// pass 1 counts items that convert ok (holding ≤1 converted item at a time, so
+// memory stays bounded); pass 2 converts again and POSTs chunks. Converters are
+// pure (read cache pointers, build fresh maps) so double-conversion is safe.
+// total_batches is advisory — the collector triggers its reconcile on
+// is_last_batch, which the final chunk always carries, so a small count drift
+// under concurrent cache mutation is tolerated (resync self-heals).
+func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceHandler) error {
+	batchSize := s.batchSize
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	// Pass 1: count.
+	total := 0
+	for _, h := range hs {
+		for _, raw := range h.informer.GetIndexer().List() {
+			if _, ok := h.converter(raw); ok {
+				total++
+			}
+		}
+	}
+	batchID := fmt.Sprintf("snap-%s-%d", typ, time.Now().UnixNano())
+
+	chunk := make([]any, 0, batchSize)
+	seq := 0
+	var firstErr error
+	flush := func(last bool) {
+		seq++
+		env := &Envelope{
+			Type:          typ,
+			Data:          append([]any(nil), chunk...),
+			FullLoad:      true,
+			BatchID:       batchID,
+			BatchSequence: seq,
+			TotalBatches:  maxInt(total+batchSize-1, 0) / maxInt(batchSize, 1),
+			IsFirstBatch:  seq == 1,
+			IsLastBatch:   last,
+		}
+		if env.TotalBatches == 0 {
+			env.TotalBatches = 1 // empty type still sends one authoritative envelope
+		}
+		if err := s.sink.Post(ctx, env); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		chunk = chunk[:0]
+	}
+
+	// Pass 2: convert + chunk + POST.
+	emitted := 0
+	for _, h := range hs {
+		for _, raw := range h.informer.GetIndexer().List() {
+			item, ok := h.converter(raw)
+			if !ok {
+				continue
+			}
+			chunk = append(chunk, item)
+			emitted++
+			if len(chunk) >= batchSize && emitted < total {
+				flush(false)
+				if firstErr != nil {
+					s.sendAbort(ctx, typ, batchID, seq)
+					return firstErr
+				}
+			}
+		}
+	}
+	// Final (or only / empty) chunk carries is_last_batch=true.
+	flush(true)
+	return firstErr
+}
+
+// sendAbort tells the collector to discard a partially-sent batch set without
+// running its deletion-reconcile (a half-sent snapshot must never delete live
+// resources). Best-effort.
+func (s *Service) sendAbort(ctx context.Context, typ Type, batchID string, lastSeq int) {
+	env := &Envelope{
+		Type:          typ,
+		Data:          []any{},
+		FullLoad:      true,
+		BatchID:       batchID,
+		BatchSequence: lastSeq + 1,
+		IsLastBatch:   true,
+		Metadata:      map[string]any{"aborted": true},
+	}
+	if err := s.sink.Post(ctx, env); err != nil {
+		s.logger.Error("snapshot abort post failed", "type", typ, "batch_id", batchID, "err", err)
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// workerLoop drains the handler's workqueue, coalescing up to incrementalBatch
+// currently-queued keys into a single incremental envelope (no batch metadata
+// → the collector treats it as INCREMENTAL, no cleanup). With incrementalBatch
+// <= 1 it stays one-item-per-envelope (wire-identical to the legacy path).
 func (s *Service) workerLoop(ctx context.Context, h *resourceHandler) {
 	for {
 		key, shutdown := h.queue.Get()
 		if shutdown {
 			return
 		}
-		s.processOne(ctx, h, key)
-		h.queue.Done(key)
+		keys := []string{key}
+		// Coalesce up to incrementalBatch distinct objects into one envelope.
+		// With no window, drain only the backlog already queued (queue.Len() is
+		// a hint; queue dedups by key so these are distinct objects). With a
+		// window, wait up to incrementalWindow for more events to accumulate,
+		// polling so we never block past the deadline.
+		if s.incrementalBatch > 1 {
+			var deadline time.Time
+			if s.incrementalWindow > 0 {
+				deadline = time.Now().Add(s.incrementalWindow)
+			}
+			for len(keys) < s.incrementalBatch {
+				if h.queue.Len() == 0 {
+					if s.incrementalWindow <= 0 || !time.Now().Before(deadline) {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+					continue
+				}
+				k, sd := h.queue.Get()
+				if sd {
+					break
+				}
+				keys = append(keys, k)
+			}
+		}
+		s.processBatch(ctx, h, keys)
+		for _, k := range keys {
+			h.queue.Done(k)
+		}
 	}
 }
 
-func (s *Service) processOne(ctx context.Context, h *resourceHandler, key string) {
-	raw, exists, err := h.informer.GetIndexer().GetByKey(key)
-	if err != nil {
-		h.queue.AddRateLimited(key)
-		s.logger.Error("indexer get", "key", key, "err", err)
+// processBatch converts the drained keys into one incremental envelope. Each
+// Get is paired with a Done by the caller; here we manage Forget /
+// AddRateLimited per key: Forget converted keys only on a successful POST,
+// AddRateLimited on a retryable indexer error, Forget deletions/non-converts
+// immediately.
+func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []string) {
+	items := make([]any, 0, len(keys))
+	converted := make([]string, 0, len(keys))
+	for _, key := range keys {
+		raw, exists, err := h.informer.GetIndexer().GetByKey(key)
+		if err != nil {
+			h.queue.AddRateLimited(key)
+			s.logger.Error("indexer get", "key", key, "err", err)
+			continue
+		}
+		if !exists {
+			// Deletion. With tombstones enabled, the DeleteFunc stashed a
+			// deleted:true item we can emit so the collector marks the resource
+			// inactive immediately; otherwise the next full snapshot reconciles.
+			if s.emitTombstones {
+				if tomb, ok := h.popTombstone(key); ok {
+					items = append(items, tomb)
+				}
+			} else {
+				s.logger.Debug("resource deleted (will reconcile on next snapshot)", "key", key)
+			}
+			h.queue.Forget(key)
+			continue
+		}
+		item, ok := h.converter(raw)
+		if !ok {
+			h.queue.Forget(key)
+			continue
+		}
+		items = append(items, item)
+		converted = append(converted, key)
+	}
+	if len(items) == 0 {
 		return
 	}
-	if !exists {
-		// Deletion: emit a tombstone marker so the collector can mark
-		// resources inactive. Today the collector's incremental path doesn't
-		// process deletions — full snapshots on resync handle them. We log
-		// for now and skip.
-		s.logger.Debug("resource deleted (will reconcile on next snapshot)", "key", key)
-		h.queue.Forget(key)
-		return
-	}
-	item, ok := h.converter(raw)
-	if !ok {
-		h.queue.Forget(key)
-		return
-	}
-	env := &Envelope{Type: h.typ, Data: []any{item}}
+	env := &Envelope{Type: h.typ, Data: items}
 	if err := s.sink.Post(ctx, env); err != nil {
-		s.logger.Error("incremental post failed", "type", h.typ, "key", key, "err", err)
-		// Don't AddRateLimited on transient backend errors — next periodic
-		// snapshot will pick it up. Failed retries pile up otherwise.
-	} else {
-		// Clear any backoff accumulated from a prior indexer-get error.
-		h.queue.Forget(key)
+		s.logger.Error("incremental post failed", "type", h.typ, "count", len(items), "err", err)
+		// Don't AddRateLimited on backend errors — the next periodic snapshot
+		// picks it up; failed retries pile up otherwise.
+		return
+	}
+	for _, key := range converted {
+		h.queue.Forget(key) // clear any backoff from a prior indexer-get error
 	}
 }
 
