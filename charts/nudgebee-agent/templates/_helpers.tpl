@@ -83,6 +83,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Values.runner.relay_address }}
     - name: SCANNERS_ENABLED
       value: "true"
+    {{- if .Values.runner.pprof }}
+    - name: PPROF_ENABLED
+      value: "true"
+    {{- end }}
     - name: SCANNER_NAMESPACE
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
