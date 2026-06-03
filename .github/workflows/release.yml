@@ -11,6 +11,7 @@ jobs:
     permissions:
       contents: write
       id-token: write # keyless cosign signing of chart packages
+      packages: read # read GHCR tags to pin the runner image
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,6 +28,34 @@ jobs:
         uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
         with:
           version: v3.10.0
+
+      - name: Pin runner image to the build in this release's history
+        working-directory: ./charts/nudgebee-agent
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The runner image is tagged "<timestamp>_<commit-sha>" and built only
+          # for main commits touching runner/** (runner-image.yaml). Pin the chart
+          # to the NEWEST such image whose commit is an ancestor of the release
+          # commit, so a released chart can never ship a runner image that
+          # predates — or isn't part of — its own code. See release-rc.yml for the
+          # off-by-one this fixes (rc-5 shipped a pre-#453 runner).
+          picked=""
+          while IFS= read -r tag; do
+            sha="${tag##*_}"
+            if git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+              picked="$tag"; break
+            fi
+          done < <(gh api -H "Accept: application/vnd.github+json" \
+            "/orgs/nudgebee/packages/container/nudgebee-agent/versions?per_page=100" \
+            --jq '[.[].metadata.container.tags[]] | map(select(test("^[0-9]{4}.*_[0-9a-f]{40}$"))) | sort | reverse | .[]')
+          if [ -z "$picked" ]; then
+            echo "::error::No nudgebee-agent image found for any commit in this release's history — build/push the runner image first."
+            exit 1
+          fi
+          yq -i ".runner.image.tag=\"$picked\"" values.yaml
+          echo "Pinned runner.image.tag=$picked"
 
       - name: Add dependency chart repos
         run: |

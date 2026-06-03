@@ -83,6 +83,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Values.runner.relay_address }}
     - name: SCANNERS_ENABLED
       value: "true"
+    {{- if .Values.runner.pprof }}
+    - name: PPROF_ENABLED
+      value: "true"
+    {{- end }}
     - name: SCANNER_NAMESPACE
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
@@ -117,9 +121,24 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
     {{- end }}
-    {{- if .Values.rsa }}
+    # MUTATE_ENABLED gates the runner's mutate subsystem (delete_pod,
+    # cordon, rollout_restart, PrometheusRule CRUD, AlertManager silences,
+    # Loki rules, ...). The auth boundary lives inside the runner — only
+    # the explicitly-allowlisted light actions accept unsigned requests;
+    # every other mutate action falls through to the validator's
+    # HMAC/RSA-partial-keys path and is rejected without a signed request.
+    # So enabling the subsystem here does NOT loosen the security posture
+    # on installations that omit `.Values.rsa`; it only makes the
+    # light-action carve-outs (currently create_or_replace_alert_rule /
+    # delete_alert_rule) reachable end-to-end.
+    #
+    # Operators who want a strictly read-only deployment can set
+    # `runner.mutateEnabled: false`. The `eq ... false` pattern is
+    # intentional: `default true` would treat an explicit `false` as
+    # unset and re-enable the subsystem.
     - name: MUTATE_ENABLED
-      value: "true"
+      value: {{ if eq .Values.runner.mutateEnabled false }}"false"{{ else }}"true"{{ end }}
+    {{- if .Values.rsa }}
     - name: RSA_PRIVATE_KEY_PATH
       value: /etc/nudgebee/auth/prv
     {{- end }}
