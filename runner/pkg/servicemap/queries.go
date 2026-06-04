@@ -13,6 +13,29 @@ package servicemap
 
 import "strings"
 
+// edgeGroupBy is the label set service-map edges are keyed on — it mirrors
+// the labels edgeFromConnectionLabels (build.go) reads. Connection/request
+// metrics carry high-cardinality labels (status, method, instance, pod, le,
+// …) that the map builder discards: it collapses everything down to these
+// edge labels via la.<field> += r.Last. container_http_requests_total alone
+// is ~20–40k raw series in a busy cluster; decoding all of it into
+// map[string]string + [][]any was the dominant heap consumer (~1GB per
+// Build, captured in a live heap profile).
+//
+// We aggregate server-side by the same labels so Prometheus returns one
+// series per edge (hundreds) instead of the full raw cardinality. The result
+// is identical — build.go already summed across the collapsed series — at a
+// fraction of the memory.
+const edgeGroupBy = "src_workload_kind, src_kind, src_workload_name, " +
+	"src_workload_namespace, destination_workload_kind, " +
+	"destination_workload_name, destination_workload_namespace, destination_ip"
+
+// sumByEdge / maxByEdge wrap an expression in a server-side aggregation over
+// edgeGroupBy. sum mirrors the additive `la.x += r.Last` accumulation in
+// build.go; max mirrors the latency `if r.Last > la.latency` projection.
+func sumByEdge(expr string) string { return "sum by (" + edgeGroupBy + ") (" + expr + ")" }
+func maxByEdge(expr string) string { return "max by (" + edgeGroupBy + ") (" + expr + ")" }
+
 // Queries is the per-query map. Each value is a PromQL expression with
 // $RANGE, $SRC_FILTER, $DST_FILTER, $POD_FILTER, $NAMESPACE_FILTER
 // placeholders and a __CLUSTER__ token (replaced at fetch time with the
@@ -31,14 +54,14 @@ var Queries = map[string]string{
 	"kube_statefulset_replicas":                      "kube_statefulset_replicas{__CLUSTER__}",
 	"container_info":                                 "container_info{__CLUSTER__}",
 	"container_application_type":                     "container_application_type{__CLUSTER__}",
-	"container_net_tcp_successful_connects":          "rate(container_net_tcp_successful_connects_total{__CLUSTER__}[$RANGE]) > 0",
-	"container_net_tcp_failed_connects":              "rate(container_net_tcp_failed_connects_total{__CLUSTER__}[$RANGE]) > 0",
-	"container_net_tcp_active_connections":           "container_net_tcp_active_connections{__CLUSTER__} > 0",
-	"container_net_tcp_retransmits":                  "rate(container_net_tcp_retransmits_total{__CLUSTER__}[$RANGE]) > 0",
-	"container_http_requests_total_count":            "increase(container_http_requests_total{__CLUSTER__}[$RANGE])",
-	"container_http_requests_count":                  "rate(container_http_requests_total{__CLUSTER__}[$RANGE])",
-	"container_http_requests_failure_count":          `rate(container_http_requests_total{__CLUSTER__ status=~"4..|5.."}[$RANGE]) > 0`,
-	"container_http_requests_latency":                "(rate(container_http_requests_duration_seconds_total_sum{__CLUSTER__}[$RANGE]) / rate(container_http_requests_duration_seconds_total_count{__CLUSTER__}[$RANGE])) > 0",
+	"container_net_tcp_successful_connects":          sumByEdge("rate(container_net_tcp_successful_connects_total{__CLUSTER__}[$RANGE])") + " > 0",
+	"container_net_tcp_failed_connects":              sumByEdge("rate(container_net_tcp_failed_connects_total{__CLUSTER__}[$RANGE])") + " > 0",
+	"container_net_tcp_active_connections":           sumByEdge("container_net_tcp_active_connections{__CLUSTER__}") + " > 0",
+	"container_net_tcp_retransmits":                  sumByEdge("rate(container_net_tcp_retransmits_total{__CLUSTER__}[$RANGE])") + " > 0",
+	"container_http_requests_total_count":            sumByEdge("increase(container_http_requests_total{__CLUSTER__}[$RANGE])"),
+	"container_http_requests_count":                  sumByEdge("rate(container_http_requests_total{__CLUSTER__}[$RANGE])"),
+	"container_http_requests_failure_count":          sumByEdge(`rate(container_http_requests_total{__CLUSTER__ status=~"4..|5.."}[$RANGE])`) + " > 0",
+	"container_http_requests_latency":                maxByEdge("(rate(container_http_requests_duration_seconds_total_sum{__CLUSTER__}[$RANGE]) / rate(container_http_requests_duration_seconds_total_count{__CLUSTER__}[$RANGE])) > 0"),
 	"container_postgres_requests_count":              "rate(container_postgres_queries_total{__CLUSTER__}[$RANGE])",
 	"container_postgres_requests_total_count":        "increase(container_postgres_queries_total{__CLUSTER__}[$RANGE]) > 0",
 	"container_postgres_requests_latency":            "(rate(container_postgres_queries_duration_seconds_total_sum{__CLUSTER__}[$RANGE]) / rate(container_postgres_queries_duration_seconds_total_count{__CLUSTER__}[$RANGE])) > 0",
@@ -71,8 +94,8 @@ var Queries = map[string]string{
 	"container_rabbitmq_messages":                    "rate(container_rabbitmq_messages_total{__CLUSTER__}[$RANGE])",
 	"container_nats_messages":                        "rate(container_nats_messages_total{__CLUSTER__}[$RANGE])",
 	"ip_to_fqdn":                                     "sum by(fqdn, ip) (ip_to_fqdn{__CLUSTER__})",
-	"container_net_tcp_bytes_sent":                   "rate(container_net_tcp_bytes_sent_total{__CLUSTER__}[$RANGE]) > 0",
-	"container_net_tcp_bytes_received":               "rate(container_net_tcp_bytes_received_total{__CLUSTER__}[$RANGE]) > 0",
+	"container_net_tcp_bytes_sent":                   sumByEdge("rate(container_net_tcp_bytes_sent_total{__CLUSTER__}[$RANGE])") + " > 0",
+	"container_net_tcp_bytes_received":               sumByEdge("rate(container_net_tcp_bytes_received_total{__CLUSTER__}[$RANGE])") + " > 0",
 	"container_cpu_usage":                            "rate(container_resources_cpu_usage_seconds_total{__CLUSTER__}[$RANGE])",
 	"container_cpu_delay":                            "rate(container_resources_cpu_delay_seconds_total{__CLUSTER__}[$RANGE])",
 	"container_throttled_time":                       "rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__}[$RANGE])",
@@ -98,15 +121,15 @@ var ApplicationQueries = map[string]string{
 	"kube_daemonset_status_desired_number_scheduled": "kube_daemonset_status_desired_number_scheduled{__CLUSTER__}",
 	"kube_statefulset_replicas":                      "kube_statefulset_replicas{__CLUSTER__}",
 	"kube_pod_status_scheduled":                      `kube_pod_status_scheduled{__CLUSTER__ condition="true"} > 0`,
-	"container_net_tcp_successful_connects":          "(rate(container_net_tcp_successful_connects_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_net_tcp_successful_connects_total{__CLUSTER__ $DST_FILTER}[$RANGE]))",
-	"container_net_tcp_failed_connects":              "(rate(container_net_tcp_failed_connects_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_net_tcp_failed_connects_total{__CLUSTER__ $DST_FILTER}[$RANGE]))",
-	"container_net_tcp_retransmits":                  "(rate(container_net_tcp_retransmits_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_net_tcp_retransmits_total{__CLUSTER__ $DST_FILTER}[$RANGE]))",
-	"container_http_requests_total_count":            "(increase(container_http_requests_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (increase(container_http_requests_total{__CLUSTER__ $DST_FILTER}[$RANGE]))",
-	"container_http_requests_count":                  "(rate(container_http_requests_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_http_requests_total{__CLUSTER__ $DST_FILTER}[$RANGE]))",
+	"container_net_tcp_successful_connects":          sumByEdge("(rate(container_net_tcp_successful_connects_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_net_tcp_successful_connects_total{__CLUSTER__ $DST_FILTER}[$RANGE]))"),
+	"container_net_tcp_failed_connects":              sumByEdge("(rate(container_net_tcp_failed_connects_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_net_tcp_failed_connects_total{__CLUSTER__ $DST_FILTER}[$RANGE]))"),
+	"container_net_tcp_retransmits":                  sumByEdge("(rate(container_net_tcp_retransmits_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_net_tcp_retransmits_total{__CLUSTER__ $DST_FILTER}[$RANGE]))"),
+	"container_http_requests_total_count":            sumByEdge("(increase(container_http_requests_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (increase(container_http_requests_total{__CLUSTER__ $DST_FILTER}[$RANGE]))"),
+	"container_http_requests_count":                  sumByEdge("(rate(container_http_requests_total{__CLUSTER__ $SRC_FILTER}[$RANGE])) or (rate(container_http_requests_total{__CLUSTER__ $DST_FILTER}[$RANGE]))"),
 	"container_application_type":                     "container_application_type{__CLUSTER__}",
 	"ip_to_fqdn":                                     "sum by(fqdn, ip) (ip_to_fqdn{__CLUSTER__})",
-	"container_net_tcp_bytes_sent":                   "rate(container_net_tcp_bytes_sent_total{__CLUSTER__ $DST_FILTER}[$RANGE]) or rate(container_net_tcp_bytes_sent_total{__CLUSTER__ $SRC_FILTER}[$RANGE])",
-	"container_net_tcp_bytes_received":               "rate(container_net_tcp_bytes_received_total{__CLUSTER__ $DST_FILTER}[$RANGE]) or rate(container_net_tcp_bytes_received_total{__CLUSTER__ $SRC_FILTER}[$RANGE])",
+	"container_net_tcp_bytes_sent":                   sumByEdge("rate(container_net_tcp_bytes_sent_total{__CLUSTER__ $DST_FILTER}[$RANGE]) or rate(container_net_tcp_bytes_sent_total{__CLUSTER__ $SRC_FILTER}[$RANGE])"),
+	"container_net_tcp_bytes_received":               sumByEdge("rate(container_net_tcp_bytes_received_total{__CLUSTER__ $DST_FILTER}[$RANGE]) or rate(container_net_tcp_bytes_received_total{__CLUSTER__ $SRC_FILTER}[$RANGE])"),
 }
 
 // expandPlaceholders substitutes $RANGE/$SRC_FILTER/$DST_FILTER/$POD_FILTER/
