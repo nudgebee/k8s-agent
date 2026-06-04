@@ -154,14 +154,13 @@ nodeAgent:
   env:
     - name: SENSITIVE_HEADERS
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
-# OpenCost now runs centrally on the Nudgebee server side (one multi-tenant
-# instance per environment) instead of one per cluster. With this disabled the
-# agent ships no in-cluster OpenCost; the server detects that the agent's
-# OpenCost is off and computes this cluster's cost allocations centrally (it
-# reaches this cluster's Prometheus through the relay). Re-enable per cluster
-# with `--set opencost.enabled=true` to roll back to the in-cluster path.
+# OpenCost runs per-cluster in the agent by default. To move a cluster to the
+# central server-side OpenCost instead, set `--set opencost.enabled=false`: the
+# agent then ships no in-cluster OpenCost AND the runner stops discovering/polling
+# cost (see OPENCOST_ENABLED), so the server detects cost is off and computes this
+# cluster's allocations centrally (reaching its Prometheus via the relay).
 opencost:
-  enabled: false
+  enabled: true
   nameOverride: ""
   fullnameOverride: ""
   opencost:
