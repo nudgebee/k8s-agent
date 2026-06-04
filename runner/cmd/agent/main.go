@@ -196,6 +196,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if v := os.Getenv("OPENCOST_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			opencostEnabled = b
+		} else {
+			logger.Warn("invalid OPENCOST_ENABLED, defaulting to enabled", "value", v, "err", err)
 		}
 	}
 	opencostURL := ""
