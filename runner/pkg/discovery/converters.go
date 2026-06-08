@@ -625,12 +625,56 @@ func nodeInfoMap(n *corev1.Node) map[string]any {
 func containersFromTemplate(tpl corev1.PodTemplateSpec) []map[string]any {
 	out := make([]map[string]any, 0, len(tpl.Spec.Containers))
 	for _, c := range tpl.Spec.Containers {
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"name":  c.Name,
 			"image": c.Image,
-		})
+		}
+		// Resource requests/limits feed the right-sizing engine's "allocated"
+		// baseline. Emit raw k8s quantity strings (e.g. "500m", "2Gi"), only
+		// the keys that are set, to match the format the collector consumes.
+		if res := resourceRequirementsDict(c.Resources); res != nil {
+			entry["resources"] = res
+		}
+		out = append(out, entry)
 	}
 	return out
+}
+
+// resourceRequirementsDict serializes a container's requests/limits as raw k8s
+// quantity strings. Returns nil when neither requests nor limits are set so the
+// "resources" key is omitted rather than emitted empty.
+func resourceRequirementsDict(r corev1.ResourceRequirements) map[string]any {
+	req := serializeResourceList(r.Requests)
+	lim := serializeResourceList(r.Limits)
+	if req == nil && lim == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if req != nil {
+		out["requests"] = req
+	}
+	if lim != nil {
+		out["limits"] = lim
+	}
+	return out
+}
+
+// serializeResourceList emits cpu/memory from a ResourceList as raw k8s quantity
+// strings. The map is allocated lazily so a list carrying only other resources
+// (ephemeral-storage, GPUs, ...) returns nil instead of an empty map.
+func serializeResourceList(list corev1.ResourceList) map[string]any {
+	var m map[string]any
+	if v, ok := list[corev1.ResourceCPU]; ok {
+		m = make(map[string]any, 2)
+		m["cpu"] = v.String()
+	}
+	if v, ok := list[corev1.ResourceMemory]; ok {
+		if m == nil {
+			m = make(map[string]any, 1)
+		}
+		m["memory"] = v.String()
+	}
+	return m
 }
 
 func ownerInfos(owners []metav1.OwnerReference) []map[string]any {
