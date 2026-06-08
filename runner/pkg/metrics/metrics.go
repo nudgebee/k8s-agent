@@ -23,6 +23,7 @@ type Registry struct {
 	AlertsDropped   prometheus.Counter
 	DiscoveryPosts  *prometheus.CounterVec // labels: type, full_load
 	DiscoveryErrors *prometheus.CounterVec // labels: type
+	ForwardShed     *prometheus.CounterVec // labels: source (kubewatch|alertmanager|relay)
 	RelayReconnects prometheus.Counter
 	RelayConnected  prometheus.Gauge
 }
@@ -67,6 +68,11 @@ func New() *Registry {
 		Name:      "discovery_errors_total",
 		Help:      "Discovery envelope POSTs that failed.",
 	}, []string{"type"})
+	reg.ForwardShed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "forward_shed_total",
+		Help:      "Inbound events/handlers dropped because the bounded worker pool was saturated.",
+	}, []string{"source"})
 	reg.RelayReconnects = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "nudgebee_agent",
 		Name:      "relay_reconnects_total",
@@ -85,6 +91,7 @@ func New() *Registry {
 		reg.AlertsDropped,
 		reg.DiscoveryPosts,
 		reg.DiscoveryErrors,
+		reg.ForwardShed,
 		reg.RelayReconnects,
 		reg.RelayConnected,
 	)

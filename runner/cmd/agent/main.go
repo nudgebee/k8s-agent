@@ -632,7 +632,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			AgentCommit:    version.Commit,
 			AgentBuildTime: version.BuildTime,
 		},
-		Logger: logger,
+		Logger:          logger,
+		HandlerPoolSize: cfg.RelayHandlerPoolSize,
+		OnShed:          func() { mreg.ForwardShed.WithLabelValues("relay").Inc() },
 	}, disp.Handle)
 
 	logger.Info("starting relay client",
@@ -672,6 +674,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			fwdURL = cfg.BackendEndpoint + "/v1/k8s/events"
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
+		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
 		// Wire the trigger engine. Without this, every kubewatch event is
 		// dropped (safe default — see plan stage 2.1). With it, only
 		// events matching a registered predicate produce a Finding.
@@ -901,6 +905,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
+		discSvc.SetOptions(discovery.Options{
+			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
+			BatchSize:         cfg.DiscoveryBatchSize,
+			IncrementalBatch:  cfg.IncrementalBatchSize,
+			IncrementalWindow: cfg.IncrementalBatchWindow,
+			EmitTombstones:    cfg.EmitTombstones,
+		})
 		discSvc.RegisterAll() // Pod, Deployment, StatefulSet, DaemonSet, Node, Namespace
 		// TODO(phase-4): ReplicaSet, Job, CronJob, Helm releases — each requires
 		// a converter + shadow-diff before promotion.

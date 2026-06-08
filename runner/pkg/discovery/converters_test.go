@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 )
 
@@ -487,7 +487,7 @@ func TestPodConverter_PassesThroughNonReplicaSetOwners(t *testing.T) {
 // / conditions come from that Pod.
 func TestServiceDict_PodLookupFillsRuntimeFields(t *testing.T) {
 	d := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "ns", UID: "dep-uid"},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(int32(1)),
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
@@ -510,8 +510,8 @@ func TestServiceDict_PodLookupFillsRuntimeFields(t *testing.T) {
 			},
 		},
 	}
-	lookup := func(ns string, _ labels.Selector) *corev1.Pod {
-		if ns != "ns" {
+	lookup := func(uid types.UID) *corev1.Pod {
+		if uid != "dep-uid" {
 			return nil
 		}
 		return livePod

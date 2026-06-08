@@ -56,6 +56,12 @@ func (l *k8sEventsLister) ListEvents(ctx context.Context, namespace, kind, name 
 	opts := metav1.ListOptions{
 		// Pull a generous chunk; we sort + cap client-side.
 		Limit: int64(limit * 2),
+		// ResourceVersion="0" serves the LIST from the apiserver watch cache
+		// instead of a quorum read from etcd. Field selectors on Events are not
+		// indexed, so the etcd path forces a full scan — expensive precisely
+		// during incidents when many findings fire at once. The watch cache is
+		// eventually-consistent, which is fine for a "recent events" table.
+		ResourceVersion: "0",
 	}
 	if len(parts) > 0 {
 		opts.FieldSelector = strings.Join(parts, ",")

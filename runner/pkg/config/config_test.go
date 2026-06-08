@@ -55,9 +55,14 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		DiscoveryEnabled:   true,
 		DiscoveryResync:    10 * time.Minute,
 		AlertRulesInterval: 30 * time.Minute, // default when ALERT_RULES_INTERVAL unset
-		KubeEnabled:        true,
-		PodExecEnabled:     true,
-		ScannerNamespace:   "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
+		// Scalability knobs — defaults applied when their env vars are unset.
+		DiscoveryBatchSize:   1000,
+		IncrementalBatchSize: 1,
+		ForwardPoolSize:      64,
+		RelayHandlerPoolSize: 32,
+		KubeEnabled:          true,
+		PodExecEnabled:       true,
+		ScannerNamespace:     "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
 		// ClickHouse defaults: enabled, port 8123, db "default" — so the
 		// chart's existing CH config (CLICKHOUSE_HOST in runner-secret)
 		// just works.

@@ -16,9 +16,11 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/sync/semaphore"
 )
 
 // Handler is invoked for each inbound message. It receives the raw bytes
@@ -39,6 +41,15 @@ type Config struct {
 	ReconnectDelay time.Duration // default 3s
 	WriteTimeout   time.Duration // default 30s
 	Logger         *slog.Logger
+	// HandlerPoolSize is a soft outer bound on concurrent inbound-message
+	// handler goroutines, guarding against goroutine pile-up when the
+	// dispatcher's own pools are saturated. <=0 leaves it unbounded (the
+	// historical behavior; used by tests). The dispatcher remains the
+	// authoritative responder under normal load.
+	HandlerPoolSize int
+	// OnShed, if set, is called whenever a message is shed due to pool
+	// saturation so main can bump a Prometheus counter.
+	OnShed func()
 }
 
 // Client manages the WebSocket lifecycle. One Client per agent process.
@@ -48,6 +59,9 @@ type Client struct {
 
 	mu   sync.Mutex // protects conn for concurrent writers
 	conn *websocket.Conn
+
+	sem  *semaphore.Weighted // nil = unbounded
+	shed atomic.Uint64
 }
 
 func NewClient(cfg Config, h Handler) *Client {
@@ -60,8 +74,16 @@ func NewClient(cfg Config, h Handler) *Client {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Client{cfg: cfg, handler: h}
+	c := &Client{cfg: cfg, handler: h}
+	if cfg.HandlerPoolSize > 0 {
+		c.sem = semaphore.NewWeighted(int64(cfg.HandlerPoolSize))
+	}
+	return c
 }
+
+// Shed returns the count of inbound messages dropped because the handler pool
+// was saturated. Wire to a Prometheus counter in main.
+func (c *Client) Shed() uint64 { return c.shed.Load() }
 
 // Run blocks, dialing the relay and reconnecting until ctx is cancelled.
 func (c *Client) Run(ctx context.Context) error {
@@ -129,7 +151,24 @@ func (c *Client) runOnce(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
-		go c.handler(ctx, msg, send)
+		if c.sem == nil {
+			go c.handler(ctx, msg, send)
+			continue
+		}
+		if !c.sem.TryAcquire(1) {
+			// Pool saturated — shed rather than pile up unbounded goroutines.
+			// The backend will time out / retry; better than OOM under overload.
+			c.shed.Add(1)
+			if c.cfg.OnShed != nil {
+				c.cfg.OnShed()
+			}
+			c.cfg.Logger.Warn("relay handler pool saturated; shedding message", "shed_total", c.shed.Load())
+			continue
+		}
+		go func() {
+			defer c.sem.Release(1)
+			c.handler(ctx, msg, send)
+		}()
 	}
 }
 
