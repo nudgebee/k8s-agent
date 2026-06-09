@@ -187,14 +187,33 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Info("alertmanager auto-discovered", "url", u)
 		}
 	}
-	// Mirrors OpenCostDiscovery.find_open_cost_url.
-	// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
-	opencostURL := os.Getenv("OPENCOST_ENDPOINT")
-	if opencostURL == "" {
-		if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
-			opencostURL = u
-			logger.Info("opencost auto-discovered", "url", u)
+	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
+	// computed centrally on the server side. When disabled, skip BOTH the
+	// OPENCOST_ENDPOINT env and the cluster-wide Service autodiscovery: discovery
+	// matches `app=opencost` across all namespaces, so otherwise the agent latches
+	// onto a neighbouring namespace's OpenCost and keeps reporting itself
+	// cost-enabled, which suppresses the server-side takeover. Defaults to enabled.
+	opencostEnabled := true
+	if v := os.Getenv("OPENCOST_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			opencostEnabled = b
+		} else {
+			logger.Warn("invalid OPENCOST_ENABLED, defaulting to enabled", "value", v, "err", err)
 		}
+	}
+	opencostURL := ""
+	if opencostEnabled {
+		// Mirrors OpenCostDiscovery.find_open_cost_url.
+		// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
+		opencostURL = os.Getenv("OPENCOST_ENDPOINT")
+		if opencostURL == "" {
+			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
+				opencostURL = u
+				logger.Info("opencost auto-discovered", "url", u)
+			}
+		}
+	} else {
+		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
 	}
 
 	var promClient *prometheus.Client
@@ -632,7 +651,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			AgentCommit:    version.Commit,
 			AgentBuildTime: version.BuildTime,
 		},
-		Logger: logger,
+		Logger:          logger,
+		HandlerPoolSize: cfg.RelayHandlerPoolSize,
+		OnShed:          func() { mreg.ForwardShed.WithLabelValues("relay").Inc() },
 	}, disp.Handle)
 
 	logger.Info("starting relay client",
@@ -672,6 +693,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			fwdURL = cfg.BackendEndpoint + "/v1/k8s/events"
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
+		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
 		// Wire the trigger engine. Without this, every kubewatch event is
 		// dropped (safe default — see plan stage 2.1). With it, only
 		// events matching a registered predicate produce a Finding.
@@ -901,6 +924,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
+		discSvc.SetOptions(discovery.Options{
+			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
+			BatchSize:         cfg.DiscoveryBatchSize,
+			IncrementalBatch:  cfg.IncrementalBatchSize,
+			IncrementalWindow: cfg.IncrementalBatchWindow,
+			EmitTombstones:    cfg.EmitTombstones,
+		})
 		discSvc.RegisterAll() // Pod, Deployment, StatefulSet, DaemonSet, Node, Namespace
 		// TODO(phase-4): ReplicaSet, Job, CronJob, Helm releases — each requires
 		// a converter + shadow-diff before promotion.

@@ -9,15 +9,18 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 )
 
-// podLookupFn finds one representative Pod owned by a workload, used by
-// the workload converters to fill the qos_class / ip / conditions
-// fields emitted on a Pod-driven update path. Returns nil when no
-// matching Pod has reported status yet — callers must treat that as
-// "absent" and emit null defaults.
-type podLookupFn func(namespace string, selector labels.Selector) *corev1.Pod
+// podLookupFn finds one representative Pod for a workload by the workload's
+// UID, used by the workload converters to fill the qos_class / ip / conditions
+// fields. It is backed by a snapshot-scoped index (built once per snapshot in
+// O(pods), see service.go podIndex) so workload conversion is O(1) instead of
+// the old O(workloads × pods-per-namespace) selector scan. Returns nil when no
+// status-bearing Pod for the workload is in the index — callers treat that as
+// "absent" and emit null defaults (self-heals at the next snapshot once a Pod
+// reports status).
+type podLookupFn func(workloadUID types.UID) *corev1.Pod
 
 // replicaSetLookupFn fetches a ReplicaSet by (namespace, name) out of the
 // shared informer cache. Used by the Pod converter to resolve a Pod's
@@ -53,7 +56,7 @@ func newDeploymentConverter(lookup podLookupFn) func(any) (any, bool) {
 		}
 		return serviceDict("Deployment", d.Name, d.Namespace, d.ObjectMeta,
 			replicas, d.Status.ReadyReplicas, d.Spec.Template, d.OwnerReferences,
-			lookup, d.Spec.Selector), true
+			lookup), true
 	}
 }
 
@@ -73,7 +76,7 @@ func newStatefulSetConverter(lookup podLookupFn) func(any) (any, bool) {
 		}
 		return serviceDict("StatefulSet", s.Name, s.Namespace, s.ObjectMeta,
 			replicas, s.Status.ReadyReplicas, s.Spec.Template, s.OwnerReferences,
-			lookup, s.Spec.Selector), true
+			lookup), true
 	}
 }
 
@@ -89,7 +92,7 @@ func newDaemonSetConverter(lookup podLookupFn) func(any) (any, bool) {
 		}
 		return serviceDict("DaemonSet", d.Name, d.Namespace, d.ObjectMeta,
 			d.Status.DesiredNumberScheduled, d.Status.NumberReady, d.Spec.Template, d.OwnerReferences,
-			lookup, d.Spec.Selector), true
+			lookup), true
 	}
 }
 
@@ -114,7 +117,7 @@ func newReplicaSetConverter(lookup podLookupFn) func(any) (any, bool) {
 		}
 		return serviceDict("ReplicaSet", r.Name, r.Namespace, r.ObjectMeta,
 			replicas, r.Status.ReadyReplicas, r.Spec.Template, r.OwnerReferences,
-			lookup, r.Spec.Selector), true
+			lookup), true
 	}
 }
 
@@ -321,34 +324,31 @@ func serviceDict(
 	tpl corev1.PodTemplateSpec,
 	owners []metav1.OwnerReference,
 	lookup podLookupFn,
-	workloadSelector *metav1.LabelSelector,
 ) map[string]any {
-	// Pull qos_class / ip / conditions off a representative running Pod
-	// matching the workload's selector. These three fields are not on
-	// the PodTemplateSpec (they're per-instance Status fields), so they
-	// require a live cache lookup. Stays nil when the lookup is unset
-	// (test paths) or no Pod has reported status yet.
+	// Pull qos_class / ip / conditions off a representative running Pod owned
+	// by this workload. These three fields are not on the PodTemplateSpec
+	// (they're per-instance Status fields), so they require a Pod lookup —
+	// resolved O(1) via the snapshot-scoped owner→Pod index keyed by the
+	// workload's UID. Stays nil when the lookup is unset (test paths) or no
+	// owned Pod has reported status yet.
 	var (
 		qosClass   any = nil
 		ip         any = nil
 		conditions     = []map[string]any{}
 	)
-	if lookup != nil && workloadSelector != nil {
-		sel, err := metav1.LabelSelectorAsSelector(workloadSelector)
-		if err == nil && !sel.Empty() {
-			if pod := lookup(namespace, sel); pod != nil {
-				if pod.Status.QOSClass != "" {
-					qosClass = string(pod.Status.QOSClass)
-				}
-				if pod.Status.PodIP != "" {
-					ip = pod.Status.PodIP
-				}
-				for _, c := range pod.Status.Conditions {
-					conditions = append(conditions, map[string]any{
-						"type":   string(c.Type),
-						"status": string(c.Status),
-					})
-				}
+	if lookup != nil {
+		if pod := lookup(meta.UID); pod != nil {
+			if pod.Status.QOSClass != "" {
+				qosClass = string(pod.Status.QOSClass)
+			}
+			if pod.Status.PodIP != "" {
+				ip = pod.Status.PodIP
+			}
+			for _, c := range pod.Status.Conditions {
+				conditions = append(conditions, map[string]any{
+					"type":   string(c.Type),
+					"status": string(c.Status),
+				})
 			}
 		}
 	}
@@ -625,12 +625,56 @@ func nodeInfoMap(n *corev1.Node) map[string]any {
 func containersFromTemplate(tpl corev1.PodTemplateSpec) []map[string]any {
 	out := make([]map[string]any, 0, len(tpl.Spec.Containers))
 	for _, c := range tpl.Spec.Containers {
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"name":  c.Name,
 			"image": c.Image,
-		})
+		}
+		// Resource requests/limits feed the right-sizing engine's "allocated"
+		// baseline. Emit raw k8s quantity strings (e.g. "500m", "2Gi"), only
+		// the keys that are set, to match the format the collector consumes.
+		if res := resourceRequirementsDict(c.Resources); res != nil {
+			entry["resources"] = res
+		}
+		out = append(out, entry)
 	}
 	return out
+}
+
+// resourceRequirementsDict serializes a container's requests/limits as raw k8s
+// quantity strings. Returns nil when neither requests nor limits are set so the
+// "resources" key is omitted rather than emitted empty.
+func resourceRequirementsDict(r corev1.ResourceRequirements) map[string]any {
+	req := serializeResourceList(r.Requests)
+	lim := serializeResourceList(r.Limits)
+	if req == nil && lim == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if req != nil {
+		out["requests"] = req
+	}
+	if lim != nil {
+		out["limits"] = lim
+	}
+	return out
+}
+
+// serializeResourceList emits cpu/memory from a ResourceList as raw k8s quantity
+// strings. The map is allocated lazily so a list carrying only other resources
+// (ephemeral-storage, GPUs, ...) returns nil instead of an empty map.
+func serializeResourceList(list corev1.ResourceList) map[string]any {
+	var m map[string]any
+	if v, ok := list[corev1.ResourceCPU]; ok {
+		m = make(map[string]any, 2)
+		m["cpu"] = v.String()
+	}
+	if v, ok := list[corev1.ResourceMemory]; ok {
+		if m == nil {
+			m = make(map[string]any, 1)
+		}
+		m["memory"] = v.String()
+	}
+	return m
 }
 
 func ownerInfos(owners []metav1.OwnerReference) []map[string]any {

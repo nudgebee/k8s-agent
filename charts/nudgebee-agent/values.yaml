@@ -61,7 +61,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-06-03T15-43-09_e336bf46149b67360b5bff113f5f17fb342c96b0
+    tag: 2026-06-05T05-00-58_65c09f10dc934851683f8bec946e0df23c4561a2
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -77,6 +77,37 @@ runner:
       memory: 1000Mi
     limits:
       cpu: ~
+      # Memory limit caps a runaway informer cache on large clusters.
+      # 2000Mi is generous headroom for small/medium clusters. SIZING: large
+      # clusters need more — budget ~1Gi per ~50k watched objects:
+      #   <100 nodes / <10k workloads   : 2000Mi
+      #   ~500 nodes / ~50k workloads   : 4000Mi
+      #   ~1000 nodes / ~100k workloads : 6000Mi+  (and enable runner.scaling below)
+      memory: 2000Mi
+  # Liveness/readiness probes hit the always-on /healthz endpoint on :5000 so a
+  # hung or restarting runner is detected and kept out of the Service.
+  probes:
+    enabled: true
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 6
+  # Scalability tunables for large clusters. All optional — unset
+  # keys fall back to the binary defaults. The wire-changing knobs
+  # (snapshotBatching, incrementalBatchSize > 1, emitTombstones) require matching
+  # collector support and MUST stay off until the collector ships it.
+  scaling: {}
+  # snapshotBatching: false      # batch the full-load snapshot (needs collector batch reassembly)
+  # batchSize: 1000              # items per snapshot batch when snapshotBatching is on
+  # incrementalBatchSize: 1      # coalesce N informer events per incremental POST (>1 needs collector to iterate data)
+  # emitTombstones: false        # emit deleted:true on delete (needs collector incremental-delete support)
+  # forwardPoolSize: 64          # bound concurrent event-forward goroutines
+  # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
   tolerations: []
   annotations: {}
   nodeSelector: ~
@@ -158,6 +189,11 @@ nodeAgent:
   env:
     - name: SENSITIVE_HEADERS
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
+# OpenCost runs per-cluster in the agent by default. To move a cluster to the
+# central server-side OpenCost instead, set `--set opencost.enabled=false`: the
+# agent then ships no in-cluster OpenCost AND the runner stops discovering/polling
+# cost (see OPENCOST_ENABLED), so the server detects cost is off and computes this
+# cluster's allocations centrally (reaching its Prometheus via the relay).
 opencost:
   enabled: true
   nameOverride: ""

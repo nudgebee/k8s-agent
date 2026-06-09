@@ -418,3 +418,56 @@ func TestForwarder_HealthzReturns200(t *testing.T) {
 		t.Errorf("status = %d; want 200", resp.StatusCode)
 	}
 }
+
+// TestForwarder_ForwardShedWhenPoolSaturated verifies the bounded forward pool
+// sheds (and counts) intake when saturated, instead of spawning unbounded
+// goroutines. With pool size 1 and a forward held in-flight, a second intake
+// is dropped and ForwardShed() increments.
+func TestForwarder_ForwardShedWhenPoolSaturated(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release // hold the forward goroutine (and its pool slot) open
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	defer close(release)
+
+	f := NewForwarder(backend.URL, "", "acc", "cluster", slog.Default())
+	f.SetForwardPoolSize(1)
+	srv := httptest.NewServer(f.Mux())
+	defer srv.Close()
+
+	body := `{"alerts":[{"startsAt":"2026-05-07T10:00:00Z","status":"firing","labels":{"alertname":"X","pod":"p","namespace":"ns","severity":"critical"},"annotations":{"summary":"s"}}]}`
+
+	post := func() {
+		resp, err := http.Post(srv.URL+"/api/alerts", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	post() // acquires the only slot, then blocks in the backend
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first forward never reached the backend")
+	}
+
+	post() // pool saturated → shed
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.ForwardShed() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := f.ForwardShed(); got != 1 {
+		t.Errorf("ForwardShed() = %d; want 1", got)
+	}
+}

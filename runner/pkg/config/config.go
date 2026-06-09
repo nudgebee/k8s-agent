@@ -84,6 +84,38 @@ type Config struct {
 	// that controls the rest of the discovery push loop).
 	AlertRulesInterval time.Duration
 
+	// Scalability knobs for large clusters (1k nodes / 100k workloads).
+	//
+	// DiscoverySnapshotBatching turns the full-load snapshot into N-item
+	// batches (DiscoveryBatchSize each) using the envelope's batch fields.
+	// OFF by default: it changes the /v1/k8s/discovery wire behavior and the
+	// collector must support batch reassembly + deferred deletion-reconcile
+	// (accumulate by batch_id, reconcile only on is_last_batch) before it is
+	// safe to enable.
+	DiscoverySnapshotBatching bool
+	DiscoveryBatchSize        int
+	// IncrementalBatchSize coalesces up to N queued informer events into one
+	// incremental envelope. Default 1 (no coalescing — wire-identical to the
+	// historical one-item-per-event path). Raising it sends a multi-item
+	// `data` list and requires the collector's incremental handler to iterate
+	// `data` rather than read data[0].
+	IncrementalBatchSize int
+	// IncrementalBatchWindow optionally lets the coalescer wait briefly to
+	// accumulate more events. Default 0 (drain the current backlog only).
+	IncrementalBatchWindow time.Duration
+	// EmitTombstones makes the incremental path emit a `deleted:true` tombstone
+	// on resource deletion instead of waiting for the next full snapshot. OFF
+	// by default: requires collector support for incremental deletes.
+	EmitTombstones bool
+
+	// ForwardPoolSize bounds concurrent event-forward goroutines in pkg/alerts
+	// (kubewatch + AlertManager intake). Excess is shed (HTTP 202 already
+	// returned). Default 64.
+	ForwardPoolSize int
+	// RelayHandlerPoolSize bounds concurrent inbound WS handler goroutines in
+	// pkg/relay as a soft outer guard against goroutine pile-up. Default 32.
+	RelayHandlerPoolSize int
+
 	// Kube primitives (group B): enabled when KubeEnabled=true. Independent
 	// of discovery so an operator can run primitives-only without paying
 	// for the full informer cache.
@@ -156,8 +188,17 @@ func FromEnv() (*Config, error) {
 		DiscoveryEnabled:   envBool("DISCOVERY_ENABLED", true),
 		DiscoveryResync:    parseDuration(os.Getenv("DISCOVERY_RESYNC"), 30*time.Minute),
 		AlertRulesInterval: parseDuration(os.Getenv("ALERT_RULES_INTERVAL"), 30*time.Minute),
-		KubeEnabled:        envBool("KUBE_ENABLED", true),
-		PodExecEnabled:     envBool("PODEXEC_ENABLED", true),
+		// Scalability knobs — wire-changing features OFF by default (need
+		// collector support).
+		DiscoverySnapshotBatching: envBool("DISCOVERY_SNAPSHOT_BATCHING", false),
+		DiscoveryBatchSize:        envInt("DISCOVERY_BATCH_SIZE", 1000),
+		IncrementalBatchSize:      envInt("DISCOVERY_INCREMENTAL_BATCH_SIZE", 1),
+		IncrementalBatchWindow:    parseDuration(os.Getenv("DISCOVERY_INCREMENTAL_BATCH_WINDOW"), 0),
+		EmitTombstones:            envBool("DISCOVERY_EMIT_TOMBSTONES", false),
+		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
+		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
+		KubeEnabled:               envBool("KUBE_ENABLED", true),
+		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
 		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
 		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),

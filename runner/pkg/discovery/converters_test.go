@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 )
 
@@ -487,7 +487,7 @@ func TestPodConverter_PassesThroughNonReplicaSetOwners(t *testing.T) {
 // / conditions come from that Pod.
 func TestServiceDict_PodLookupFillsRuntimeFields(t *testing.T) {
 	d := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "ns", UID: "dep-uid"},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(int32(1)),
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
@@ -510,8 +510,8 @@ func TestServiceDict_PodLookupFillsRuntimeFields(t *testing.T) {
 			},
 		},
 	}
-	lookup := func(ns string, _ labels.Selector) *corev1.Pod {
-		if ns != "ns" {
+	lookup := func(uid types.UID) *corev1.Pod {
+		if uid != "dep-uid" {
 			return nil
 		}
 		return livePod
@@ -531,5 +531,59 @@ func TestServiceDict_PodLookupFillsRuntimeFields(t *testing.T) {
 	conds := cfg["conditions"].([]map[string]any)
 	if len(conds) != 2 || conds[0]["type"] != "Ready" || conds[0]["status"] != "True" {
 		t.Errorf("conditions = %v", conds)
+	}
+}
+
+// containersFromTemplate must emit per-container resources (requests/limits) as
+// raw k8s quantity strings — this is the "allocated" baseline the right-sizing
+// engine reads. A regression that dropped this field left CPU/memory request
+// columns and savings blank for every workload on the cluster.
+func TestContainersFromTemplate_EmitsResources(t *testing.T) {
+	tpl := corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  "app",
+			Image: "nginx:1.27",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+			},
+		}}},
+	}
+	got := containersFromTemplate(tpl)
+	if len(got) != 1 {
+		t.Fatalf("len = %d; want 1", len(got))
+	}
+	res, ok := got[0]["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("resources missing or wrong type: %T", got[0]["resources"])
+	}
+	req := res["requests"].(map[string]any)
+	if req["cpu"] != "500m" || req["memory"] != "2Gi" {
+		t.Errorf("requests = %v; want cpu=500m memory=2Gi", req)
+	}
+	lim := res["limits"].(map[string]any)
+	if lim["memory"] != "2Gi" {
+		t.Errorf("limits memory = %v; want 2Gi", lim["memory"])
+	}
+	// Limit CPU was unset → key must be absent, not zero.
+	if _, present := lim["cpu"]; present {
+		t.Errorf("limits cpu should be absent when unset; got %v", lim["cpu"])
+	}
+}
+
+// When a container sets no requests or limits, the "resources" key is omitted
+// entirely rather than emitted empty.
+func TestContainersFromTemplate_OmitsResourcesWhenUnset(t *testing.T) {
+	tpl := corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+	}
+	got := containersFromTemplate(tpl)
+	if _, present := got[0]["resources"]; present {
+		t.Errorf("resources should be absent when unset; got %v", got[0]["resources"])
 	}
 }

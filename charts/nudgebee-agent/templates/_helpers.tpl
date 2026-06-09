@@ -91,6 +91,32 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    {{- with .Values.runner.scaling }}
+    {{- if hasKey . "snapshotBatching" }}
+    - name: DISCOVERY_SNAPSHOT_BATCHING
+      value: {{ .snapshotBatching | quote }}
+    {{- end }}
+    {{- if .batchSize }}
+    - name: DISCOVERY_BATCH_SIZE
+      value: {{ .batchSize | quote }}
+    {{- end }}
+    {{- if .incrementalBatchSize }}
+    - name: DISCOVERY_INCREMENTAL_BATCH_SIZE
+      value: {{ .incrementalBatchSize | quote }}
+    {{- end }}
+    {{- if hasKey . "emitTombstones" }}
+    - name: DISCOVERY_EMIT_TOMBSTONES
+      value: {{ .emitTombstones | quote }}
+    {{- end }}
+    {{- if .forwardPoolSize }}
+    - name: FORWARD_POOL_SIZE
+      value: {{ .forwardPoolSize | quote }}
+    {{- end }}
+    {{- if .relayHandlerPoolSize }}
+    - name: RELAY_HANDLER_POOL_SIZE
+      value: {{ .relayHandlerPoolSize | quote }}
+    {{- end }}
+    {{- end }}
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
@@ -162,6 +188,25 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     preStop:
       exec:
         command: ["bash", "-c", "kill -SIGINT 1"]
+  {{- if and .Values.runner.probes .Values.runner.probes.enabled }}
+  {{- $readiness := .Values.runner.probes.readiness | default dict }}
+  {{- $liveness := .Values.runner.probes.liveness | default dict }}
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: 5000
+    initialDelaySeconds: {{ $readiness.initialDelaySeconds | default 5 }}
+    periodSeconds: {{ $readiness.periodSeconds | default 10 }}
+    timeoutSeconds: {{ $readiness.timeoutSeconds | default 3 }}
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 5000
+    initialDelaySeconds: {{ $liveness.initialDelaySeconds | default 15 }}
+    periodSeconds: {{ $liveness.periodSeconds | default 20 }}
+    timeoutSeconds: {{ $liveness.timeoutSeconds | default 5 }}
+    failureThreshold: {{ $liveness.failureThreshold | default 6 }}
+  {{- end }}
   resources:
     requests:
       cpu: {{ .Values.runner.resources.requests.cpu }}
