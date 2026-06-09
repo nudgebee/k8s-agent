@@ -562,7 +562,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// so it goes in lightActions. Skipped when either client is unavailable
 	// rather than registered as a fail-auth stub.
 	if promClient != nil && dynamicKube != nil {
-		rs := rightsize.New(promClient, dynamicKube)
+		// typedKube (may be nil) enables zero-downtime in-place pod resize; the
+		// rightsizer falls back to the template rollout when it's unavailable or
+		// the cluster is < 1.33.
+		rs := rightsize.New(promClient, dynamicKube, typedKube)
 		maps.Copy(handlers, rightsize.Handlers(rs))
 		lightActions["continuous_rightsizing"] = struct{}{}
 		logger.Info("continuous_rightsizing enabled")

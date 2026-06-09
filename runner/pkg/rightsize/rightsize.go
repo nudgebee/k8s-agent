@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/observability/prometheus"
 )
@@ -58,7 +59,11 @@ type Settings struct {
 	MemoryPercentile   float64
 	AnalysisDuration   int
 	RecommendOnly      bool
-	Identifier         string
+	// InPlace requests a zero-downtime in-place pod resize when the cluster
+	// supports it (>= 1.33); falls back to the template rollout otherwise.
+	// Defaults true (the backend may set in_place=false to force a rollout).
+	InPlace    bool
+	Identifier string
 }
 
 // Application identifies one workload to rightsize.
@@ -83,12 +88,16 @@ var supportedKinds = map[string]schema.GroupVersionResource{
 type Rightsizer struct {
 	prom *prometheus.Client
 	dyn  dynamic.Interface
+	// client is the typed clientset used for in-place pod resize (pod listing,
+	// the resize subresource, and server-version discovery). May be nil — then
+	// in-place is skipped and apply always uses the template Update (rollout).
+	client kubernetes.Interface
 }
 
-// New builds a Rightsizer. Both clients are required; main only registers the
-// action when each is available.
-func New(prom *prometheus.Client, dyn dynamic.Interface) *Rightsizer {
-	return &Rightsizer{prom: prom, dyn: dyn}
+// New builds a Rightsizer. prom + dyn are required; client enables in-place pod
+// resize (it provides pods + discovery) and may be nil to force the rollout path.
+func New(prom *prometheus.Client, dyn dynamic.Interface, client kubernetes.Interface) *Rightsizer {
+	return &Rightsizer{prom: prom, dyn: dyn, client: client}
 }
 
 // Run rightsizes each application and returns one result object per workload,
@@ -97,9 +106,13 @@ func New(prom *prometheus.Client, dyn dynamic.Interface) *Rightsizer {
 // malformed spec) abort the run; an out-of-bounds recommendation is skipped
 // per-resource and surfaced in the container's "skipped" list, not fatal.
 func (r *Rightsizer) Run(ctx context.Context, s Settings, apps []Application) ([]map[string]any, error) {
+	// Decide in-place eligibility once per run (one discovery call): apply
+	// resizes to running pods without a restart when requested and the cluster
+	// is >= 1.33; otherwise each workload uses the template Update (rollout).
+	inPlaceEligible := s.InPlace && r.supportsInPlaceResize()
 	out := make([]map[string]any, 0, len(apps))
 	for _, app := range apps {
-		res, err := r.rightsizeWorkload(ctx, s, app)
+		res, err := r.rightsizeWorkload(ctx, s, app, inPlaceEligible)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +130,7 @@ type containerStat struct {
 	hasData   bool
 }
 
-func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Application) (map[string]any, error) {
+func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Application, inPlaceEligible bool) (map[string]any, error) {
 	gvr, ok := supportedKinds[app.Kind]
 	if !ok {
 		return nil, fmt.Errorf("rightsize: unsupported kind %q (supported: Deployment, StatefulSet, DaemonSet, ReplicaSet, Rollout)", app.Kind)
@@ -137,6 +150,9 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 	performUpdate := false
 	resultContainers := make([]map[string]any, 0, len(containers))
 	annotationChanges := make([]map[string]any, 0, len(containers))
+	// Targets for an in-place resize: only the containers that actually changed,
+	// with the values that would be applied. Parallels the template mutation.
+	inPlaceTargets := make([]inPlaceTarget, 0, len(containers))
 
 	for i := range containers {
 		c, _ := containers[i].(map[string]any)
@@ -219,6 +235,9 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 			performUpdate = true
 			setContainerResources(c, newReqCPU, newReqMem, newLimCPU, newLimMem)
 			containers[i] = c
+			inPlaceTargets = append(inPlaceTargets, inPlaceTarget{
+				name: name, reqCPU: newReqCPU, reqMem: newReqMem, limCPU: newLimCPU, limMem: newLimMem,
+			})
 		}
 
 		result := map[string]any{
@@ -255,12 +274,25 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 	}
 
 	if performUpdate && !s.RecommendOnly {
-		if err := unstructured.SetNestedSlice(obj.Object, containers, "spec", "template", "spec", "containers"); err != nil {
-			return nil, fmt.Errorf("rightsize: rebuild containers for %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
+		appliedInPlace := false
+		if inPlaceEligible {
+			// Resize the running pods without a restart. On any failure
+			// (rejected, Infeasible, timeout) appliedInPlace stays false and we
+			// fall through to the template Update (rolling restart) below.
+			ok, err := r.applyInPlace(ctx, app, obj, inPlaceTargets, s.Identifier, annotationChanges)
+			if err != nil {
+				return nil, fmt.Errorf("rightsize: in-place resize %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
+			}
+			appliedInPlace = ok
 		}
-		writeAnnotation(obj, s.Identifier, annotationChanges)
-		if _, err := ri.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
-			return nil, fmt.Errorf("rightsize: apply %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
+		if !appliedInPlace {
+			if err := unstructured.SetNestedSlice(obj.Object, containers, "spec", "template", "spec", "containers"); err != nil {
+				return nil, fmt.Errorf("rightsize: rebuild containers for %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
+			}
+			writeAnnotation(obj, s.Identifier, annotationChanges)
+			if _, err := ri.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+				return nil, fmt.Errorf("rightsize: apply %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
+			}
 		}
 	}
 
@@ -467,7 +499,9 @@ func setOrDelete(m map[string]any, key, val string) {
 // writeAnnotation stamps the vertical-rightsize annotation onto the workload so
 // the backend can correlate the applied change with this run. Best-effort:
 // matches the legacy compact-JSON {identifier, time, container_changes}.
-func writeAnnotation(obj *unstructured.Unstructured, identifier string, changes []map[string]any) {
+// annotationValue builds the compact-JSON vertical-scaler payload
+// {identifier, time, container_changes} the backend reads to correlate a run.
+func annotationValue(identifier string, changes []map[string]any) (string, error) {
 	payload := map[string]any{
 		"identifier":        identifier,
 		"time":              time.Now().UTC().Format("2006-01-02T15:04:05.000000"),
@@ -478,10 +512,16 @@ func writeAnnotation(obj *unstructured.Unstructured, identifier string, changes 
 	// corrupt any value legitimately containing a space.
 	b, err := json.Marshal(payload)
 	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func writeAnnotation(obj *unstructured.Unstructured, identifier string, changes []map[string]any) {
+	value, err := annotationValue(identifier, changes)
+	if err != nil {
 		return
 	}
-	value := string(b)
-
 	ann := obj.GetAnnotations()
 	if ann == nil {
 		ann = map[string]string{}
