@@ -36,6 +36,10 @@ type Config struct {
 	ElasticsearchUser     string
 	ElasticsearchPassword string
 	ElasticsearchAPIKey   string
+	// ElasticsearchEnabled gates ES as the logs provider. Defaults to true so a
+	// bare ELASTICSEARCH_URL keeps working; set ELASTICSEARCH_ENABLED=false to
+	// keep the URL configured (e.g. for actions) without selecting ES for logs.
+	ElasticsearchEnabled bool
 
 	// Signoz
 	SignozURL    string
@@ -169,6 +173,7 @@ func FromEnv() (*Config, error) {
 		ElasticsearchUser:     os.Getenv("ELASTICSEARCH_USERNAME"),
 		ElasticsearchPassword: os.Getenv("ELASTICSEARCH_PASSWORD"),
 		ElasticsearchAPIKey:   os.Getenv("ELASTICSEARCH_APIKEY"),
+		ElasticsearchEnabled:  envBool("ELASTICSEARCH_ENABLED", true),
 		SignozURL:             os.Getenv("SIGNOZ_URL"),
 		SignozAPIKey:          os.Getenv("SIGNOZ_API_KEY"),
 		JaegerURL:             os.Getenv("JAEGER_URL"),

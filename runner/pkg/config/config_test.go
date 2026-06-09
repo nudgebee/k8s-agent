@@ -50,6 +50,8 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		LokiURL:           "http://loki:3100",
 		LokiHeaders:       "X-Scope-OrgID: t1",
 		HTTPListenAddr:    ":7000",
+		// ES gates logs provider; defaults on when ELASTICSEARCH_ENABLED unset.
+		ElasticsearchEnabled: true,
 		// K8s subsystems default-on (drop-in compatible with the legacy runner);
 		// operators opt out per-subsystem via DISCOVERY_ENABLED=false etc.
 		DiscoveryEnabled:   true,
@@ -116,6 +118,28 @@ func TestFromEnv_DefaultsWhenOptionalMissing(t *testing.T) {
 	}
 	if c.GCPEnabled {
 		t.Error("GCPEnabled default should be false (needs GCP_PROJECT_ID + ADC)")
+	}
+}
+
+func TestFromEnv_ElasticsearchEnabled(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+
+	// Default-on so a bare ELASTICSEARCH_URL keeps working.
+	t.Setenv("ELASTICSEARCH_ENABLED", "")
+	if c, err := FromEnv(); err != nil {
+		t.Fatal(err)
+	} else if !c.ElasticsearchEnabled {
+		t.Error("ElasticsearchEnabled should default to true when unset")
+	}
+
+	// Explicit false lets the URL stay configured (for actions) without
+	// selecting ES as the logs provider.
+	t.Setenv("ELASTICSEARCH_ENABLED", "false")
+	if c, err := FromEnv(); err != nil {
+		t.Fatal(err)
+	} else if c.ElasticsearchEnabled {
+		t.Error("ElasticsearchEnabled should be false when ELASTICSEARCH_ENABLED=false")
 	}
 }
 

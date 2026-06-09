@@ -49,6 +49,7 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | `LOKI_URL` | optional | Enables `loki_*` actions |
 | `LOKI_EXTRA_HEADER` | optional | Same format as PROMETHEUS_HEADERS |
 | `ELASTICSEARCH_URL` | optional | Enables `query_es*` actions |
+| `ELASTICSEARCH_ENABLED` | optional | Gates ES as the logs provider (default `true`). Set `false` to keep the URL configured for actions without selecting ES for logs |
 | `ELASTICSEARCH_USERNAME` / `_PASSWORD` | optional | Basic auth (one of these or `_APIKEY` is needed if ES requires auth) |
 | `ELASTICSEARCH_APIKEY` | optional | Alternative to user/pass |
 | `SIGNOZ_URL` / `SIGNOZ_API_KEY` | optional | `signoz_*` actions; API key sent as `SIGNOZ-API-KEY` header |

@@ -1067,8 +1067,10 @@ func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url s
 	case cfg.PinotURL != "":
 		ok = httpProbe(ctx, httpClient, cfg.PinotURL+"/health")
 		return "pinot", cfg.PinotURL, ok, map[string]any{}
-	case cfg.ElasticsearchURL != "":
+	case cfg.ElasticsearchURL != "" && cfg.ElasticsearchEnabled:
 		// ES exposes a `_cluster/health` endpoint; we treat 200 as healthy.
+		// A configured URL with ELASTICSEARCH_ENABLED=false falls through to the
+		// next provider so ES isn't selected for logs.
 		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health")
 		providerCfg = map[string]any{}
 		if v := os.Getenv("ELASTICSEARCH_LOG_INDEX"); v != "" {

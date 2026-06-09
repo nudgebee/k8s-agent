@@ -121,6 +121,9 @@ stringData:
   {{- if .Values.runner.es.url }}
   ELASTICSEARCH_URL: {{ .Values.runner.es.url }}
   {{- end }}
+  {{- if hasKey .Values.runner.es "enabled" }}
+  ELASTICSEARCH_ENABLED: {{ .Values.runner.es.enabled | quote }}
+  {{- end }}
   {{- if .Values.runner.es.password }}
   ELASTICSEARCH_PASSWORD: {{ .Values.runner.es.password }}
   {{- end }}
