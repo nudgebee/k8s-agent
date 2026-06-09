@@ -53,6 +53,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/podrunner"
 	"github.com/nudgebee/nudgebee-agent/pkg/podshell"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
+	"github.com/nudgebee/nudgebee-agent/pkg/rightsize"
 	"github.com/nudgebee/nudgebee-agent/pkg/scanners"
 	"github.com/nudgebee/nudgebee-agent/pkg/servicemap"
 	"github.com/nudgebee/nudgebee-agent/pkg/svcdiscover"
@@ -550,6 +551,24 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			"loki_rules_url", cfg.LokiRulesURL,
 			"install_namespace", installNs,
 			"actions", len(mh))
+	}
+
+	// continuous_rightsizing: samples Prometheus usage and patches workload
+	// resource requests/limits (recommend_only skips the patch). Needs both
+	// Prometheus (usage) and the dynamic client (read + Update across
+	// Deployment/StatefulSet/DaemonSet/ReplicaSet/Rollout). Driven by
+	// runbook-server's optimizer over the relay's shared-secret /request path —
+	// unsigned, same trust posture as the alert-rule mutations carved in above —
+	// so it goes in lightActions. Skipped when either client is unavailable
+	// rather than registered as a fail-auth stub.
+	if promClient != nil && dynamicKube != nil {
+		rs := rightsize.New(promClient, dynamicKube)
+		maps.Copy(handlers, rightsize.Handlers(rs))
+		lightActions["continuous_rightsizing"] = struct{}{}
+		logger.Info("continuous_rightsizing enabled")
+	} else {
+		logger.Warn("continuous_rightsizing disabled — needs both Prometheus and a dynamic K8s client",
+			"prometheus", promClient != nil, "dynamic_client", dynamicKube != nil)
 	}
 
 	// Read primitives are light-action (no signature). Mutations and pod-exec
