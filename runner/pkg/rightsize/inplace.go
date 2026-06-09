@@ -70,16 +70,19 @@ func (r *Rightsizer) supportsInPlaceResize() bool {
 }
 
 // applyInPlace resizes every pod of the workload via the resize subresource.
-// Returns (true, nil) when all pods were resized; (false, nil) signals the
-// caller to fall back to the template Update (rollout). A non-nil error is a
-// hard failure that aborts the run.
-func (r *Rightsizer) applyInPlace(ctx context.Context, app Application, obj *unstructured.Unstructured, targets []inPlaceTarget, identifier string, changes []map[string]any) (bool, error) {
+// Returns true when all pods were resized; false signals the caller to fall
+// back to the template Update (rollout) — listing failed, a patch was rejected
+// (QoS change, unsupported), a resize was Infeasible, or polling timed out.
+//
+// All pods are patched first so their kubelets resize in parallel, then we poll
+// for completion — total time is ~the poll budget, not budget × replicas.
+func (r *Rightsizer) applyInPlace(ctx context.Context, app Application, obj *unstructured.Unstructured, targets []inPlaceTarget) bool {
 	if r.client == nil || len(targets) == 0 {
-		return false, nil
+		return false
 	}
 	labels, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "selector", "matchLabels")
 	if len(labels) == 0 {
-		return false, nil // can't select pods → fall back
+		return false // can't select pods → fall back
 	}
 	sel := make([]string, 0, len(labels))
 	for k, v := range labels {
@@ -87,57 +90,52 @@ func (r *Rightsizer) applyInPlace(ctx context.Context, app Application, obj *uns
 	}
 	sort.Strings(sel) // deterministic selector string
 	podList, err := r.client.CoreV1().Pods(app.Namespace).List(ctx, metav1.ListOptions{LabelSelector: strings.Join(sel, ",")})
-	if err != nil {
-		return false, nil // listing failed → fall back rather than abort
-	}
-	if len(podList.Items) == 0 {
-		return false, nil
+	if err != nil || len(podList.Items) == 0 {
+		return false // listing failed / no pods → fall back rather than abort
 	}
 
 	patchBytes, err := buildResizePatch(targets)
 	if err != nil {
-		return false, nil
+		return false
 	}
-	annotationPatch := buildPodAnnotationPatch(identifier, changes)
 
+	// Trigger the resize on every pod up front (kubelets actuate in parallel).
+	pending := make(map[string]struct{}, len(podList.Items))
 	for i := range podList.Items {
-		pod := podList.Items[i]
-		_, err := r.client.CoreV1().Pods(app.Namespace).Patch(ctx, pod.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "resize")
-		if err != nil {
-			// Rejected (QoS change, unsupported, etc.) → fall back to rollout.
-			return false, nil
+		name := podList.Items[i].Name
+		if _, err := r.client.CoreV1().Pods(app.Namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "resize"); err != nil {
+			return false // rejected → fall back to rollout
 		}
-		if annotationPatch != nil {
-			// Best-effort traceability; the resize subresource can't carry metadata.
-			_, _ = r.client.CoreV1().Pods(app.Namespace).Patch(ctx, pod.Name, types.StrategicMergePatchType, annotationPatch, metav1.PatchOptions{})
-		}
-		if !r.waitForResize(ctx, app.Namespace, pod.Name) {
-			return false, nil // Infeasible / timed out → fall back.
-		}
+		pending[name] = struct{}{}
 	}
-	return true, nil
-}
 
-// waitForResize polls the pod's KEP-1287 status conditions. Returns true when
-// the resize completes; false on Infeasible/error or when the budget is spent.
-func (r *Rightsizer) waitForResize(ctx context.Context, namespace, pod string) bool {
+	// Poll the pending pods until all complete, any is Infeasible, or timeout.
+	timer := time.NewTimer(resizePollInterval)
+	defer timer.Stop()
 	for attempt := 0; attempt < resizePollAttempts; attempt++ {
-		p, err := r.client.CoreV1().Pods(namespace).Get(ctx, pod, metav1.GetOptions{})
-		if err == nil {
+		for name := range pending {
+			p, err := r.client.CoreV1().Pods(app.Namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				continue
+			}
 			switch resizeState(p) {
 			case "done":
-				return true
+				delete(pending, name)
 			case "infeasible":
 				return false
 			}
 		}
+		if len(pending) == 0 {
+			return true
+		}
+		timer.Reset(resizePollInterval)
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(resizePollInterval):
+		case <-timer.C:
 		}
 	}
-	return false
+	return false // timed out → fall back
 }
 
 // resizeState classifies a pod's resize status from its conditions. With neither
@@ -221,21 +219,4 @@ func buildResizePatch(targets []inPlaceTarget) ([]byte, error) {
 		return nil, fmt.Errorf("rightsize: no container resources to resize in place")
 	}
 	return json.Marshal(map[string]any{"spec": map[string]any{"containers": containers}})
-}
-
-// buildPodAnnotationPatch builds a metadata-annotation merge patch carrying the
-// same vertical-scaler payload writeAnnotation stamps on the controller. Returns
-// nil if the payload can't be built (annotation is best-effort).
-func buildPodAnnotationPatch(identifier string, changes []map[string]any) []byte {
-	value, err := annotationValue(identifier, changes)
-	if err != nil {
-		return nil
-	}
-	b, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"annotations": map[string]string{annotationKey: value}},
-	})
-	if err != nil {
-		return nil
-	}
-	return b
 }

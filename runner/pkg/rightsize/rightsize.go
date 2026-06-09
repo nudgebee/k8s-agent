@@ -293,15 +293,21 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 		appliedInPlace := false
 		if inPlaceEligible {
 			// Resize the running pods without a restart. On any failure
-			// (rejected, Infeasible, timeout) appliedInPlace stays false and we
-			// fall through to the template Update (rolling restart) below.
-			ok, err := r.applyInPlace(ctx, app, obj, inPlaceTargets, s.Identifier, annotationChanges)
-			if err != nil {
-				return nil, fmt.Errorf("rightsize: in-place resize %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
-			}
-			appliedInPlace = ok
+			// (rejected, Infeasible, timeout) this returns false and we fall
+			// through to the template Update (rolling restart) below.
+			appliedInPlace = r.applyInPlace(ctx, app, obj, inPlaceTargets)
 		}
-		if !appliedInPlace {
+		if appliedInPlace {
+			// Persist the correlation annotation on the workload so the backend
+			// can match the run. This sets only the controller's top-level
+			// metadata.annotations (not spec.template), so it does NOT trigger a
+			// rollout. Best-effort: a conflict must not fail a successful resize.
+			writeAnnotation(obj, s.Identifier, annotationChanges)
+			if _, err := ri.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+				// Non-fatal: pods are already resized; only correlation metadata is lost.
+				_ = err
+			}
+		} else {
 			if err := unstructured.SetNestedSlice(obj.Object, containers, "spec", "template", "spec", "containers"); err != nil {
 				return nil, fmt.Errorf("rightsize: rebuild containers for %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
 			}
