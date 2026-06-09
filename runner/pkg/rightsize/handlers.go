@@ -68,6 +68,8 @@ func parseSettings(raw any) (Settings, error) {
 		MemoryPercentile:   numOr(m, "memory_analysis_percentile", 0),
 		AnalysisDuration:   int(numOr(m, "default_analysis_duration_hour", defaultAnalysisDuration)),
 		RecommendOnly:      boolOr(m, "recommend_only", false),
+		InPlace:            boolOr(m, "in_place", true),
+		ResizePolicy:       strField(m, "resize_policy"),
 		Identifier:         strField(m, "identifier"),
 	}
 
