@@ -100,6 +100,35 @@ func TestResizeState(t *testing.T) {
 	}
 }
 
+func TestResizePolicyList(t *testing.T) {
+	// Default → both NotRequired.
+	rp := resizePolicyList("")
+	if len(rp) != 2 {
+		t.Fatalf("default want 2 entries, got %d", len(rp))
+	}
+	cpu := rp[0].(map[string]any)
+	mem := rp[1].(map[string]any)
+	if cpu["resourceName"] != "cpu" || cpu["restartPolicy"] != "NotRequired" {
+		t.Errorf("cpu entry = %v", cpu)
+	}
+	if mem["resourceName"] != "memory" || mem["restartPolicy"] != "NotRequired" {
+		t.Errorf("memory entry = %v", mem)
+	}
+
+	// restart-memory → memory RestartContainer.
+	rp = resizePolicyList("restart-memory")
+	if rp[1].(map[string]any)["restartPolicy"] != "RestartContainer" {
+		t.Errorf("restart-memory should set memory RestartContainer, got %v", rp[1])
+	}
+
+	// Disabled variants → nil.
+	for _, m := range []string{"disabled", "off", "no", "false", "DISABLED", " Off "} {
+		if resizePolicyList(m) != nil {
+			t.Errorf("mode %q should disable (nil)", m)
+		}
+	}
+}
+
 func TestParseSettingsInPlaceDefault(t *testing.T) {
 	// Absent → defaults true.
 	if s, _ := parseSettings(map[string]any{}); !s.InPlace {

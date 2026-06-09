@@ -163,6 +163,28 @@ func resizeState(p *corev1.Pod) string {
 	return "done"
 }
 
+// resizePolicyList builds the container `resizePolicy` to stamp onto the
+// template during a rollout, so pods created afterward carry it and future
+// cycles resize them per policy. Returns nil when injection is disabled.
+//
+//	"" / default            -> cpu NotRequired, memory NotRequired (in-place both)
+//	"restart-memory"        -> cpu NotRequired, memory RestartContainer
+//	"disabled"/off/no/false -> nil (don't stamp)
+func resizePolicyList(mode string) []any {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "disabled", "off", "no", "false":
+		return nil
+	}
+	memPolicy := "NotRequired"
+	if strings.EqualFold(strings.TrimSpace(mode), "restart-memory") {
+		memPolicy = "RestartContainer"
+	}
+	return []any{
+		map[string]any{"resourceName": "cpu", "restartPolicy": "NotRequired"},
+		map[string]any{"resourceName": "memory", "restartPolicy": memPolicy},
+	}
+}
+
 // buildResizePatch builds the strategic-merge body for the resize subresource:
 // {"spec":{"containers":[{"name","resources":{requests,limits}}]}}. Only
 // non-empty values are written (in-place sets, never removes).

@@ -62,8 +62,12 @@ type Settings struct {
 	// InPlace requests a zero-downtime in-place pod resize when the cluster
 	// supports it (>= 1.33); falls back to the template rollout otherwise.
 	// Defaults true (the backend may set in_place=false to force a rollout).
-	InPlace    bool
-	Identifier string
+	InPlace bool
+	// ResizePolicy controls the container resizePolicy stamped onto the template
+	// when a rollout occurs (cluster >= 1.33): "" (cpu/memory NotRequired),
+	// "restart-memory" (memory RestartContainer), or "disabled" (don't stamp).
+	ResizePolicy string
+	Identifier   string
 }
 
 // Application identifies one workload to rightsize.
@@ -234,6 +238,18 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 		if changed {
 			performUpdate = true
 			setContainerResources(c, newReqCPU, newReqMem, newLimCPU, newLimMem)
+			// On a >=1.33 cluster, stamp resizePolicy onto containers that lack
+			// one so a rollout (this fallback or a later cycle) leaves the new
+			// pods in-place-resizable per policy. Only persisted if we end up on
+			// the template-Update path below; never overwrites an existing
+			// (operator/GitOps-set) resizePolicy.
+			if inPlaceEligible {
+				if _, has := c["resizePolicy"]; !has {
+					if rp := resizePolicyList(s.ResizePolicy); rp != nil {
+						c["resizePolicy"] = rp
+					}
+				}
+			}
 			containers[i] = c
 			inPlaceTargets = append(inPlaceTargets, inPlaceTarget{
 				name: name, reqCPU: newReqCPU, reqMem: newReqMem, limCPU: newLimCPU, limMem: newLimMem,
