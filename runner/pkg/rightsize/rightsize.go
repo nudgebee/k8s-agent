@@ -60,11 +60,11 @@ type Settings struct {
 	AnalysisDuration   int
 	RecommendOnly      bool
 	// InPlace requests a zero-downtime in-place pod resize when the cluster
-	// supports it (>= 1.33); falls back to the template rollout otherwise.
+	// supports it (>= 1.35, GA); falls back to the template rollout otherwise.
 	// Defaults true (the backend may set in_place=false to force a rollout).
 	InPlace bool
 	// ResizePolicy controls the container resizePolicy stamped onto the template
-	// when a rollout occurs (cluster >= 1.33): "" (cpu/memory NotRequired),
+	// when a rollout occurs (cluster >= 1.35): "" (cpu/memory NotRequired),
 	// "restart-memory" (memory RestartContainer), or "disabled" (don't stamp).
 	ResizePolicy string
 	Identifier   string
@@ -112,7 +112,7 @@ func New(prom *prometheus.Client, dyn dynamic.Interface, client kubernetes.Inter
 func (r *Rightsizer) Run(ctx context.Context, s Settings, apps []Application) ([]map[string]any, error) {
 	// Decide in-place eligibility once per run (one discovery call): apply
 	// resizes to running pods without a restart when requested and the cluster
-	// is >= 1.33; otherwise each workload uses the template Update (rollout).
+	// is >= 1.35; otherwise each workload uses the template Update (rollout).
 	inPlaceEligible := s.InPlace && r.supportsInPlaceResize()
 	out := make([]map[string]any, 0, len(apps))
 	for _, app := range apps {
@@ -238,7 +238,7 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 		if changed {
 			performUpdate = true
 			setContainerResources(c, newReqCPU, newReqMem, newLimCPU, newLimMem)
-			// On a >=1.33 cluster, stamp resizePolicy onto containers that lack
+			// On a >=1.35 cluster, stamp resizePolicy onto containers that lack
 			// one so a rollout (this fallback or a later cycle) leaves the new
 			// pods in-place-resizable per policy. Only persisted if we end up on
 			// the template-Update path below; never overwrites an existing

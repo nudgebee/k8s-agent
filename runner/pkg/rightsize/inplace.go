@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// In-place pod resize (KEP-1287). When the cluster is >= 1.33 the rightsizer
+// In-place pod resize (KEP-1287). When the cluster is >= 1.35 the rightsizer
 // resizes a workload's running pods via the pod `resize` subresource instead of
 // patching the controller template (which restarts every pod). It is pod-only:
 // the controller template is left untouched, so pods recreated later (scale-up,
@@ -27,7 +27,7 @@ import (
 
 const (
 	inPlaceMinMajor = 1
-	inPlaceMinMinor = 33
+	inPlaceMinMinor = 35
 	// resize status poll budget.
 	resizePollInterval = 3 * time.Second
 	resizePollAttempts = 20 // ~60s
@@ -45,7 +45,9 @@ type inPlaceTarget struct {
 var k8sVersionRe = regexp.MustCompile(`^v?(\d+)\.(\d+)`)
 
 // k8sAtLeastInPlace reports whether a cluster gitVersion (e.g. "v1.35.3-gke.x")
-// is >= 1.33, the point where in-place pod resize is on by default.
+// is >= 1.35, where in-place pod resize reached GA / Stable. We require GA
+// rather than the 1.33/1.34 beta because beta support was uneven across managed
+// providers (e.g. EKS).
 func k8sAtLeastInPlace(gitVersion string) bool {
 	m := k8sVersionRe.FindStringSubmatch(strings.TrimSpace(gitVersion))
 	if m == nil {

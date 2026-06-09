@@ -12,11 +12,13 @@ func TestK8sAtLeastInPlace(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"v1.33.0", true},
-		{"v1.33.11-eks-40737a8", true},
+		// In-place is gated on >= 1.35 (GA), not the 1.33/1.34 beta.
+		{"v1.35.0", true},
 		{"v1.35.3-gke.1389002", true},
-		{"1.34.0+", true},
+		{"1.36.0+", true},
 		{"v2.0.1", true},
+		{"v1.34.9", false},
+		{"v1.33.11-eks-40737a8", false},
 		{"v1.32.9", false},
 		{"v1.27.0", false},
 		{"1.30.2", false},
