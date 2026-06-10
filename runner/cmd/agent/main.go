@@ -1154,14 +1154,28 @@ func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[s
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+// esInsecureTransport is shared across esHTTPClient calls so the per-tick probe
+// reuses one connection pool instead of allocating a new http.Transport each
+// time (which would leak idle TCP connections / file descriptors). Cloned from
+// the default transport to keep its dial/idle timeouts, overriding only TLS.
+var esInsecureTransport = func() *http.Transport {
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		cloned := tr.Clone()
+		cloned.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // operator opted out via ELASTICSEARCH_SSL_VERIFY=false
+		return cloned
+	}
+	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // operator opted out via ELASTICSEARCH_SSL_VERIFY=false
+}()
+
 // esHTTPClient returns an HTTP client honouring ELASTICSEARCH_SSL_VERIFY. When
 // verification is disabled the client skips TLS cert checks, matching the query
 // client so the health probe and real queries behave identically against
-// self-signed OpenSearch/ES endpoints.
+// self-signed OpenSearch/ES endpoints. Verify-on clients use the shared default
+// transport; verify-off clients share esInsecureTransport.
 func esHTTPClient(cfg *config.Config, timeout time.Duration) *http.Client {
 	c := &http.Client{Timeout: timeout}
 	if !cfg.ElasticsearchSSLVerify {
-		c.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // operator opted out via ELASTICSEARCH_SSL_VERIFY=false
+		c.Transport = esInsecureTransport
 	}
 	return c
 }
