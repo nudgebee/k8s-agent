@@ -133,9 +133,6 @@ stringData:
   {{- if not .Values.runner.es.enabled }}
   ELASTICSEARCH_ENABLED: {{ .Values.runner.es.enabled | quote }}
   {{- end }}
-  {{- if not .Values.runner.es.sslVerify }}
-  ELASTICSEARCH_SSL_VERIFY: {{ .Values.runner.es.sslVerify | quote }}
-  {{- end }}
   {{- if .Values.runner.signoz.apiKey }}
   SIGNOZ_API_KEY: {{ .Values.runner.signoz.apiKey }}
   {{- end }}

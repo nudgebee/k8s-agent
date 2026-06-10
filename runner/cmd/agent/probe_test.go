@@ -41,59 +41,36 @@ func TestProbeLogsProvider_ESDisabledFallsThroughToLoki(t *testing.T) {
 	}
 }
 
-// The ES probe must send the configured credentials and honour
-// ELASTICSEARCH_SSL_VERIFY=false, so the badge reflects query reachability
-// against a secured, self-signed OpenSearch/ES endpoint.
-func TestProbeLogsProvider_ESAuthAndInsecureTLS(t *testing.T) {
+// The ES probe must send the configured credentials so the badge reflects
+// query reachability against a secured OpenSearch/ES endpoint (which 401s an
+// unauthenticated probe).
+func TestProbeLogsProvider_ESProbeSendsAuth(t *testing.T) {
 	var gotAuth string
-	es := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	es := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		if r.URL.Path == "/_cluster/health" {
+		if r.URL.Path == "/_cluster/health" && gotAuth != "" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer es.Close()
 
 	cfg := &config.Config{
-		ElasticsearchEnabled:   true,
-		ElasticsearchURL:       es.URL, // https with a self-signed cert
-		ElasticsearchUser:      "admin",
-		ElasticsearchPassword:  "pw",
-		ElasticsearchSSLVerify: false,
+		ElasticsearchEnabled:  true,
+		ElasticsearchURL:      es.URL,
+		ElasticsearchUser:     "admin",
+		ElasticsearchPassword: "pw",
 	}
 	provider, _, ok, _ := probeLogsProvider(context.Background(), cfg)
 	if provider != "ES" {
 		t.Fatalf("provider = %q, want ES", provider)
 	}
 	if !ok {
-		t.Fatal("ok = false, want true (insecure TLS + basic auth should succeed)")
+		t.Fatal("ok = false, want true (authenticated probe should succeed)")
 	}
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:pw"))
 	if gotAuth != want {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, want)
-	}
-}
-
-// With strict TLS verification (the default) the probe cannot complete the
-// handshake against a self-signed endpoint, so the badge reports unhealthy.
-func TestProbeLogsProvider_ESStrictTLSFailsOnSelfSigned(t *testing.T) {
-	es := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer es.Close()
-
-	cfg := &config.Config{
-		ElasticsearchEnabled:   true,
-		ElasticsearchURL:       es.URL,
-		ElasticsearchSSLVerify: true,
-	}
-	provider, _, ok, _ := probeLogsProvider(context.Background(), cfg)
-	if provider != "ES" {
-		t.Fatalf("provider = %q, want ES", provider)
-	}
-	if ok {
-		t.Fatal("ok = true, want false (strict verify must reject self-signed cert)")
 	}
 }

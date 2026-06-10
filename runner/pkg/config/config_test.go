@@ -50,9 +50,8 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		LokiURL:           "http://loki:3100",
 		LokiHeaders:       "X-Scope-OrgID: t1",
 		HTTPListenAddr:    ":7000",
-		// ES enable/SSL-verify default on when their env vars are unset.
-		ElasticsearchEnabled:   true,
-		ElasticsearchSSLVerify: true,
+		// ES enable defaults on when ELASTICSEARCH_ENABLED is unset.
+		ElasticsearchEnabled: true,
 		// K8s subsystems default-on (drop-in compatible with the legacy runner);
 		// operators opt out per-subsystem via DISCOVERY_ENABLED=false etc.
 		DiscoveryEnabled:   true,

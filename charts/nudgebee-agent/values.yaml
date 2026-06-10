@@ -141,9 +141,6 @@ runner:
     # configured `url` from overriding another logs provider (e.g. Loki) while
     # still exposing the ES query actions. Surfaces as ELASTICSEARCH_ENABLED.
     enabled: true
-    # TLS certificate verification for ES health probe + queries. Set false for
-    # self-signed OpenSearch/ES. Surfaces as ELASTICSEARCH_SSL_VERIFY.
-    sslVerify: true
   signoz:
     # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
     url: ""

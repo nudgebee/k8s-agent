@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -299,7 +298,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	if cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "" {
-		ec := elasticsearch.New(cfg.ElasticsearchURL, esHTTPClient(cfg, 60*time.Second))
+		ec := elasticsearch.New(cfg.ElasticsearchURL, nil)
 		ec.Username = cfg.ElasticsearchUser
 		ec.Password = cfg.ElasticsearchPassword
 		ec.APIKey = cfg.ElasticsearchAPIKey
@@ -1085,11 +1084,10 @@ func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url s
 		return "pinot", cfg.PinotURL, ok, map[string]any{}
 	case cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "":
 		// ES exposes a `_cluster/health` endpoint; we treat 200 as healthy.
-		// Probe with the same auth + TLS posture as the query client so the
-		// badge reflects whether queries will actually succeed — a secured
-		// OpenSearch/ES otherwise 401s (or fails TLS) on an unauthenticated,
-		// strict-verify probe even when the configured creds work fine.
-		ok = httpProbe(ctx, esHTTPClient(cfg, 5*time.Second), cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
+		// Probe with the configured credentials so the badge reflects whether
+		// queries will actually succeed — a secured OpenSearch/ES otherwise 401s
+		// on an unauthenticated probe even when the configured creds work fine.
+		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
 		providerCfg = map[string]any{}
 		if v := os.Getenv("ELASTICSEARCH_LOG_INDEX"); v != "" {
 			providerCfg["default_index"] = v
@@ -1152,32 +1150,6 @@ func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[s
 	}
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
-}
-
-// esInsecureTransport is shared across esHTTPClient calls so the per-tick probe
-// reuses one connection pool instead of allocating a new http.Transport each
-// time (which would leak idle TCP connections / file descriptors). Cloned from
-// the default transport to keep its dial/idle timeouts, overriding only TLS.
-var esInsecureTransport = func() *http.Transport {
-	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
-		cloned := tr.Clone()
-		cloned.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // operator opted out via ELASTICSEARCH_SSL_VERIFY=false
-		return cloned
-	}
-	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // operator opted out via ELASTICSEARCH_SSL_VERIFY=false
-}()
-
-// esHTTPClient returns an HTTP client honouring ELASTICSEARCH_SSL_VERIFY. When
-// verification is disabled the client skips TLS cert checks, matching the query
-// client so the health probe and real queries behave identically against
-// self-signed OpenSearch/ES endpoints. Verify-on clients use the shared default
-// transport; verify-off clients share esInsecureTransport.
-func esHTTPClient(cfg *config.Config, timeout time.Duration) *http.Client {
-	c := &http.Client{Timeout: timeout}
-	if !cfg.ElasticsearchSSLVerify {
-		c.Transport = esInsecureTransport
-	}
-	return c
 }
 
 // esAuthHeader builds the Authorization header for ES probes from the

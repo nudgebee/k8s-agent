@@ -32,12 +32,11 @@ type Config struct {
 	LokiHeaders       string
 
 	// Elasticsearch
-	ElasticsearchURL       string
-	ElasticsearchUser      string
-	ElasticsearchPassword  string
-	ElasticsearchAPIKey    string
-	ElasticsearchEnabled   bool // ELASTICSEARCH_ENABLED; default true when URL is set
-	ElasticsearchSSLVerify bool // ELASTICSEARCH_SSL_VERIFY; default true
+	ElasticsearchURL      string
+	ElasticsearchUser     string
+	ElasticsearchPassword string
+	ElasticsearchAPIKey   string
+	ElasticsearchEnabled  bool // ELASTICSEARCH_ENABLED; default true when URL is set
 
 	// Signoz
 	SignozURL    string
@@ -175,21 +174,20 @@ func FromEnv() (*Config, error) {
 		// URL: operators set it false to keep a stray ELASTICSEARCH_URL from
 		// overriding a working provider (e.g. Loki). Unset → enabled when a URL
 		// is present, preserving legacy URL-presence behaviour.
-		ElasticsearchEnabled:   envBool("ELASTICSEARCH_ENABLED", true),
-		ElasticsearchSSLVerify: envBool("ELASTICSEARCH_SSL_VERIFY", true),
-		SignozURL:              os.Getenv("SIGNOZ_URL"),
-		SignozAPIKey:           os.Getenv("SIGNOZ_API_KEY"),
-		JaegerURL:              os.Getenv("JAEGER_URL"),
-		ChronosphereURL:        os.Getenv("CHRONOSPHERE_URL"),
-		ChronosphereAPIKey:     os.Getenv("CHRONOSPHERE_API_KEY"),
-		PinotURL:               os.Getenv("PINOT_URL"),
-		PinotAuthToken:         os.Getenv("PINOT_AUTH_TOKEN"),
-		PinotUsername:          os.Getenv("PINOT_USERNAME"),
-		PinotPassword:          os.Getenv("PINOT_PASSWORD"),
-		HTTPProxyTargets:       os.Getenv("HTTP_PROXY_TARGETS"),
-		LokiRulesURL:           os.Getenv("LOKI_RULES_URL"),
-		HTTPListenAddr:         cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
-		PprofEnabled:           envBool("PPROF_ENABLED", false),
+		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", true),
+		SignozURL:            os.Getenv("SIGNOZ_URL"),
+		SignozAPIKey:         os.Getenv("SIGNOZ_API_KEY"),
+		JaegerURL:            os.Getenv("JAEGER_URL"),
+		ChronosphereURL:      os.Getenv("CHRONOSPHERE_URL"),
+		ChronosphereAPIKey:   os.Getenv("CHRONOSPHERE_API_KEY"),
+		PinotURL:             os.Getenv("PINOT_URL"),
+		PinotAuthToken:       os.Getenv("PINOT_AUTH_TOKEN"),
+		PinotUsername:        os.Getenv("PINOT_USERNAME"),
+		PinotPassword:        os.Getenv("PINOT_PASSWORD"),
+		HTTPProxyTargets:     os.Getenv("HTTP_PROXY_TARGETS"),
+		LokiRulesURL:         os.Getenv("LOKI_RULES_URL"),
+		HTTPListenAddr:       cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
+		PprofEnabled:         envBool("PPROF_ENABLED", false),
 		// K8s subsystems default-on so the agent is drop-in compatible with
 		// the legacy runner Deployment — no env additions needed for cutover.
 		// Operators can opt out per-subsystem via DISCOVERY_ENABLED=false etc.
