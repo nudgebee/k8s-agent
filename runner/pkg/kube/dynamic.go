@@ -53,7 +53,7 @@ type GetParams struct {
 }
 
 func ParseGetParams(p map[string]any) GetParams {
-	return GetParams{
+	gp := GetParams{
 		Group:         strParam(p, "group"),
 		Version:       strParam(p, "version"),
 		ResourceType:  strParam(p, "resource_type"),
@@ -61,6 +61,26 @@ func ParseGetParams(p map[string]any) GetParams {
 		Name:          strParam(p, "name"),
 		AllNamespaces: boolParam(p, "all_namespaces"),
 	}
+	// Backward-compat with the legacy `kind`-based contract (and the UI built
+	// on it): callers that address a resource by `kind` ("Deployment") instead
+	// of an explicit GVR used to work, but requiring resource_type made
+	// {name, namespace, kind} fail with "version and resource_type are
+	// required". When resource_type is absent, resolve the kind to its
+	// canonical GVR (see kind_resolver.go). An explicit GVR always wins:
+	// resource_type set ⇒ kind ignored; an explicitly-provided group/version
+	// is preserved over the table's canonical one.
+	if gp.ResourceType == "" {
+		if gvr, ok := resolveKind(strParam(p, "kind")); ok {
+			gp.ResourceType = gvr.Resource
+			if gp.Group == "" {
+				gp.Group = gvr.Group
+			}
+			if gp.Version == "" {
+				gp.Version = gvr.Version
+			}
+		}
+	}
+	return gp
 }
 
 // GetResource fetches resources matching p and returns them as a FLAT array
