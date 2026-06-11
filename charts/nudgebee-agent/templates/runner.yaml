@@ -140,25 +140,25 @@ stringData:
   SIGNOZ_URL: {{ .Values.runner.signoz.url }}
   {{- end }}
   {{- if .Values.runner.jaeger.queryUrl }}
-  JAEGER_QUERY_URL: {{ .Values.runner.jaeger.queryUrl }}
+  JAEGER_QUERY_URL: {{ .Values.runner.jaeger.queryUrl | quote }}
   {{- end }}
   {{- if .Values.runner.chronosphere.url }}
-  CHRONOSPHERE_URL: {{ .Values.runner.chronosphere.url }}
+  CHRONOSPHERE_URL: {{ .Values.runner.chronosphere.url | quote }}
   {{- end }}
   {{- if .Values.runner.chronosphere.apiKey }}
-  CHRONOSPHERE_API_KEY: {{ .Values.runner.chronosphere.apiKey }}
+  CHRONOSPHERE_API_KEY: {{ .Values.runner.chronosphere.apiKey | quote }}
   {{- end }}
   {{- if .Values.runner.pinot.url }}
-  PINOT_URL: {{ .Values.runner.pinot.url }}
+  PINOT_URL: {{ .Values.runner.pinot.url | quote }}
   {{- end }}
   {{- if .Values.runner.pinot.authToken }}
-  PINOT_AUTH_TOKEN: {{ .Values.runner.pinot.authToken }}
+  PINOT_AUTH_TOKEN: {{ .Values.runner.pinot.authToken | quote }}
   {{- end }}
   {{- if .Values.runner.pinot.username }}
-  PINOT_USERNAME: {{ .Values.runner.pinot.username }}
+  PINOT_USERNAME: {{ .Values.runner.pinot.username | quote }}
   {{- end }}
   {{- if .Values.runner.pinot.password }}
-  PINOT_PASSWORD: {{ .Values.runner.pinot.password }}
+  PINOT_PASSWORD: {{ .Values.runner.pinot.password | quote }}
   {{- end }}
   {{- if and (or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled) (hasKey .Values.runner "clickhouse_password") }}
   CLICKHOUSE_PASSWORD: {{ .Values.runner.clickhouse_password }}
