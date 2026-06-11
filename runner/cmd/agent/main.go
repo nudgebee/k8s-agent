@@ -574,6 +574,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			"prometheus", promClient != nil, "dynamic_client", dynamicKube != nil)
 	}
 
+	// rightsizing_resource: applies a backend-computed recommendation (explicit
+	// per-container cpu/mem request+limit + correlation annotations) to a
+	// workload. Needs only the dynamic client (read + Update across
+	// Deployment/StatefulSet/DaemonSet/Rollout/Pod). Delivered via the
+	// agent_task poller (pkg/tasks) — a trusted path — so it is a plain handler
+	// and is NOT a lightAction (an unsigned WS delivery of a mutation is
+	// correctly rejected). Skipped when the dynamic client is unavailable.
+	if dynamicKube != nil {
+		handlers["rightsizing_resource"] = rightsize.NewApplier(dynamicKube).Handle
+		logger.Info("rightsizing_resource enabled")
+	} else {
+		logger.Warn("rightsizing_resource disabled — needs a dynamic K8s client")
+	}
+
 	// Read primitives are light-action (no signature). Mutations and pod-exec
 	// actions are NOT in lightActions, so the dispatcher rejects them unless
 	// the request carries a valid HMAC signature OR RSA partial-keys.
