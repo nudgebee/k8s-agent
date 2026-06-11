@@ -140,6 +140,39 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		"health": {},
 	}
 
+	// registerProxy wires a read-only proxy datasource so the backend never
+	// gets a 401 "not in light-action allowlist" or 404 "action not
+	// registered" for it — even when the datasource isn't configured on THIS
+	// agent. The backend selects these actions from per-account integration
+	// config (e.g. traces=jaeger-via-agent), independent of the agent's env,
+	// so the action names must always be in the allowlist. When the datasource
+	// is enabled the real handlers are wired; when it's not, a stub returns a
+	// clear "not configured" error instead of failing auth. Same precedent as
+	// query_data / api_traces_enricher_v2 below, which register unconditionally
+	// so callers see a handled response rather than an auth rejection.
+	//
+	// `real` is the datasource's own Handlers() map — constructed even when
+	// disabled (the constructors are cheap and make no network calls), so the
+	// action NAMES always come straight from the package and can't drift.
+	// Only read-only proxies go through here; mutations / pod-exec stay out of
+	// lightActions and require HMAC or RSA partial-keys.
+	registerProxy := func(datasource string, enabled bool, real map[string]dispatch.Handler) {
+		for action, h := range real {
+			lightActions[action] = struct{}{}
+			if enabled {
+				handlers[action] = h
+				continue
+			}
+			// Don't clobber a real handler another subsystem already wired.
+			if _, exists := handlers[action]; !exists {
+				name := action
+				handlers[action] = func(context.Context, map[string]any) (any, error) {
+					return nil, fmt.Errorf("%s datasource not configured on this agent (action %q)", datasource, name)
+				}
+			}
+		}
+	}
+
 	// Build the K8s client up-front so service-discovery can run before any
 	// observability subsystem is wired. If construction fails, we fall back
 	// to env-only configuration — the agent still serves whatever URLs are
@@ -297,89 +330,72 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Info("loki enabled", "url", cfg.LokiURL, "actions", len(lh)+len(ch))
 	}
 
-	if cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "" {
-		ec := elasticsearch.New(cfg.ElasticsearchURL, nil)
-		ec.Username = cfg.ElasticsearchUser
-		ec.Password = cfg.ElasticsearchPassword
-		ec.APIKey = cfg.ElasticsearchAPIKey
-		eh := elasticsearch.Handlers(ec)
-		maps.Copy(handlers, eh)
-		for name := range eh {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL, "actions", len(eh))
+	esEnabled := cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != ""
+	ec := elasticsearch.New(cfg.ElasticsearchURL, nil)
+	ec.Username = cfg.ElasticsearchUser
+	ec.Password = cfg.ElasticsearchPassword
+	ec.APIKey = cfg.ElasticsearchAPIKey
+	registerProxy("elasticsearch", esEnabled, elasticsearch.Handlers(ec))
+	if esEnabled {
+		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL)
 	}
 
+	sc := signoz.New(cfg.SignozURL, nil)
+	sc.APIKey = cfg.SignozAPIKey
+	registerProxy("signoz", cfg.SignozURL != "", signoz.Handlers(sc))
 	if cfg.SignozURL != "" {
-		sc := signoz.New(cfg.SignozURL, nil)
-		sc.APIKey = cfg.SignozAPIKey
-		sh := signoz.Handlers(sc)
-		maps.Copy(handlers, sh)
-		for name := range sh {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("signoz enabled", "url", cfg.SignozURL, "actions", len(sh))
+		logger.Info("signoz enabled", "url", cfg.SignozURL)
 	}
 
+	jc := jaeger.New(cfg.JaegerURL, nil)
+	registerProxy("jaeger", cfg.JaegerURL != "", jaeger.Handlers(jc))
 	if cfg.JaegerURL != "" {
-		jc := jaeger.New(cfg.JaegerURL, nil)
-		jh := jaeger.Handlers(jc)
-		maps.Copy(handlers, jh)
-		for name := range jh {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("jaeger enabled", "url", cfg.JaegerURL, "actions", len(jh))
+		logger.Info("jaeger enabled", "url", cfg.JaegerURL)
 	}
 
+	cc := chronosphere.New(cfg.ChronosphereURL, nil)
+	cc.APIKey = cfg.ChronosphereAPIKey
+	registerProxy("chronosphere", cfg.ChronosphereURL != "", chronosphere.Handlers(cc))
 	if cfg.ChronosphereURL != "" {
-		cc := chronosphere.New(cfg.ChronosphereURL, nil)
-		cc.APIKey = cfg.ChronosphereAPIKey
-		ch := chronosphere.Handlers(cc)
-		maps.Copy(handlers, ch)
-		for name := range ch {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL, "actions", len(ch))
+		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL)
 	}
 
+	pc := pinot.New(cfg.PinotURL, nil)
+	pc.AuthToken = cfg.PinotAuthToken
+	pc.Username = cfg.PinotUsername
+	pc.Password = cfg.PinotPassword
+	registerProxy("pinot", cfg.PinotURL != "", pinot.Handlers(pc))
 	if cfg.PinotURL != "" {
-		pc := pinot.New(cfg.PinotURL, nil)
-		pc.AuthToken = cfg.PinotAuthToken
-		pc.Username = cfg.PinotUsername
-		pc.Password = cfg.PinotPassword
-		ph := pinot.Handlers(pc)
-		maps.Copy(handlers, ph)
-		for name := range ph {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("pinot enabled", "url", cfg.PinotURL, "actions", len(ph))
+		logger.Info("pinot enabled", "url", cfg.PinotURL)
 	}
 
-	if targets := config.ParseTargets(cfg.HTTPProxyTargets); len(targets) > 0 {
-		hp := httpproxy.New(targets, nil)
-		ph := httpproxy.Handlers(hp)
-		maps.Copy(handlers, ph)
-		for name := range ph {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("http proxy enabled", "targets", len(targets), "actions", len(ph))
+	targets := config.ParseTargets(cfg.HTTPProxyTargets)
+	registerProxy("http_proxy", len(targets) > 0, httpproxy.Handlers(httpproxy.New(targets, nil)))
+	if len(targets) > 0 {
+		logger.Info("http proxy enabled", "targets", len(targets))
 	}
 
+	// GCP needs ADC, so we can't build a live client when disabled; a throwaway
+	// HTTP client gives registerProxy the action names (gke_logs / gke_traces)
+	// for the stub path without touching credentials.
+	gcpEnabled := false
+	var gcpClient *gcp.Client
 	if cfg.GCPEnabled {
-		gcpClient, err := gcp.New(ctx)
+		c, err := gcp.New(ctx)
 		if err != nil {
 			// Don't fail the whole agent — GCP creds might be missing on this
-			// cluster. Log and continue; gke_logs / gke_traces just won't be
-			// registered.
+			// cluster. Log and fall through to the not-configured stubs.
 			logger.Warn("gcp disabled: ADC unavailable", "err", err)
 		} else {
-			gh := gcp.Handlers(gcpClient, cfg.GCPProjectID)
-			maps.Copy(handlers, gh)
-			for name := range gh {
-				lightActions[name] = struct{}{}
-			}
-			logger.Info("gcp enabled", "default_project", cfg.GCPProjectID, "actions", len(gh))
+			gcpClient, gcpEnabled = c, true
 		}
+	}
+	if gcpClient == nil {
+		gcpClient = gcp.NewWithHTTP(nil)
+	}
+	registerProxy("gcp", gcpEnabled, gcp.Handlers(gcpClient, cfg.GCPProjectID))
+	if gcpEnabled {
+		logger.Info("gcp enabled", "default_project", cfg.GCPProjectID)
 	}
 
 	// logs_enricher (Finding-shape) reads pod logs through

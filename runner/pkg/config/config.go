@@ -177,17 +177,23 @@ func FromEnv() (*Config, error) {
 		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", true),
 		SignozURL:            os.Getenv("SIGNOZ_URL"),
 		SignozAPIKey:         os.Getenv("SIGNOZ_API_KEY"),
-		JaegerURL:            os.Getenv("JAEGER_URL"),
-		ChronosphereURL:      os.Getenv("CHRONOSPHERE_URL"),
-		ChronosphereAPIKey:   os.Getenv("CHRONOSPHERE_API_KEY"),
-		PinotURL:             os.Getenv("PINOT_URL"),
-		PinotAuthToken:       os.Getenv("PINOT_AUTH_TOKEN"),
-		PinotUsername:        os.Getenv("PINOT_USERNAME"),
-		PinotPassword:        os.Getenv("PINOT_PASSWORD"),
-		HTTPProxyTargets:     os.Getenv("HTTP_PROXY_TARGETS"),
-		LokiRulesURL:         os.Getenv("LOKI_RULES_URL"),
-		HTTPListenAddr:       cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
-		PprofEnabled:         envBool("PPROF_ENABLED", false),
+		// JAEGER_URL drives the jaeger read-proxy handlers + light-action
+		// allowlist. Fall back to JAEGER_QUERY_URL (the var the telemetry
+		// heartbeat uses to tell the backend jaeger is enabled) so a
+		// deployment that only sets JAEGER_QUERY_URL doesn't end up with the
+		// backend dispatching jaeger_query_* while the agent rejects them as
+		// "not in light-action allowlist".
+		JaegerURL:          cmp(os.Getenv("JAEGER_URL"), os.Getenv("JAEGER_QUERY_URL")),
+		ChronosphereURL:    os.Getenv("CHRONOSPHERE_URL"),
+		ChronosphereAPIKey: os.Getenv("CHRONOSPHERE_API_KEY"),
+		PinotURL:           os.Getenv("PINOT_URL"),
+		PinotAuthToken:     os.Getenv("PINOT_AUTH_TOKEN"),
+		PinotUsername:      os.Getenv("PINOT_USERNAME"),
+		PinotPassword:      os.Getenv("PINOT_PASSWORD"),
+		HTTPProxyTargets:   os.Getenv("HTTP_PROXY_TARGETS"),
+		LokiRulesURL:       os.Getenv("LOKI_RULES_URL"),
+		HTTPListenAddr:     cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
+		PprofEnabled:       envBool("PPROF_ENABLED", false),
 		// K8s subsystems default-on so the agent is drop-in compatible with
 		// the legacy runner Deployment — no env additions needed for cutover.
 		// Operators can opt out per-subsystem via DISCOVERY_ENABLED=false etc.

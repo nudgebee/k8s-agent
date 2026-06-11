@@ -61,7 +61,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-06-11T03-52-06_de087656560d1ffe7e1ba51bbf5a3b0fe2da1f9f
+    tag: 2026-06-11T05-00-18_d0e21617879bd1623413f463aad4d975f6964e6d
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -145,6 +145,25 @@ runner:
     # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
     url: ""
     apiKey: ""
+  jaeger:
+    # In-cluster Jaeger query endpoint. Set when the account uses
+    # traces=jaeger-via-agent so the agent can serve jaeger_query_* actions the
+    # backend dispatches. Surfaces as JAEGER_QUERY_URL (the agent falls back to
+    # it for JAEGER_URL). When empty, jaeger_query_* return a clear
+    # "not configured" error instead of failing auth.
+    queryUrl: ""
+  chronosphere:
+    # Chronosphere trace API endpoint. Surfaces as CHRONOSPHERE_URL. Empty →
+    # chronosphere_query_traces returns "not configured".
+    url: ""
+    apiKey: ""
+  pinot:
+    # Apache Pinot broker endpoint. Surfaces as PINOT_URL. Empty →
+    # pinot_* actions return "not configured".
+    url: ""
+    authToken: ""
+    username: ""
+    password: ""
   grafana:
     url: ""
     username: ""
