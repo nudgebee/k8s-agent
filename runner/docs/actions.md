@@ -112,6 +112,8 @@ Use `target: "*"` only if the operator opts into wildcard mode (ON only when `*=
 | `list_resource_names` | Just names + namespaces | (same as get_resource) |
 | `kubectl_command_executor` | Run kubectl with read verbs only | `command` (full kubectl line) |
 
+The read family also accepts the legacy/UI shape `kind` ("Deployment") in place of `group`/`version`/`resource_type` — it's resolved to the canonical GVR for common built-in kinds and the workload CRDs (see `pkg/kube/kind_resolver.go`). An explicit `resource_type` always wins over `kind`; arbitrary/CRD kinds not in the table must pass an explicit GVR.
+
 `kubectl_command_executor` enforces a **read-only verb allowlist**: `get`, `describe`, `logs`, `top`, `explain`, `api-resources`, `api-versions`, `version`, `cluster-info`, `config`, `auth`. Mutating verbs (`apply`, `delete`, `patch`, etc.) are rejected — they go through Group D actions instead, which require RSA partial-keys.
 
 ## Group C — Pod-exec  🔐
