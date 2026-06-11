@@ -137,6 +137,10 @@ runner:
     # Set to enable Elasticsearch actions. Surfaces as ELASTICSEARCH_URL.
     url: ""
     apiKey: ""
+    # Gate ES as a logs provider independent of the URL. Set false to keep a
+    # configured `url` from overriding another logs provider (e.g. Loki) while
+    # still exposing the ES query actions. Surfaces as ELASTICSEARCH_ENABLED.
+    enabled: true
   signoz:
     # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
     url: ""

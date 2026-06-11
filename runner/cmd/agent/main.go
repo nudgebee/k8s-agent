@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -296,7 +297,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Info("loki enabled", "url", cfg.LokiURL, "actions", len(lh)+len(ch))
 	}
 
-	if cfg.ElasticsearchURL != "" {
+	if cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "" {
 		ec := elasticsearch.New(cfg.ElasticsearchURL, nil)
 		ec.Username = cfg.ElasticsearchUser
 		ec.Password = cfg.ElasticsearchPassword
@@ -1081,9 +1082,12 @@ func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url s
 	case cfg.PinotURL != "":
 		ok = httpProbe(ctx, httpClient, cfg.PinotURL+"/health")
 		return "pinot", cfg.PinotURL, ok, map[string]any{}
-	case cfg.ElasticsearchURL != "":
+	case cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "":
 		// ES exposes a `_cluster/health` endpoint; we treat 200 as healthy.
-		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health")
+		// Probe with the configured credentials so the badge reflects whether
+		// queries will actually succeed — a secured OpenSearch/ES otherwise 401s
+		// on an unauthenticated probe even when the configured creds work fine.
+		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
 		providerCfg = map[string]any{}
 		if v := os.Getenv("ELASTICSEARCH_LOG_INDEX"); v != "" {
 			providerCfg["default_index"] = v
@@ -1094,7 +1098,11 @@ func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url s
 		ok = httpProbe(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
 		return "signoz", cfg.SignozURL, ok, map[string]any{}
 	case cfg.LokiURL != "":
-		ok = httpProbe(ctx, httpClient, cfg.LokiURL+"/ready")
+		// LOKI_URL points at the loki gateway, whose nginx only proxies the
+		// `/loki/...` API paths — the backend `/ready` is not exposed there and
+		// 404s. Probe a gateway-served API endpoint instead so the badge
+		// reflects query reachability.
+		ok = httpProbe(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
 		providerCfg = map[string]any{"url": cfg.LokiURL}
 		return "loki", cfg.LokiURL, ok, providerCfg
 	default:
@@ -1126,10 +1134,15 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) boo
 //
 // URL is sourced from operator-provided config (PROMETHEUS_URL, LOKI_URL,
 // etc.), not request-derived — taint flow is operator → probe by design.
-func httpProbe(ctx context.Context, c *http.Client, url string) bool {
+func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[string]string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // operator-provided URL
 	if err != nil {
 		return false
+	}
+	for _, h := range headers {
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
 	}
 	resp, err := c.Do(req) //nolint:gosec // operator-provided URL
 	if err != nil {
@@ -1137,6 +1150,21 @@ func httpProbe(ctx context.Context, c *http.Client, url string) bool {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// esAuthHeader builds the Authorization header for ES probes from the
+// configured credentials (API key takes precedence over basic auth), mirroring
+// elasticsearch.Client.do. Returns nil when no credentials are set.
+func esAuthHeader(cfg *config.Config) map[string]string {
+	switch {
+	case cfg.ElasticsearchAPIKey != "":
+		return map[string]string{"Authorization": "ApiKey " + cfg.ElasticsearchAPIKey}
+	case cfg.ElasticsearchUser != "":
+		creds := base64.StdEncoding.EncodeToString([]byte(cfg.ElasticsearchUser + ":" + cfg.ElasticsearchPassword))
+		return map[string]string{"Authorization": "Basic " + creds}
+	default:
+		return nil
+	}
 }
 
 // parseTelemetryPeriod reads CLUSTER_STATUS_PERIOD_SEC (default 60s).
