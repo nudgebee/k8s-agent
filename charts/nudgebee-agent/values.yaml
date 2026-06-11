@@ -145,6 +145,25 @@ runner:
     # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
     url: ""
     apiKey: ""
+  jaeger:
+    # In-cluster Jaeger query endpoint. Set when the account uses
+    # traces=jaeger-via-agent so the agent can serve jaeger_query_* actions the
+    # backend dispatches. Surfaces as JAEGER_QUERY_URL (the agent falls back to
+    # it for JAEGER_URL). When empty, jaeger_query_* return a clear
+    # "not configured" error instead of failing auth.
+    queryUrl: ""
+  chronosphere:
+    # Chronosphere trace API endpoint. Surfaces as CHRONOSPHERE_URL. Empty →
+    # chronosphere_query_traces returns "not configured".
+    url: ""
+    apiKey: ""
+  pinot:
+    # Apache Pinot broker endpoint. Surfaces as PINOT_URL. Empty →
+    # pinot_* actions return "not configured".
+    url: ""
+    authToken: ""
+    username: ""
+    password: ""
   grafana:
     url: ""
     username: ""
