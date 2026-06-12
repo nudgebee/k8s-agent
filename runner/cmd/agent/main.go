@@ -441,16 +441,22 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	if cfg.KubeEnabled {
 		kc := kube.NewClient(dynamicKube, typedKube)
-		kx := &kube.KubectlExecutor{} // uses kubectl on PATH
+		// AllowWrite lifts the read-only verb allowlist; gated by the chart's
+		// runner.enableWritePermissions, which also grants the write RBAC.
+		kx := &kube.KubectlExecutor{AllowWrite: cfg.KubectlAllowWrite} // uses kubectl on PATH
 		kh := kube.Handlers(kc, kx, cfg.AccountID)
 		maps.Copy(handlers, kh)
 		for name := range kh {
 			// get_resource / get_resource_yaml / list_resource_names are
 			// read-only and OK as light-action. kubectl_command_executor is
-			// also restricted to read verbs by pkg/kube/exec.go.
+			// restricted to read verbs by pkg/kube/exec.go UNLESS
+			// runner.enableWritePermissions (KUBECTL_ALLOW_WRITE) is set — in
+			// which case it accepts mutating verbs over the same unsigned,
+			// relay-secret-gated path (same posture as pod_script_run_enricher).
+			// The operator enabling write RBAC explicitly opts into that.
 			lightActions[name] = struct{}{}
 		}
-		logger.Info("kube primitives enabled", "actions", len(kh))
+		logger.Info("kube primitives enabled", "actions", len(kh), "kubectl_allow_write", cfg.KubectlAllowWrite)
 	}
 
 	if cfg.ScannersEnabled {

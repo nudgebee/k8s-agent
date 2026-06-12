@@ -36,6 +36,63 @@ var allowedKubectlVerbs = map[string]struct{}{
 // binary to be on PATH inside the agent image (the Dockerfile installs it).
 type KubectlExecutor struct {
 	BinaryPath string // default "kubectl"
+
+	// AllowWrite lifts the read-only verb allowlist when true. Gated by the
+	// chart's runner.enableWritePermissions (KUBECTL_ALLOW_WRITE) — the same
+	// switch that grants the service account its write RBAC, so the runner
+	// allowlist and the cluster RBAC stay in lockstep. When false (default),
+	// only the read verbs in allowedKubectlVerbs are permitted; mutations must
+	// go through pkg/mutate. When true, any verb is allowed and the API
+	// server's RBAC becomes the enforcement boundary.
+	AllowWrite bool
+}
+
+// firstVerb returns the kubectl subcommand from args, skipping any leading
+// global flags (`-n ns`, `--namespace=ns`, `--context c`, `-o yaml`, ...).
+// kubectl accepts global flags before the verb, so `kubectl -n foo get pods`
+// has verb "get", not "-n". Returns "" if no non-flag token is found.
+//
+// Flags that take a separate-token value (`-n foo`, `--context bar`) would
+// otherwise leave the value looking like a verb; verbFlagsWithValue lists the
+// global flags whose value is a following token so we can skip it. Flags using
+// `=` (`--namespace=foo`) carry their value inline and need no lookahead.
+func firstVerb(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+		// A `--flag=value` / `-o=value` token is self-contained.
+		if strings.Contains(a, "=") {
+			continue
+		}
+		// A bare global flag taking a separate value consumes the next token.
+		if _, takesValue := verbFlagsWithValue[a]; takesValue {
+			i++
+		}
+	}
+	return ""
+}
+
+// verbFlagsWithValue are the kubectl global flags that may legitimately precede
+// the verb and consume a following token as their value. Boolean global flags
+// (e.g. --insecure-skip-tls-verify) are absent because they take no value.
+var verbFlagsWithValue = map[string]struct{}{
+	"-n": {}, "--namespace": {},
+	"--context": {},
+	"--cluster": {},
+	"--user":    {},
+	"-o":        {}, "--output": {},
+	"-s": {}, "--server": {},
+	"--kubeconfig":            {},
+	"--token":                 {},
+	"--as":                    {},
+	"--as-group":              {},
+	"--request-timeout":       {},
+	"--cache-dir":             {},
+	"--certificate-authority": {},
+	"--client-certificate":    {},
+	"--client-key":            {},
 }
 
 // Run parses the command string, validates the verb against the allowlist,
@@ -58,9 +115,16 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 		return nil, errors.New("kubectl: empty command after stripping prefix")
 	}
 
-	verb := args[0]
-	if _, ok := allowedKubectlVerbs[verb]; !ok {
-		return nil, fmt.Errorf("kubectl: verb %q not in read-only allowlist; mutating actions go through pkg/mutate", verb)
+	// Resolve the verb past any leading global flags so `kubectl -n ns get
+	// pods` validates as "get", not "-n".
+	verb := firstVerb(args)
+	if verb == "" {
+		return nil, errors.New("kubectl: no verb found (only flags supplied)")
+	}
+	if !k.AllowWrite {
+		if _, ok := allowedKubectlVerbs[verb]; !ok {
+			return nil, fmt.Errorf("kubectl: verb %q not in read-only allowlist; enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", verb)
+		}
 	}
 
 	bin := k.BinaryPath
@@ -99,6 +163,3 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 	}
 	return out, nil
 }
-
-// command is exposed for tests; gofmt forbids unused funcs.
-var _ = strings.HasPrefix

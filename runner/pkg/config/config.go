@@ -122,6 +122,13 @@ type Config struct {
 	// for the full informer cache.
 	KubeEnabled bool
 
+	// KubectlAllowWrite lifts the read-only verb allowlist on
+	// kubectl_command_executor. Set by the chart from
+	// runner.enableWritePermissions — the same switch that grants the service
+	// account its write RBAC — so the runner allowlist and cluster RBAC move
+	// together. Default false keeps kubectl strictly read-only.
+	KubectlAllowWrite bool
+
 	// Scanners (group F): enabled when ScannersEnabled=true. Needs a
 	// namespace + service account that Trivy/Popeye/KRR/etc. can run as.
 	ScannersEnabled       bool
@@ -210,6 +217,7 @@ func FromEnv() (*Config, error) {
 		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
 		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
 		KubeEnabled:               envBool("KUBE_ENABLED", true),
+		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
 		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),

@@ -138,6 +138,16 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     # unset and re-enable the subsystem.
     - name: MUTATE_ENABLED
       value: {{ if eq .Values.runner.mutateEnabled false }}"false"{{ else }}"true"{{ end }}
+    # KUBECTL_ALLOW_WRITE lifts the runner's read-only verb allowlist on
+    # kubectl_command_executor. Gated by runner.enableWritePermissions — the
+    # SAME switch that grants the service account its write RBAC — so the
+    # runner allowlist and the cluster RBAC move together. Default (false)
+    # keeps kubectl strictly read-only; mutating verbs (scale/patch/delete/...)
+    # are rejected and routed to the signed pkg/mutate actions instead. When
+    # true, mutating kubectl runs over the unsigned, relay-secret-gated light
+    # action path — the operator granting write RBAC opts into that posture.
+    - name: KUBECTL_ALLOW_WRITE
+      value: {{ if .Values.runner.enableWritePermissions }}"true"{{ else }}"false"{{ end }}
     {{- if .Values.rsa }}
     - name: RSA_PRIVATE_KEY_PATH
       value: /etc/nudgebee/auth/prv
