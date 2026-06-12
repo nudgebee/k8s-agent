@@ -72,6 +72,7 @@ func TestKubectl_AcceptsReadVerbsBehindGlobalFlags(t *testing.T) {
 		"kubectl --context prod -n default get pods",
 		"kubectl -o yaml get pod foo",
 		"kubectl --kubeconfig /tmp/kc top nodes",
+		"kubectl -v 6 get pods", // numeric flag value must not resolve as the verb
 	} {
 		out, err := k.Run(context.Background(), cmd)
 		if err != nil {
