@@ -62,6 +62,67 @@ func TestKubectl_NonExistentBinary_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestKubectl_AcceptsReadVerbsBehindGlobalFlags(t *testing.T) {
+	// Global flags may precede the verb; the allowlist must validate the verb
+	// past them. Regression for `verb "-n" not in read-only allowlist`.
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl -n kube-system get pods",
+		"kubectl --namespace=kube-system get pods",
+		"kubectl --context prod -n default get pods",
+		"kubectl -o yaml get pod foo",
+		"kubectl --kubeconfig /tmp/kc top nodes",
+		"kubectl -v 6 get pods", // numeric flag value must not resolve as the verb
+	} {
+		out, err := k.Run(context.Background(), cmd)
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", cmd, err)
+			continue
+		}
+		if out["exit_code"] != 0 {
+			t.Errorf("%s: exit_code = %v; want 0", cmd, out["exit_code"])
+		}
+	}
+}
+
+func TestKubectl_RejectsMutatingVerbBehindGlobalFlags(t *testing.T) {
+	// A mutating verb hidden behind a flag must still be rejected when write
+	// mode is off — the flag-skip must not become a bypass.
+	k := &KubectlExecutor{}
+	_, err := k.Run(context.Background(), "kubectl -n default scale deploy foo --replicas=3")
+	if err == nil {
+		t.Fatal("expected rejection for scale behind -n flag")
+	}
+	if !strings.Contains(err.Error(), "scale") {
+		t.Errorf("error %q should name the resolved verb", err.Error())
+	}
+}
+
+func TestKubectl_AllowWrite_PermitsMutatingVerbs(t *testing.T) {
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true", AllowWrite: true}
+	for _, cmd := range []string{
+		"kubectl scale deploy foo --replicas=3",
+		"kubectl -n default patch deploy foo -p '{}'",
+		"kubectl delete pod foo",
+	} {
+		out, err := k.Run(context.Background(), cmd)
+		if err != nil {
+			t.Errorf("%s: unexpected error with AllowWrite: %v", cmd, err)
+			continue
+		}
+		if out["exit_code"] != 0 {
+			t.Errorf("%s: exit_code = %v; want 0", cmd, out["exit_code"])
+		}
+	}
+}
+
+func TestKubectl_RejectsOnlyFlags(t *testing.T) {
+	k := &KubectlExecutor{}
+	if _, err := k.Run(context.Background(), "kubectl -n default"); err == nil {
+		t.Error("expected error when no verb is present")
+	}
+}
+
 func TestKubectl_StripsLeadingKubectl(t *testing.T) {
 	// `kubectl kubectl get pods` → effective verb is "kubectl" which is NOT
 	// allowlisted; verifies the strip happens BEFORE allowlist check (only one).
