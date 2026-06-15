@@ -694,27 +694,53 @@ func TestJobFailure_DoesNotRefireWhilePersistentlyFailed(t *testing.T) {
 
 // ---------- node_not_ready ----------
 
-func TestNodeNotReady_FiresOnTransitionTrueToFalse(t *testing.T) {
-	oldNode := asObj(t, `{
+// notReadyNode builds a Node fixture whose Ready condition has been False
+// since `ago` before now, so the duration gate can be exercised
+// deterministically relative to the test's wall clock.
+func notReadyNode(t *testing.T, ago time.Duration) map[string]any {
+	t.Helper()
+	ts := time.Now().Add(-ago).UTC().Format(time.RFC3339)
+	return asObj(t, `{
 		"metadata":{"name":"n1"},
-		"status":{"conditions":[{"type":"Ready","status":"True"}]}
+		"status":{"conditions":[{"type":"Ready","status":"False","lastTransitionTime":"`+ts+`"}]}
 	}`)
-	newNode := asObj(t, `{
-		"metadata":{"name":"n1"},
-		"status":{"conditions":[{"type":"Ready","status":"False","lastTransitionTime":"2026-05-07T13:00:00Z"}]}
-	}`)
-	if !nodeNotReadyMatcher().Predicate(newNode, oldNode) {
-		t.Error("predicate should fire on Ready True→False")
+}
+
+func TestNodeNotReady_FiresWhenNotReadyBeyondThreshold(t *testing.T) {
+	node := notReadyNode(t, nodeNotReadyMinDuration+5*time.Minute)
+	if !nodeNotReadyMatcher().Predicate(node, nil) {
+		t.Error("predicate should fire once a Node has been NotReady past the threshold")
 	}
 }
 
-func TestNodeNotReady_DoesNotRefireWhilePersistentlyNotReady(t *testing.T) {
-	notReady := asObj(t, `{
+func TestNodeNotReady_DoesNotFireBeforeThreshold(t *testing.T) {
+	// Short-lived NotReady (spot reclaim / drain) — under the window.
+	node := notReadyNode(t, 1*time.Minute)
+	if nodeNotReadyMatcher().Predicate(node, nil) {
+		t.Error("predicate must not fire while NotReady is still within the threshold window")
+	}
+}
+
+func TestNodeNotReady_ParsesFractionalSecondTimestamp(t *testing.T) {
+	// Some sources emit lastTransitionTime with fractional seconds; it must
+	// still parse (RFC3339Nano), not silently fail and suppress the fire.
+	ts := time.Now().Add(-(nodeNotReadyMinDuration + 5*time.Minute)).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	node := asObj(t, `{
 		"metadata":{"name":"n1"},
-		"status":{"conditions":[{"type":"Ready","status":"False"}]}
+		"status":{"conditions":[{"type":"Ready","status":"False","lastTransitionTime":"`+ts+`"}]}
 	}`)
-	if nodeNotReadyMatcher().Predicate(notReady, notReady) {
-		t.Error("predicate must not refire when oldObj was already NotReady")
+	if !nodeNotReadyMatcher().Predicate(node, nil) {
+		t.Error("predicate should fire for a fractional-second lastTransitionTime past the threshold")
+	}
+}
+
+func TestNodeNotReady_DoesNotFireWhenReady(t *testing.T) {
+	ready := asObj(t, `{
+		"metadata":{"name":"n1"},
+		"status":{"conditions":[{"type":"Ready","status":"True"}]}
+	}`)
+	if nodeNotReadyMatcher().Predicate(ready, nil) {
+		t.Error("predicate must not fire for a Ready node")
 	}
 }
 
