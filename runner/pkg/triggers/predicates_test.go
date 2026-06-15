@@ -721,6 +721,19 @@ func TestNodeNotReady_DoesNotFireBeforeThreshold(t *testing.T) {
 	}
 }
 
+func TestNodeNotReady_ParsesFractionalSecondTimestamp(t *testing.T) {
+	// Some sources emit lastTransitionTime with fractional seconds; it must
+	// still parse (RFC3339Nano), not silently fail and suppress the fire.
+	ts := time.Now().Add(-(nodeNotReadyMinDuration + 5*time.Minute)).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	node := asObj(t, `{
+		"metadata":{"name":"n1"},
+		"status":{"conditions":[{"type":"Ready","status":"False","lastTransitionTime":"`+ts+`"}]}
+	}`)
+	if !nodeNotReadyMatcher().Predicate(node, nil) {
+		t.Error("predicate should fire for a fractional-second lastTransitionTime past the threshold")
+	}
+}
+
 func TestNodeNotReady_DoesNotFireWhenReady(t *testing.T) {
 	ready := asObj(t, `{
 		"metadata":{"name":"n1"},

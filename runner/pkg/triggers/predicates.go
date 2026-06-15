@@ -601,12 +601,14 @@ func nodeReadyLastTransition(obj map[string]any) string {
 }
 
 // durationSinceRFC3339 parses an RFC3339 timestamp and returns how long
-// ago it was, or ok=false if the string is empty/unparseable.
+// ago it was, or ok=false if the string is empty/unparseable. RFC3339Nano
+// is used so timestamps with fractional seconds parse too (the layout
+// makes the fractional part optional, so plain-seconds values still work).
 func durationSinceRFC3339(ts string) (time.Duration, bool) {
 	if ts == "" {
 		return 0, false
 	}
-	t, err := time.Parse(time.RFC3339, ts)
+	t, err := time.Parse(time.RFC3339Nano, ts)
 	if err != nil {
 		return 0, false
 	}
