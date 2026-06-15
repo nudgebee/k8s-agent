@@ -397,11 +397,22 @@ func jobFailureMatcher() MatcherSpec {
 	}
 }
 
-// ------- Node NotReady (transition) -------
+// ------- Node NotReady (sustained) -------
 
-// nodeNotReadyMatcher fires when a Node's Ready condition transitions
-// from True to False. Without the transition gate, a permanently-broken
-// Node would re-fire every kubelet heartbeat.
+// nodeNotReadyMinDuration is how long a Node must continuously report
+// Ready=False before it's worth a Finding. Short-lived NotReady is
+// expected churn — spot/preemptible reclaim, autoscaler scale-down, and
+// graceful-shutdown drains all flip a Node NotReady for well under a
+// minute right before it's deleted. Only a Node that stays NotReady past
+// this window is a real, still-present problem.
+const nodeNotReadyMinDuration = 15 * time.Minute
+
+// nodeNotReadyMatcher fires when a Node has been Ready=False for at least
+// nodeNotReadyMinDuration. This is level-triggered, not edge-triggered:
+// the predicate re-evaluates true on every heartbeat once the window is
+// crossed, so the RateLimit window (keyed on the per-episode fingerprint)
+// keeps a long outage from re-firing on each kubelet update. A Node that's
+// reclaimed quickly is deleted before the window elapses and never fires.
 func nodeNotReadyMatcher() MatcherSpec {
 	return MatcherSpec{
 		Name:           "node_not_ready",
@@ -410,14 +421,25 @@ func nodeNotReadyMatcher() MatcherSpec {
 		AggregationKey: "node_not_ready",
 		Priority:       "HIGH",
 		FindingType:    "issue",
-		RateLimit:      0, // transition-gated, no need
-		Predicate: func(obj, oldObj map[string]any) bool {
-			return nodeReadyStatus(obj) == "False" && nodeReadyStatus(oldObj) != "False"
+		// One fire per outage episode; re-fire only if it's still NotReady
+		// 6h later (the fingerprint pins the episode via lastTransitionTime).
+		RateLimit: 6 * time.Hour,
+		Predicate: func(obj, _ map[string]any) bool {
+			if nodeReadyStatus(obj) != "False" {
+				return false
+			}
+			ts := nodeReadyLastTransition(obj)
+			since, ok := durationSinceRFC3339(ts)
+			if !ok {
+				return false
+			}
+			return since >= nodeNotReadyMinDuration
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			name := metaName(obj)
-			// Include lastTransitionTime so a flapping Node produces
-			// distinct Findings per transition rather than one forever.
+			// lastTransitionTime pins the NotReady episode: a Node that
+			// recovers and fails again gets a distinct fingerprint (and
+			// thus a distinct Finding) rather than reusing this one.
 			ts := nodeReadyLastTransition(obj)
 			return fp("node_not_ready", name, ts)
 		},
@@ -576,6 +598,19 @@ func nodeReadyLastTransition(obj map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// durationSinceRFC3339 parses an RFC3339 timestamp and returns how long
+// ago it was, or ok=false if the string is empty/unparseable.
+func durationSinceRFC3339(ts string) (time.Duration, bool) {
+	if ts == "" {
+		return 0, false
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return 0, false
+	}
+	return time.Since(t), true
 }
 
 func metaName(obj map[string]any) string {
