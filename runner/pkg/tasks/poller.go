@@ -45,6 +45,16 @@ type Service struct {
 	HTTP       *http.Client
 	Logger     *slog.Logger
 	Dispatch   Dispatcher
+
+	// LongActions names actions that may run for many minutes (the
+	// rightsize_pvc downsize migration). They are dispatched on a separate
+	// goroutine so a single slow task doesn't stall the sequential queue
+	// drain. The collector already flipped the row to PROCESSING on GET, so it
+	// is not re-handed while running. On shutdown the agent context is
+	// cancelled, so an in-flight migration aborts and its rollback defers run
+	// within the termination grace; a hard kill still orphans the task (it
+	// reaps to TIMEOUT, recoverable by re-applying).
+	LongActions map[string]struct{}
 }
 
 // Run blocks until ctx is done. Polls in a loop with Period spacing.
@@ -153,6 +163,22 @@ func (s *Service) process(ctx context.Context, t task) {
 	}
 	params, _ := payload["action_params"].(map[string]any)
 
+	if _, long := s.LongActions[actionName]; long {
+		// Run off the drain goroutine so a multi-minute task doesn't stall the
+		// rest of the queue. We keep the agent context (it's the long-lived
+		// lifecycle ctx — the poll loop reuses it, so only shutdown cancels it)
+		// so a graceful shutdown propagates cancellation and the migration's
+		// rollback defers can clean up within the termination grace.
+		taskID, action, p := t.TaskID, actionName, params
+		go s.runTask(ctx, taskID, action, p)
+		return
+	}
+	s.runTask(ctx, t.TaskID, actionName, params)
+}
+
+// runTask dispatches one action through the trusted handler path and posts the
+// result back. Shared by the synchronous (short) and detached (long) paths.
+func (s *Service) runTask(ctx context.Context, taskID, actionName string, params map[string]any) {
 	start := time.Now()
 	data, ok, err := s.Dispatch.HandleTrusted(ctx, actionName, params, false)
 	elapsed := time.Since(start)
@@ -160,10 +186,10 @@ func (s *Service) process(ctx context.Context, t task) {
 	var resp map[string]any
 	switch {
 	case !ok:
-		s.Logger.Warn("task: action not registered", "task_id", t.TaskID, "action_name", actionName)
+		s.Logger.Warn("task: action not registered", "task_id", taskID, "action_name", actionName)
 		resp = map[string]any{"success": false, "msg": "action not registered: " + actionName}
 	case err != nil:
-		s.Logger.Warn("task: handler error", "task_id", t.TaskID, "action_name", actionName, "err", err)
+		s.Logger.Warn("task: handler error", "task_id", taskID, "action_name", actionName, "err", err)
 		resp = map[string]any{"success": false, "msg": err.Error()}
 	default:
 		// Handlers already return {success, ...} for thin actions; for
@@ -181,7 +207,7 @@ func (s *Service) process(ctx context.Context, t task) {
 		}
 	}
 	resp["task_processing_duration"] = int(elapsed.Round(time.Second).Seconds())
-	s.respond(ctx, t.TaskID, resp)
+	s.respond(ctx, taskID, resp)
 }
 
 // respond posts the task result back to /v1/k8s/tasks/<task_id>.

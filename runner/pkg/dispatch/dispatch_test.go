@@ -439,3 +439,42 @@ func TestDispatch_RegularActionUnchanged(t *testing.T) {
 
 // silence unused-imports warning for auth (kept for future tests)
 var _ = auth.Validator{}
+
+// TestHandleTrusted_LongActionTimeout verifies the per-action timeout: a long
+// action runs under LongTaskTimeout while everything else uses the (short)
+// TaskTimeout and times out.
+func TestHandleTrusted_LongActionTimeout(t *testing.T) {
+	d := New(Config{
+		TaskTimeout:     20 * time.Millisecond,
+		LongTaskTimeout: 2 * time.Second,
+		LongActions:     map[string]struct{}{"migrate": {}},
+	}, nil, map[string]Handler{
+		"migrate": Handler(func(ctx context.Context, _ map[string]any) (any, error) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+				return "ok", nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}),
+		"quick": Handler(func(ctx context.Context, _ map[string]any) (any, error) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+				return "ok", nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}),
+	})
+
+	// long action: survives past the short TaskTimeout.
+	data, ok, err := d.HandleTrusted(context.Background(), "migrate", nil, false)
+	if !ok || err != nil || data != "ok" {
+		t.Errorf("long action: data=%v ok=%v err=%v; want ok", data, ok, err)
+	}
+	// non-long action: reaped at TaskTimeout.
+	_, ok, err = d.HandleTrusted(context.Background(), "quick", nil, false)
+	if !ok || err == nil {
+		t.Errorf("short action should hit deadline; ok=%v err=%v", ok, err)
+	}
+}

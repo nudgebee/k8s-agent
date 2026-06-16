@@ -30,7 +30,16 @@ func Handlers(m *Mutator) map[string]dispatch.Handler {
 		hs["create_or_replace_alert_rule"] = wrap(m, handleCreateOrReplacePromRule)
 		hs["delete_alert_rule"] = wrapErr(m, handleDeletePromRule)
 		hs["replace_workload"] = wrap(m, handleReplaceWorkload)
+		// replica_rightsizing scales Deployment/StatefulSet/Rollout via the
+		// dynamic client. Delivered through the agent_task poller (trusted),
+		// so — like rightsizing_resource — it is deliberately NOT a lightAction.
+		hs["replica_rightsizing"] = wrap(m, handleReplicaRightsizing)
 	}
+	// PVC remediation needs only the typed client. Same trusted-poller
+	// posture: kept out of lightActions (callers reach these via agent_task,
+	// never unsigned WS).
+	hs["rightsize_pvc"] = wrap(m, handleRightsizePVC)
+	hs["volume_delete"] = wrap(m, handleVolumeDelete)
 	if m.LokiRulesURL != "" {
 		hs["create_loki_alert_rule"] = wrap(m, handleCreateLokiRule)
 		hs["update_loki_alert_rule"] = wrap(m, handleCreateLokiRule) // upsert; same handler
@@ -268,6 +277,25 @@ func perKindBodyField(kind string) string {
 		return "ec2nodeclass"
 	}
 	return ""
+}
+
+// handleReplicaRightsizing scales a workload. replica_count arrives as a JSON
+// number (scale-to-zero path) or a numeric string (event-resolution path);
+// toInt64 coerces both. kind is one of Deployment/StatefulSet/Rollout.
+func handleReplicaRightsizing(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	replicas, ok := toInt64(p["replica_count"])
+	if !ok {
+		return nil, errors.New("replica_rightsizing: replica_count required (integer or numeric string)")
+	}
+	return m.ScaleWorkload(ctx, str(p, "kind"), str(p, "namespace"), str(p, "name"), replicas)
+}
+
+func handleRightsizePVC(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	return m.RightsizePVC(ctx, str(p, "namespace"), str(p, "name"), str(p, "size"))
+}
+
+func handleVolumeDelete(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	return m.DeleteVolume(ctx, str(p, "name"))
 }
 
 func handleCreateLokiRule(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
