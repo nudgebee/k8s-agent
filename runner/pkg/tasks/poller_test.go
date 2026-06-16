@@ -161,3 +161,70 @@ func TestParseTaskWindow(t *testing.T) {
 		}
 	}
 }
+
+// gateDispatch blocks in HandleTrusted until released, so the test can observe
+// that a long action does not block the drain loop.
+type gateDispatch struct {
+	started  chan struct{}
+	release  chan struct{}
+	finished atomic.Bool
+}
+
+func (g *gateDispatch) HandleTrusted(_ context.Context, _ string, _ map[string]any, _ bool) (any, bool, error) {
+	close(g.started)
+	<-g.release
+	g.finished.Store(true)
+	return map[string]any{"success": true}, true, nil
+}
+
+// TestService_LongActionRunsAsync asserts a LongActions task is dispatched on a
+// detached goroutine: drain() returns before the handler finishes, and the
+// result is still POSTed once the handler completes.
+func TestService_LongActionRunsAsync(t *testing.T) {
+	posted := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"data":[{"task_id":"m1","payload":{"action_name":"rightsize_pvc","action_params":{}},"source":"recommendation"}],"remaining_task_count":0}`))
+		case r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			var v map[string]any
+			_ = json.Unmarshal(body, &v)
+			posted <- v
+			w.WriteHeader(200)
+		}
+	}))
+	defer srv.Close()
+
+	g := &gateDispatch{started: make(chan struct{}), release: make(chan struct{})}
+	s := &Service{
+		Endpoint:    srv.URL,
+		Period:      time.Hour,
+		Logger:      slog.Default(),
+		Dispatch:    g,
+		LongActions: map[string]struct{}{"rightsize_pvc": {}},
+	}
+
+	if err := s.drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-g.started // handler is in flight
+	if g.finished.Load() {
+		t.Fatal("drain should have returned before the long handler finished")
+	}
+	select {
+	case <-posted:
+		t.Fatal("result posted before handler released")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(g.release) // let the handler complete
+	select {
+	case v := <-posted:
+		if v["success"] != true {
+			t.Errorf("posted result = %+v", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("long action result never posted")
+	}
+}

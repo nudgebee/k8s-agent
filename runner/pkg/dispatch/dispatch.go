@@ -35,6 +35,16 @@ type Config struct {
 	HighPriorityPoolSize int           // default 3  (WEBSOCKET_HIGH_PRIORITY_THREADPOOL_SIZE)
 	TaskTimeout          time.Duration // default 180s
 	Logger               *slog.Logger
+
+	// LongTaskTimeout is the deadline applied to actions in LongActions when
+	// invoked through HandleTrusted (the agent_task poller). It exists for
+	// long-running remediations — notably the rightsize_pvc downsize
+	// migration, which copies volume data via a mover pod and routinely
+	// exceeds the 180s default. 0 disables the override (LongActions then run
+	// under TaskTimeout). Only the trusted poller path honours this; the WS
+	// Handle path always uses TaskTimeout (no long action reaches it).
+	LongTaskTimeout time.Duration
+	LongActions     map[string]struct{}
 }
 
 // Metrics is the optional metrics sink. Pass *metrics.Registry from main, or
@@ -131,7 +141,13 @@ func (d *Dispatcher) HandleTrusted(ctx context.Context, actionName string, param
 	}
 	defer pool.Release(1)
 
-	taskCtx, cancel := context.WithTimeout(ctx, d.cfg.TaskTimeout)
+	timeout := d.cfg.TaskTimeout
+	if d.cfg.LongTaskTimeout > 0 {
+		if _, long := d.cfg.LongActions[actionName]; long {
+			timeout = d.cfg.LongTaskTimeout
+		}
+	}
+	taskCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
