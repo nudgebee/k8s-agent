@@ -72,7 +72,7 @@ func main() {
 		fatal("unknown action", fmt.Errorf("%q not registered (have it spelled right?)", *action))
 	}
 
-	params := map[string]any{}
+	var params map[string]any
 	switch *action {
 	case "replica_rightsizing":
 		if *replicas < 0 {
@@ -89,10 +89,10 @@ func main() {
 
 	fmt.Printf("→ %s %s\n", *action, mustJSON(params))
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
 
 	start := time.Now()
 	data, err := h(ctx, params)
+	cancel() // done with ctx; explicit so the os.Exit paths below don't skip a defer
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if err != nil {
 		fmt.Printf("✗ FAILED in %s: %v\n", elapsed, err)

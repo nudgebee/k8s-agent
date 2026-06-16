@@ -183,10 +183,10 @@ func (g *gateDispatch) HandleTrusted(_ context.Context, _ string, _ map[string]a
 func TestService_LongActionRunsAsync(t *testing.T) {
 	posted := make(chan map[string]any, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet:
+		switch r.Method {
+		case http.MethodGet:
 			_, _ = w.Write([]byte(`{"data":[{"task_id":"m1","payload":{"action_name":"rightsize_pvc","action_params":{}},"source":"recommendation"}],"remaining_task_count":0}`))
-		case r.Method == http.MethodPost:
+		case http.MethodPost:
 			body, _ := io.ReadAll(r.Body)
 			var v map[string]any
 			_ = json.Unmarshal(body, &v)
