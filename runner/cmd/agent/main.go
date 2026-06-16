@@ -538,6 +538,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		mut := mutate.New(typedKube, cfg.AlertManagerURL, amHeaders)
 		mut.SetDynamic(dynamicKube) // unlocks PrometheusRule CRUD actions
+		// SPDY exec capability for the rightsize_pvc downsize migration's
+		// data-mover pod. Without a REST config the downsize path errors at
+		// request time; expansion / replica / volume_delete still work.
+		if kubeRestCfg != nil {
+			mut.SetExec(podexec.New(typedKube, kubeRestCfg))
+		}
 		// INSTALLATION_NAMESPACE is set by the chart via the downward API.
 		// Required by the legacy alert-rule path; falls back to the scanner
 		// namespace (also chart-set) so a hand-rolled deployment without
@@ -638,8 +644,27 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	lightActions["refresh_playbook"] = struct{}{}
 	validator.SetLightActions(lightActions)
 
+	// longActions run far past the 180s default when invoked through the
+	// trusted agent_task poller — currently only the rightsize_pvc downsize
+	// migration (copies volume data via a mover pod). The ceiling stays under
+	// the server's 60-min PROCESSING→TIMEOUT reap so a task isn't force-failed
+	// mid-flight. Override with LONG_TASK_TIMEOUT_SECONDS.
+	longActions := map[string]struct{}{"rightsize_pvc": {}}
+	longTaskTimeout := 50 * time.Minute
+	if v := os.Getenv("LONG_TASK_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			longTaskTimeout = time.Duration(n) * time.Second
+		} else {
+			logger.Warn("invalid LONG_TASK_TIMEOUT_SECONDS, using default", "value", v)
+		}
+	}
+
 	mreg := metrics.New()
-	disp := dispatch.New(dispatch.Config{Logger: logger}, validator, handlers)
+	disp := dispatch.New(dispatch.Config{
+		Logger:          logger,
+		LongTaskTimeout: longTaskTimeout,
+		LongActions:     longActions,
+	}, validator, handlers)
 	disp.SetMetrics(mreg)
 
 	// Pod-shell session manager (TerminalRequest WS shape, output_type=Terminal).
@@ -948,11 +973,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// the tenant. Period defaults to 120s (matches TASK_RUNNER_WINDOW).
 	if cfg.BackendEndpoint != "" {
 		ts := &tasks.Service{
-			Endpoint:   cfg.BackendEndpoint,
-			AuthSecret: cfg.AuthSecretKey,
-			Period:     tasks.ParseTaskWindow(os.Getenv("TASK_RUNNER_WINDOW")),
-			Logger:     logger,
-			Dispatch:   disp,
+			Endpoint:    cfg.BackendEndpoint,
+			AuthSecret:  cfg.AuthSecretKey,
+			Period:      tasks.ParseTaskWindow(os.Getenv("TASK_RUNNER_WINDOW")),
+			Logger:      logger,
+			Dispatch:    disp,
+			LongActions: longActions,
 		}
 		g.Go(func() error {
 			logger.Info("starting task poller", "endpoint", cfg.BackendEndpoint, "period", ts.Period)
