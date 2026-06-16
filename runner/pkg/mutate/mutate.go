@@ -3,11 +3,14 @@
 // CRUD. Each one mutates customer cluster state; all of them MUST be served
 // behind RSA partial-keys auth in production (NOT light-action).
 //
+// Remediation/apply actions delivered via the agent_task poller (trusted, not
+// lightActions): replica_rightsizing (scale), rightsize_pvc (expand;
+// downsize-via-migration is Phase 2), volume_delete (PV + bound PVC).
+//
 // Out-of-scope for v1 — bring in follow-up commits as they're needed:
-//   - drain                 : evict-pods + wait, ~150 LoC orchestration
-//   - replace_workload, create_workload   : dynamic client + manifest validation
-//   - create_pvc_snapshot, rightsize_pvc  : PVC-resize subresource
-//   - PrometheusRule/LokiRule CRUD        : CRD manipulation, prometheus-operator
+//   - create_workload      : dynamic client + manifest validation
+//   - create_pvc_snapshot  : PVC snapshot subresource
+//   - rightsize_pvc downsize : data-migration (scale→copy→swap), Phase 2
 package mutate
 
 import (
@@ -22,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/podexec"
 )
 
 // Mutator wraps the typed client + an optional AlertManager URL for silences.
@@ -44,7 +49,21 @@ type Mutator struct {
 	// dynamic is the dynamic client used for CRD operations like
 	// PrometheusRule. Set via SetDynamic.
 	dynamic dynamic.Interface
+
+	// exec runs commands inside pods (SPDY). Required only by the
+	// rightsize_pvc downsize migration's data-mover pod. Set via SetExec;
+	// nil disables the downsize path (expansion still works).
+	exec podexec.Executor
+
+	// Migration timeout overrides (0 = use the package defaults). Set by
+	// tests to keep the downsize unit tests fast.
+	opTimeoutOverride      time.Duration
+	podTermTimeoutOverride time.Duration
+	pollIntervalOverride   time.Duration
 }
+
+// SetExec wires the pod-exec capability used by the downsize migration.
+func (m *Mutator) SetExec(e podexec.Executor) { m.exec = e }
 
 func New(cs kubernetes.Interface, alertManagerURL string, headers map[string]string) *Mutator {
 	return &Mutator{
