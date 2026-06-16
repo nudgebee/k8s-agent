@@ -299,3 +299,19 @@ func TestVerifyParity(t *testing.T) {
 }
 
 func ptr32(i int32) *int32 { return &i }
+
+// TestRepointDeploymentPVC_Idempotent covers the retry case where a prior
+// Update applied server-side but the client saw a conflict: the re-Get shows
+// the volume already on newPVC, which must be treated as success (not a hard
+// "no volume referencing oldPVC" error that would fail the migration).
+func TestRepointDeploymentPVC_Idempotent(t *testing.T) {
+	cs := fake.NewClientset(deploymentMounting("data", "web", "data-new", 2))
+	m := New(cs, "", nil)
+	if err := m.repointDeploymentPVC(context.Background(), "data", "web", "data-old", "data-new"); err != nil {
+		t.Fatalf("already-repointed deployment should succeed, got %v", err)
+	}
+	// genuinely-missing volume still errors.
+	if err := m.repointDeploymentPVC(context.Background(), "data", "web", "data-old", "data-other"); err == nil {
+		t.Error("expected error when no volume references oldPVC and not already repointed")
+	}
+}

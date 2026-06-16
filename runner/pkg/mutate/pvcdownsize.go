@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"time"
 
@@ -41,12 +42,40 @@ import (
 )
 
 const (
-	moverImage            = "ubuntu"
+	defaultMoverImage     = "ubuntu"
 	pvcScalerAnnotation   = "NudgebeeDiskScaler" // key == value, marks PVCs we create
-	defaultOpTimeout      = 300 * time.Second    // per-stage ceiling (copy, pvc-delete, pod-running)
+	defaultOpTimeout      = 300 * time.Second    // per-stage ceiling (pvc-delete, pod-running)
 	defaultPodTermTimeout = 300 * time.Second
 	defaultPollInterval   = 5 * time.Second
+	defaultCopyTimeout    = 30 * time.Minute // used only when ctx carries no deadline
 )
+
+// moverImageName resolves the data-mover image: explicit override (tests) >
+// MOVER_IMAGE env (air-gapped clusters that mirror images) > "ubuntu".
+func (m *Mutator) moverImageName() string {
+	if m.moverImageOverride != "" {
+		return m.moverImageOverride
+	}
+	if v := os.Getenv("MOVER_IMAGE"); v != "" {
+		return v
+	}
+	return defaultMoverImage
+}
+
+// copyTimeout bounds a single data copy. It uses the remaining ctx budget (the
+// LongTaskTimeout the poller applies), minus headroom for the surrounding
+// scale/cleanup, so a large volume isn't cut off at a fixed 5m.
+func (m *Mutator) copyTimeout(ctx context.Context) time.Duration {
+	if m.copyTimeoutOverride > 0 {
+		return m.copyTimeoutOverride
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl) - time.Minute; d > 0 {
+			return d
+		}
+	}
+	return defaultCopyTimeout
+}
 
 // Timeout accessors fall back to the defaults above; tests set the unexported
 // Mutator fields to keep migration unit tests fast.

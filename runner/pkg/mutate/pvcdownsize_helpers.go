@@ -95,6 +95,10 @@ func labelSelectorString(sel *metav1.LabelSelector) string {
 // read-modify-update with conflict retries. Returns the prior replica count.
 func (m *Mutator) scaleWorkloadTyped(ctx context.Context, kind, namespace, name string, replicas int32) (int32, error) {
 	var old int32
+	// Capture the prior count only on the first read: a conflict-retry re-Gets
+	// the (possibly already-scaled) object, and recapturing would clobber `old`
+	// with the new value — leaving the caller to "restore" to the wrong count.
+	var oldCaptured bool
 	for attempt := 0; attempt < 3; attempt++ {
 		var err error
 		switch kind {
@@ -102,7 +106,9 @@ func (m *Mutator) scaleWorkloadTyped(ctx context.Context, kind, namespace, name 
 			var d *appsv1.Deployment
 			d, err = m.Client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 			if err == nil {
-				old = derefReplicas(d.Spec.Replicas)
+				if !oldCaptured {
+					old, oldCaptured = derefReplicas(d.Spec.Replicas), true
+				}
 				d.Spec.Replicas = &replicas
 				_, err = m.Client.AppsV1().Deployments(namespace).Update(ctx, d, metav1.UpdateOptions{})
 			}
@@ -110,7 +116,9 @@ func (m *Mutator) scaleWorkloadTyped(ctx context.Context, kind, namespace, name 
 			var s *appsv1.StatefulSet
 			s, err = m.Client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 			if err == nil {
-				old = derefReplicas(s.Spec.Replicas)
+				if !oldCaptured {
+					old, oldCaptured = derefReplicas(s.Spec.Replicas), true
+				}
 				s.Spec.Replicas = &replicas
 				_, err = m.Client.AppsV1().StatefulSets(namespace).Update(ctx, s, metav1.UpdateOptions{})
 			}
@@ -204,7 +212,7 @@ func (m *Mutator) createPVCFromSpec(ctx context.Context, namespace, pvcName stri
 // runs `cp -a`, verifies the COPY_SUCCESS marker + exit 0, then deletes the pod.
 func (m *Mutator) copyData(ctx context.Context, namespace, srcPVC, dstPVC, role string) error {
 	podName := fmt.Sprintf("%s-%s-%s", srcPVC, role, rand.String(8))
-	pod := moverPod(podName, srcPVC, dstPVC)
+	pod := moverPod(podName, srcPVC, dstPVC, m.moverImageName())
 	if _, err := m.Client.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("rightsize_pvc: create mover pod %s: %w", podName, err)
 	}
@@ -214,13 +222,17 @@ func (m *Mutator) copyData(ctx context.Context, namespace, srcPVC, dstPVC, role 
 		return err
 	}
 
-	const cpCommand = `set -e; if [ -z "$(ls -A /srcData 2>/dev/null)" ]; then echo "COPY_SUCCESS: source is empty"; else timeout 300 cp -a /srcData/. /dstData/ && echo "COPY_SUCCESS: data copied"; fi`
+	// The copy can take far longer than the per-stage opTimeout; bound it by the
+	// remaining LongTaskTimeout budget (copyTimeout) instead of a fixed 5m, both
+	// in the shell `timeout` and the exec deadline so they agree.
+	ct := m.copyTimeout(ctx)
+	cpCommand := fmt.Sprintf(`set -e; if [ -z "$(ls -A /srcData 2>/dev/null)" ]; then echo "COPY_SUCCESS: source is empty"; else timeout %d cp -a /srcData/. /dstData/ && echo "COPY_SUCCESS: data copied"; fi`, int(ct.Seconds()))
 	res, err := m.exec.Exec(ctx, &podexec.Request{
 		Namespace: namespace,
 		Pod:       podName,
 		Container: "data-copier",
 		Command:   []string{"/bin/sh", "-c", cpCommand},
-		Timeout:   m.opTimeout(),
+		Timeout:   ct,
 	})
 	if err != nil {
 		return fmt.Errorf("rightsize_pvc: exec cp in %s: %w", podName, err)
@@ -234,14 +246,14 @@ func (m *Mutator) copyData(ctx context.Context, namespace, srcPVC, dstPVC, role 
 	return nil
 }
 
-func moverPod(name, srcPVC, dstPVC string) *corev1.Pod {
+func moverPod(name, srcPVC, dstPVC, image string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:            "data-copier",
-				Image:           moverImage,
+				Image:           image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Command:         []string{"/bin/bash", "-c", "sleep infinity"},
 				VolumeMounts: []corev1.VolumeMount{
@@ -286,14 +298,27 @@ func (m *Mutator) repointDeploymentPVC(ctx context.Context, namespace, name, old
 			return fmt.Errorf("rightsize_pvc: get deployment %s: %w", name, err)
 		}
 		found := false
+		alreadyRepointed := false
 		for i := range d.Spec.Template.Spec.Volumes {
 			v := &d.Spec.Template.Spec.Volumes[i]
-			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == oldPVC {
+			if v.PersistentVolumeClaim == nil {
+				continue
+			}
+			switch v.PersistentVolumeClaim.ClaimName {
+			case oldPVC:
 				v.PersistentVolumeClaim.ClaimName = newPVC
 				found = true
+			case newPVC:
+				alreadyRepointed = true
 			}
 		}
 		if !found {
+			// A prior attempt's Update may have applied server-side before the
+			// client saw a conflict; the re-Get then shows newPVC already set.
+			// Treat that as done rather than failing the migration.
+			if alreadyRepointed {
+				return nil
+			}
 			return fmt.Errorf("rightsize_pvc: deployment %s has no volume referencing pvc %s", name, oldPVC)
 		}
 		_, err = m.Client.AppsV1().Deployments(namespace).Update(ctx, d, metav1.UpdateOptions{})

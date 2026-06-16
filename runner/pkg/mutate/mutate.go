@@ -60,6 +60,11 @@ type Mutator struct {
 	opTimeoutOverride      time.Duration
 	podTermTimeoutOverride time.Duration
 	pollIntervalOverride   time.Duration
+	copyTimeoutOverride    time.Duration
+
+	// moverImageOverride forces the data-mover image (tests); empty falls back
+	// to MOVER_IMAGE / "ubuntu".
+	moverImageOverride string
 }
 
 // SetExec wires the pod-exec capability used by the downsize migration.

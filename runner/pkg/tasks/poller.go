@@ -47,13 +47,13 @@ type Service struct {
 	Dispatch   Dispatcher
 
 	// LongActions names actions that may run for many minutes (the
-	// rightsize_pvc downsize migration). They are dispatched on a detached
+	// rightsize_pvc downsize migration). They are dispatched on a separate
 	// goroutine so a single slow task doesn't stall the sequential queue
-	// drain, and on a context decoupled from the poll cycle so the next
-	// Period tick / a brief shutdown doesn't cancel an in-flight migration.
-	// The collector already flipped the row to PROCESSING on GET, so it is
-	// not re-handed while running. Trade-off: an agent restart mid-migration
-	// orphans the task (it reaps to TIMEOUT, recoverable by re-applying).
+	// drain. The collector already flipped the row to PROCESSING on GET, so it
+	// is not re-handed while running. On shutdown the agent context is
+	// cancelled, so an in-flight migration aborts and its rollback defers run
+	// within the termination grace; a hard kill still orphans the task (it
+	// reaps to TIMEOUT, recoverable by re-applying).
 	LongActions map[string]struct{}
 }
 
@@ -164,11 +164,13 @@ func (s *Service) process(ctx context.Context, t task) {
 	params, _ := payload["action_params"].(map[string]any)
 
 	if _, long := s.LongActions[actionName]; long {
-		// Detach from the poll-cycle context so the next Period tick (or a
-		// brief shutdown) doesn't cancel a multi-minute migration, and run
-		// off the drain goroutine so the rest of the queue keeps moving.
+		// Run off the drain goroutine so a multi-minute task doesn't stall the
+		// rest of the queue. We keep the agent context (it's the long-lived
+		// lifecycle ctx — the poll loop reuses it, so only shutdown cancels it)
+		// so a graceful shutdown propagates cancellation and the migration's
+		// rollback defers can clean up within the termination grace.
 		taskID, action, p := t.TaskID, actionName, params
-		go s.runTask(context.WithoutCancel(ctx), taskID, action, p)
+		go s.runTask(ctx, taskID, action, p)
 		return
 	}
 	s.runTask(ctx, t.TaskID, actionName, params)
