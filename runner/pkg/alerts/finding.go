@@ -213,9 +213,11 @@ func (m MatchedTrigger) Description() string {
 // one envelope per alert so the existing UI dedupes / aggregates per
 // alertname the same way it does today.
 //
-// Returns (envelopes, dropped_count). dropped_count is the number of
-// alerts in the batch that lacked a resolvable subject_name; those are
-// silently skipped.
+// Returns (envelopes, dropped_count). Alerts with no resolvable
+// kubernetes subject are NOT dropped — they get a placeholder subject
+// (see alertToFinding) so they still surface, matching robusta. So
+// dropped_count only counts alerts that failed to build (e.g. the raw
+// alert could not be marshalled); those are skipped.
 func (b *Builder) FromAlertManager(rawWebhook []byte) ([]FindingEnvelope, int, error) {
 	var webhook struct {
 		Alerts []alertManagerAlert `json:"alerts"`
@@ -316,7 +318,12 @@ func (b *Builder) FromKubewatchEvent(rawData []byte) (*FindingEnvelope, error) {
 func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 	subjectName, subjectType := alertSubject(a.Labels)
 	if subjectName == "" {
-		return FindingEnvelope{}, errors.New("alertmanager: no subject_name resolvable from labels")
+		// No kubernetes object resolvable from the alert labels (cluster-
+		// level / control-plane / custom application alerts like Watchdog,
+		// KubeSchedulerDown, HighP95Latency). Mirror robusta's behaviour:
+		// don't drop — emit the Finding with a placeholder subject so the
+		// alert still surfaces. subjectType stays empty (TYPE_NONE).
+		subjectName = "Unresolved"
 	}
 	subjectNamespace := pickLabel(a.Labels, "namespace", "exported_namespace")
 	subjectNode := pickLabel(a.Labels, "node", "instance")
