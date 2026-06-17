@@ -73,9 +73,9 @@ func TestBuilder_Alert_MissingSubjectGetsPlaceholder(t *testing.T) {
 	if dropped != 0 {
 		t.Errorf("dropped = %d; want 0", dropped)
 	}
-	// middle alert: placeholder name, empty (TYPE_NONE) subject type.
-	if got := out[1].Finding.SubjectName; got != "Unresolved" {
-		t.Errorf("subject_name = %q; want %q", got, "Unresolved")
+	// middle alert: alertname fallback, empty (TYPE_NONE) subject type.
+	if got := out[1].Finding.SubjectName; got != "B" {
+		t.Errorf("subject_name = %q; want %q", got, "B")
 	}
 	if got := out[1].Finding.SubjectType; got != "" {
 		t.Errorf("subject_type = %q; want empty", got)

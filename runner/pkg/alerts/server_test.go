@@ -119,9 +119,10 @@ func TestForwarder_AlertHappyPath(t *testing.T) {
 // application alerts) must still be forwarded, with a placeholder subject,
 // matching robusta's behaviour. They are NOT dropped.
 func TestForwarder_AlertWithoutSubjectIsForwarded(t *testing.T) {
-	var hits int
+	got := make(chan []byte, 1)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		body, _ := io.ReadAll(r.Body)
+		got <- body
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
@@ -137,9 +138,18 @@ func TestForwarder_AlertWithoutSubjectIsForwarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	time.Sleep(200 * time.Millisecond)
-	if hits != 1 {
-		t.Errorf("backend received %d forwards; want 1 (subject-less alert is forwarded)", hits)
+
+	select {
+	case body := <-got:
+		var env FindingEnvelope
+		if err := json.Unmarshal(body, &env); err != nil {
+			t.Fatalf("forwarded body is not a FindingEnvelope: %v\n%s", err, body)
+		}
+		if env.Finding.SubjectName != "GenericFire" {
+			t.Errorf("subject_name = %q; want alertname fallback %q", env.Finding.SubjectName, "GenericFire")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received subject-less alert (it must be forwarded, not dropped)")
 	}
 }
 

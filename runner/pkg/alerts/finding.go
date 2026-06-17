@@ -320,10 +320,14 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 	if subjectName == "" {
 		// No kubernetes object resolvable from the alert labels (cluster-
 		// level / control-plane / custom application alerts like Watchdog,
-		// KubeSchedulerDown, HighP95Latency). Mirror robusta's behaviour:
-		// don't drop — emit the Finding with a placeholder subject so the
-		// alert still surfaces. subjectType stays empty (TYPE_NONE).
-		subjectName = "Unresolved"
+		// KubeSchedulerDown, HighP95Latency). Don't drop — fall back to the
+		// alertname as the subject so the alert still surfaces and each alert
+		// type keeps a distinct service_key in the UI (a static placeholder
+		// would group unrelated alerts together). subjectType stays empty.
+		subjectName = pickLabel(a.Labels, "alertname")
+		if subjectName == "" {
+			subjectName = "UnnamedAlert"
+		}
 	}
 	subjectNamespace := pickLabel(a.Labels, "namespace", "exported_namespace")
 	subjectNode := pickLabel(a.Labels, "node", "instance")
