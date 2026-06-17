@@ -61,7 +61,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-06-15T10-47-06_f694c523c6ce9a8c5d2fc3c923866e6bbed0b0c8
+    tag: 2026-06-16T09-26-56_9f3d1d6ddfda812859fcf8675ef0041f12c5689b
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -102,10 +102,10 @@ runner:
   # (snapshotBatching, incrementalBatchSize > 1, emitTombstones) require matching
   # collector support, which has shipped, so they are enabled by default.
   scaling:
-    snapshotBatching: true       # batch the full-load snapshot (needs collector batch reassembly)
-    batchSize: 1000              # items per snapshot batch when snapshotBatching is on
-    incrementalBatchSize: 100    # coalesce N informer events per incremental POST (>1 needs collector to iterate data)
-    emitTombstones: true         # emit deleted:true on delete (needs collector incremental-delete support)
+    snapshotBatching: true # batch the full-load snapshot (needs collector batch reassembly)
+    batchSize: 1000 # items per snapshot batch when snapshotBatching is on
+    incrementalBatchSize: 100 # coalesce N informer events per incremental POST (>1 needs collector to iterate data)
+    emitTombstones: true # emit deleted:true on delete (needs collector incremental-delete support)
   # forwardPoolSize: 64          # bound concurrent event-forward goroutines
   # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
   tolerations: []
