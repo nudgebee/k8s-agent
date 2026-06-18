@@ -53,9 +53,11 @@ func TestBuilder_Alert_SubjectFallbackOrder(t *testing.T) {
 	}
 }
 
-func TestBuilder_Alert_DropsAlertsMissingSubject(t *testing.T) {
+func TestBuilder_Alert_MissingSubjectGetsPlaceholder(t *testing.T) {
 	b := &Builder{AccountID: "acc", Cluster: "c"}
 	// 3 alerts: first has pod, second has no subject label, third has node.
+	// Subject-less alerts must NOT be dropped (matches robusta) — they get
+	// a placeholder subject so they still surface.
 	raw := []byte(`{"alerts":[
 		{"labels":{"alertname":"A","pod":"p"}},
 		{"labels":{"alertname":"B","severity":"critical"}},
@@ -65,11 +67,18 @@ func TestBuilder_Alert_DropsAlertsMissingSubject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 2 {
-		t.Errorf("envelopes = %d; want 2 (middle alert has no subject)", len(out))
+	if len(out) != 3 {
+		t.Fatalf("envelopes = %d; want 3 (subject-less alert is kept)", len(out))
 	}
-	if dropped != 1 {
-		t.Errorf("dropped = %d; want 1", dropped)
+	if dropped != 0 {
+		t.Errorf("dropped = %d; want 0", dropped)
+	}
+	// middle alert: alertname fallback, empty (TYPE_NONE) subject type.
+	if got := out[1].Finding.SubjectName; got != "B" {
+		t.Errorf("subject_name = %q; want %q", got, "B")
+	}
+	if got := out[1].Finding.SubjectType; got != "" {
+		t.Errorf("subject_type = %q; want empty", got)
 	}
 }
 

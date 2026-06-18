@@ -114,15 +114,15 @@ func TestForwarder_AlertHappyPath(t *testing.T) {
 	}
 }
 
-// TestForwarder_AlertWithoutSubjectIsDropped — alerts that don't carry a
-// pod/deployment/node/etc. label can't produce a Finding the consumer
-// will accept hard-drops on missing
-// subject_name). The forwarder counts it as dropped instead of letting
-// the consumer silently swallow it.
-func TestForwarder_AlertWithoutSubjectIsDropped(t *testing.T) {
-	var hits int
+// TestForwarder_AlertWithoutSubjectIsForwarded — alerts that don't carry a
+// pod/deployment/node/etc. label (cluster-level / control-plane / custom
+// application alerts) must still be forwarded, with a placeholder subject,
+// matching robusta's behaviour. They are NOT dropped.
+func TestForwarder_AlertWithoutSubjectIsForwarded(t *testing.T) {
+	got := make(chan []byte, 1)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		body, _ := io.ReadAll(r.Body)
+		got <- body
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
@@ -138,9 +138,18 @@ func TestForwarder_AlertWithoutSubjectIsDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	time.Sleep(200 * time.Millisecond)
-	if hits != 0 {
-		t.Errorf("backend received %d forwards; want 0 (alert with no subject must be dropped)", hits)
+
+	select {
+	case body := <-got:
+		var env FindingEnvelope
+		if err := json.Unmarshal(body, &env); err != nil {
+			t.Fatalf("forwarded body is not a FindingEnvelope: %v\n%s", err, body)
+		}
+		if env.Finding.SubjectName != "GenericFire" {
+			t.Errorf("subject_name = %q; want alertname fallback %q", env.Finding.SubjectName, "GenericFire")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend never received subject-less alert (it must be forwarded, not dropped)")
 	}
 }
 

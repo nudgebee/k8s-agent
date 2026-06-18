@@ -149,14 +149,14 @@ func (f *Forwarder) handleAlert(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 
 	f.spawnForward("alertmanager", func() {
-		envelopes, droppedSubjects, err := f.builder.FromAlertManager(body)
+		envelopes, dropped, err := f.builder.FromAlertManager(body)
 		if err != nil {
 			f.recordDrop("alertmanager", err)
 			return
 		}
-		if droppedSubjects > 0 {
-			f.Logger.Info("alertmanager: dropped alerts with no resolvable subject",
-				"count", droppedSubjects)
+		if dropped > 0 {
+			f.Logger.Warn("alertmanager: dropped alerts that failed to build",
+				"count", dropped)
 		}
 		for i := range envelopes {
 			if err := f.forward(context.Background(), &envelopes[i]); err != nil {
