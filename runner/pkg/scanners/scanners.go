@@ -103,8 +103,20 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		Env:          envs,
 		VolumeMounts: spec.VolumeMounts,
 	}
-	if spec.Privileged {
-		container.SecurityContext = &corev1.SecurityContext{Privileged: ptr.To(true)}
+	if spec.ImagePullPolicy != "" {
+		container.ImagePullPolicy = corev1.PullPolicy(spec.ImagePullPolicy)
+	}
+	// SecurityContext is built only when the server asks for something — privileged
+	// (kube-bench) and/or a specific runAsUser (image_scanner runs as root so
+	// `trivy fs` can read the whole rootfs).
+	if spec.Privileged || spec.RunAsUser != nil {
+		container.SecurityContext = &corev1.SecurityContext{}
+		if spec.Privileged {
+			container.SecurityContext.Privileged = ptr.To(true)
+		}
+		if spec.RunAsUser != nil {
+			container.SecurityContext.RunAsUser = spec.RunAsUser
+		}
 	}
 
 	saName := spec.ServiceAccount
@@ -114,9 +126,11 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 
 	podSpec := corev1.PodSpec{
 		RestartPolicy:      corev1.RestartPolicyNever,
+		InitContainers:     spec.InitContainers,
 		Containers:         []corev1.Container{container},
 		HostPID:            spec.HostPID,
 		HostNetwork:        spec.HostNetwork,
+		NodeName:           spec.NodeName,
 		ServiceAccountName: saName,
 		Volumes:            spec.Volumes,
 	}

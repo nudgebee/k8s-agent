@@ -24,8 +24,31 @@ type JobSpec struct {
 	HostPID     bool `json:"host_pid,omitempty"`     // pod.spec.hostPID
 	HostNetwork bool `json:"host_network,omitempty"` // pod.spec.hostNetwork
 
-	Volumes      []corev1.Volume      `json:"volumes,omitempty"`       // for kube-bench /etc, /var/lib/etcd hostPath mounts
-	VolumeMounts []corev1.VolumeMount `json:"volume_mounts,omitempty"` // matching mounts inside the container
+	// NodeName pins the Job's pod to a specific node (pod.spec.nodeName), bypassing
+	// the scheduler. The image_scanner uses this to land the scan on the node where
+	// the target image is already pulled, so a `trivy fs` rootfs scan can reuse the
+	// node-local image (imagePullPolicy=IfNotPresent) instead of pulling it from the
+	// registry — which is why image scans need no registry credentials.
+	NodeName string `json:"node_name,omitempty"`
+
+	// ImagePullPolicy overrides the main container's pull policy. Empty → the
+	// kubelet default (Always for :latest, IfNotPresent otherwise). image_scanner
+	// sets IfNotPresent so the node-local copy is reused.
+	ImagePullPolicy string `json:"image_pull_policy,omitempty"`
+
+	// RunAsUser sets the main container's securityContext.runAsUser. Pointer so an
+	// explicit 0 (root — needed for `trivy fs` to read every file in the scanned
+	// rootfs) is distinguishable from "unset". nil → image default.
+	RunAsUser *int64 `json:"run_as_user,omitempty"`
+
+	// InitContainers run before the main container. image_scanner uses one to copy
+	// the trivy binary from the scanner image into a shared emptyDir, so the main
+	// container (the target image itself) can run `trivy fs /` against its own
+	// rootfs without the target image needing trivy installed.
+	InitContainers []corev1.Container `json:"init_containers,omitempty"`
+
+	Volumes      []corev1.Volume      `json:"volumes,omitempty"`       // for kube-bench /etc, /var/lib/etcd hostPath mounts; image_scanner's shared emptyDir
+	VolumeMounts []corev1.VolumeMount `json:"volume_mounts,omitempty"` // matching mounts inside the main container
 
 	// TimeoutHintSeconds is the api-server orchestrator's expected upper bound
 	// for this Job. Agent ignores it — the api-server polls and decides when to
