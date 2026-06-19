@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 )
 
 // ---------- Runner construction & BuildJob hygiene ----------
@@ -130,6 +131,50 @@ func TestBuildJob_VolumesAndMounts(t *testing.T) {
 	c := job.Spec.Template.Spec.Containers[0]
 	if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].MountPath != "/etc" {
 		t.Errorf("volume mounts lost: %v", c.VolumeMounts)
+	}
+}
+
+func TestBuildJob_ImageScanFsShape(t *testing.T) {
+	// image_scanner runs a rootfs scan: pinned to a node, target image as the
+	// main container with IfNotPresent + runAsUser=0, and an init container that
+	// stages the trivy binary into a shared volume. Verify all of it round-trips.
+	r := NewRunner(fake.NewClientset(), "ns", "scanner-sa")
+	job := r.BuildJob(JobSpec{
+		NamePrefix:      "trivy-image-scan",
+		Image:           "registry.private.example.com/app:v1",
+		Command:         []string{"sh", "-c", "/var/trivy-operator/trivy fs --format json /"},
+		NodeName:        "node-7",
+		ImagePullPolicy: "IfNotPresent",
+		RunAsUser:       ptr.To(int64(0)),
+		InitContainers: []corev1.Container{
+			{
+				Name:    "trivy-get-binary",
+				Image:   "ghcr.io/nudgebee/trivy:0.58.0",
+				Command: []string{"cp", "/usr/local/bin/trivy", "/var/trivy-operator/trivy"},
+			},
+		},
+	}, "trivy-image-scan-1", "uuid-img")
+
+	ps := job.Spec.Template.Spec
+	if ps.NodeName != "node-7" {
+		t.Errorf("NodeName = %q; want node-7 (image scan must pin to the node)", ps.NodeName)
+	}
+	if len(ps.InitContainers) != 1 || ps.InitContainers[0].Name != "trivy-get-binary" {
+		t.Fatalf("init container lost: %v", ps.InitContainers)
+	}
+	c := ps.Containers[0]
+	if c.Image != "registry.private.example.com/app:v1" {
+		t.Errorf("main container image = %q; want the target image itself", c.Image)
+	}
+	if c.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("ImagePullPolicy = %q; want IfNotPresent (reuse node-local image)", c.ImagePullPolicy)
+	}
+	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
+		t.Errorf("RunAsUser not honored: %+v", c.SecurityContext)
+	}
+	// Privileged must stay unset when only RunAsUser was requested.
+	if c.SecurityContext.Privileged != nil {
+		t.Errorf("Privileged should be nil when not requested: %+v", c.SecurityContext.Privileged)
 	}
 }
 
