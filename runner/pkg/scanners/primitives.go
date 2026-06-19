@@ -11,6 +11,7 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -64,10 +65,26 @@ func (r *Runner) handleScheduleJob(ctx context.Context, params map[string]any) (
 	jobUUID := uuid.NewString()
 	job := r.BuildJob(spec, jobName, jobUUID)
 
+	// Opt-in: make the target workload's image-pull credentials available so the
+	// Job can pull a private image. Gated by AutoCopyPullSecrets — when off, the
+	// field is ignored and no credentials are read or copied.
+	var copiedPullSecrets []string
+	if r.AutoCopyPullSecrets && spec.ImagePullSecretsFrom != nil {
+		copiedPullSecrets = r.resolveAndCopyPullSecrets(ctx, *spec.ImagePullSecretsFrom, jobName)
+		for _, name := range copiedPullSecrets {
+			job.Spec.Template.Spec.ImagePullSecrets = append(
+				job.Spec.Template.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
+		}
+	}
+
 	created, err := r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
+		// Don't leak the copied credentials if the Job never came up to own them.
+		r.deleteCopiedSecrets(ctx, copiedPullSecrets)
 		return nil, fmt.Errorf("schedule_k8s_job: create: %w", err)
 	}
+	// GC the copies with the Job (ownerReference; Job TTL cleans both up).
+	r.ownReferencedSecrets(ctx, copiedPullSecrets, created)
 
 	slog.Info("schedule_k8s_job: created",
 		"job_name", created.Name,

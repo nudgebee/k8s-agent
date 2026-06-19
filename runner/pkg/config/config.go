@@ -135,6 +135,13 @@ type Config struct {
 	ScannerNamespace      string
 	ScannerServiceAccount string
 
+	// ScannerAutoCopyPullSecrets lets image scans pull private images by copying
+	// the scanned workload's imagePullSecrets into the scanner namespace. Off by
+	// default (least privilege): when off, the agent never reads/copies registry
+	// credentials and private-image scans rely on the scanner SA's own pull
+	// secrets. Paired with the chart's conditional secret-write RBAC.
+	ScannerAutoCopyPullSecrets bool
+
 	// PodExecEnabled (group D): pod_bash_enricher / pod_script_run_enricher.
 	// MUST be paired with RSA partial-keys auth in production.
 	PodExecEnabled bool
@@ -220,21 +227,22 @@ func FromEnv() (*Config, error) {
 		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
-		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
-		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
-		ScannerServiceAccount: os.Getenv("SCANNER_SERVICE_ACCOUNT"),
-		MutateEnabled:         envBool("MUTATE_ENABLED", false),
-		AlertManagerURL:       os.Getenv("ALERTMANAGER_URL"),
-		RSAPrivateKeyPath:     os.Getenv("RSA_PRIVATE_KEY_PATH"),
-		GCPEnabled:            envBool("GCP_ENABLED", false),
-		GCPProjectID:          os.Getenv("GCP_PROJECT_ID"),
-		ClickHouseEnabled:     envBool("CLICKHOUSE_ENABLED", true),
-		ClickHouseHost:        os.Getenv("CLICKHOUSE_HOST"),
-		ClickHousePort:        envInt("CLICKHOUSE_PORT", 8123),
-		ClickHouseUser:        os.Getenv("CLICKHOUSE_USER"),
-		ClickHousePassword:    os.Getenv("CLICKHOUSE_PASSWORD"),
-		ClickHouseDB:          cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
-		ClickHouseSSL:         envBool("CLICKHOUSE_SSL_ENABLED", false),
+		ScannersEnabled:            envBool("SCANNERS_ENABLED", false),
+		ScannerNamespace:           cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
+		ScannerServiceAccount:      os.Getenv("SCANNER_SERVICE_ACCOUNT"),
+		ScannerAutoCopyPullSecrets: envBool("SCANNER_AUTO_COPY_PULL_SECRETS", false),
+		MutateEnabled:              envBool("MUTATE_ENABLED", false),
+		AlertManagerURL:            os.Getenv("ALERTMANAGER_URL"),
+		RSAPrivateKeyPath:          os.Getenv("RSA_PRIVATE_KEY_PATH"),
+		GCPEnabled:                 envBool("GCP_ENABLED", false),
+		GCPProjectID:               os.Getenv("GCP_PROJECT_ID"),
+		ClickHouseEnabled:          envBool("CLICKHOUSE_ENABLED", true),
+		ClickHouseHost:             os.Getenv("CLICKHOUSE_HOST"),
+		ClickHousePort:             envInt("CLICKHOUSE_PORT", 8123),
+		ClickHouseUser:             os.Getenv("CLICKHOUSE_USER"),
+		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
+		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
+		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
 	}
 	if c.RelayURL == "" {
 		return nil, errors.New("WEBSOCKET_RELAY_ADDRESS not set")

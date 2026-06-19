@@ -91,6 +91,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    {{- if .Values.runner.scannerAutoCopyPullSecrets }}
+    - name: SCANNER_AUTO_COPY_PULL_SECRETS
+      value: "true"
+    {{- end }}
     {{- with .Values.runner.scaling }}
     {{- if hasKey . "snapshotBatching" }}
     - name: DISCOVERY_SNAPSHOT_BATCHING

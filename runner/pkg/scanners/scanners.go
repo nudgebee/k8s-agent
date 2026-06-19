@@ -58,6 +58,12 @@ type Runner struct {
 	DefaultSA         string // applied when JobSpec.ServiceAccount == ""
 	MaxConcurrentJobs int    // 0 → defaultMaxConcurrent
 	LogCapBytes       int    // 0 → defaultLogCapBytes
+
+	// AutoCopyPullSecrets gates the JobSpec.ImagePullSecretsFrom behavior. When
+	// false (default), the field is ignored and the agent never reads or copies
+	// registry credentials — scans rely on whatever pull secrets the scanner
+	// ServiceAccount already carries. Set from SCANNER_AUTO_COPY_PULL_SECRETS.
+	AutoCopyPullSecrets bool
 }
 
 // NewRunner returns a Runner with the canonical defaults.

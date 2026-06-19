@@ -123,6 +123,15 @@ runner:
   # not here. Set to false for a strictly read-only deployment where every
   # mutate action — light-action or not — is unregistered at startup.
   mutateEnabled: true
+  # Let image scans pull private workload images by copying the scanned pod's
+  # imagePullSecrets into the scanner namespace for the duration of the scan
+  # Job. Off by default (least privilege): when off, the agent never reads or
+  # copies registry credentials, and private-image scans rely on whatever pull
+  # secrets the runner service account already carries
+  # (runnerServiceAccount.imagePullSecrets). Enabling this also grants the
+  # runner secret update/patch/delete in the release namespace (for GC of the
+  # copies) — see runner-service-account.yaml.
+  scannerAutoCopyPullSecrets: false
   customClusterRoleRules: []
   imagePullSecrets: []
   extraVolumes: []
