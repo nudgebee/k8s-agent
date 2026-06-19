@@ -28,7 +28,7 @@ const copiedPullSecretLabel = "nudgebee.com/copied-pull-secret"
 // The "effective" pull secrets of a pod are its pod-level imagePullSecrets plus
 // its ServiceAccount's imagePullSecrets — both are consulted by the kubelet, so
 // both are needed to reproduce the pull.
-func (r *Runner) resolveAndCopyPullSecrets(ctx context.Context, ref PodRef, jobName string) []string {
+func (r *Runner) resolveAndCopyPullSecrets(ctx context.Context, ref PodRef, jobName string) []*corev1.Secret {
 	pod, err := r.Client.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		slog.Warn("image scan: cannot read target pod for pull secrets; scan may fail to pull a private image",
@@ -58,7 +58,7 @@ func (r *Runner) resolveAndCopyPullSecrets(ctx context.Context, ref PodRef, jobN
 			"namespace", ref.Namespace, "service_account", saName, "error", err)
 	}
 
-	copied := make([]string, 0, len(names))
+	copied := make([]*corev1.Secret, 0, len(names))
 	for name := range names {
 		src, err := r.Client.CoreV1().Secrets(ref.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -83,13 +83,20 @@ func (r *Runner) resolveAndCopyPullSecrets(ctx context.Context, ref PodRef, jobN
 			Type: src.Type,
 			Data: src.Data,
 		}
-		_, err = r.Client.CoreV1().Secrets(r.Namespace).Create(ctx, dst, metav1.CreateOptions{})
-		if err != nil && !apierrors.IsAlreadyExists(err) {
-			slog.Warn("image scan: cannot copy pull secret into scanner namespace",
-				"secret", dstName, "scanner_namespace", r.Namespace, "error", err)
+		created, err := r.Client.CoreV1().Secrets(r.Namespace).Create(ctx, dst, metav1.CreateOptions{})
+		if err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				// Deterministic name → a prior attempt for this same Job. Reuse it.
+				if existing, getErr := r.Client.CoreV1().Secrets(r.Namespace).Get(ctx, dstName, metav1.GetOptions{}); getErr == nil {
+					copied = append(copied, existing)
+				}
+			} else {
+				slog.Warn("image scan: cannot copy pull secret into scanner namespace",
+					"secret", dstName, "scanner_namespace", r.Namespace, "error", err)
+			}
 			continue
 		}
-		copied = append(copied, dstName)
+		copied = append(copied, created)
 	}
 	return copied
 }
@@ -97,9 +104,10 @@ func (r *Runner) resolveAndCopyPullSecrets(ctx context.Context, ref PodRef, jobN
 // ownReferencedSecrets points the copied Secrets at the Job so they are
 // garbage-collected when the Job's TTL deletes it. The Job UID is only known
 // after creation, hence this post-create step. Same namespace, so the
-// ownerReference is valid. Best-effort: a failed patch only risks a short-lived
-// orphan that the next sweep / namespace cleanup removes.
-func (r *Runner) ownReferencedSecrets(ctx context.Context, secretNames []string, job *batchv1.Job) {
+// ownerReference is valid. Operates on the objects returned by the copy step
+// (their ResourceVersion is current), so no extra Get is needed. Best-effort: a
+// failed update only risks a short-lived orphan that namespace cleanup removes.
+func (r *Runner) ownReferencedSecrets(ctx context.Context, secrets []*corev1.Secret, job *batchv1.Job) {
 	owner := metav1.OwnerReference{
 		APIVersion:         "batch/v1",
 		Kind:               "Job",
@@ -107,26 +115,22 @@ func (r *Runner) ownReferencedSecrets(ctx context.Context, secretNames []string,
 		UID:                job.UID,
 		BlockOwnerDeletion: ptr.To(true),
 	}
-	for _, name := range secretNames {
-		s, err := r.Client.CoreV1().Secrets(r.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			continue
-		}
+	for _, s := range secrets {
 		s.OwnerReferences = append(s.OwnerReferences, owner)
 		if _, err := r.Client.CoreV1().Secrets(r.Namespace).Update(ctx, s, metav1.UpdateOptions{}); err != nil {
 			slog.Warn("image scan: cannot set ownerReference on copied pull secret (will rely on sweep)",
-				"secret", name, "error", err)
+				"secret", s.Name, "error", err)
 		}
 	}
 }
 
 // deleteCopiedSecrets removes copied Secrets, used when Job creation fails so we
 // don't leak credentials. Best-effort.
-func (r *Runner) deleteCopiedSecrets(ctx context.Context, secretNames []string) {
-	for _, name := range secretNames {
-		if err := r.Client.CoreV1().Secrets(r.Namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+func (r *Runner) deleteCopiedSecrets(ctx context.Context, secrets []*corev1.Secret) {
+	for _, s := range secrets {
+		if err := r.Client.CoreV1().Secrets(r.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			slog.Warn("image scan: cannot delete copied pull secret after job-create failure",
-				"secret", name, "error", err)
+				"secret", s.Name, "error", err)
 		}
 	}
 }

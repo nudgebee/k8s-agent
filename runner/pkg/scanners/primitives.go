@@ -68,12 +68,12 @@ func (r *Runner) handleScheduleJob(ctx context.Context, params map[string]any) (
 	// Opt-in: make the target workload's image-pull credentials available so the
 	// Job can pull a private image. Gated by AutoCopyPullSecrets — when off, the
 	// field is ignored and no credentials are read or copied.
-	var copiedPullSecrets []string
+	var copiedPullSecrets []*corev1.Secret
 	if r.AutoCopyPullSecrets && spec.ImagePullSecretsFrom != nil {
 		copiedPullSecrets = r.resolveAndCopyPullSecrets(ctx, *spec.ImagePullSecretsFrom, jobName)
-		for _, name := range copiedPullSecrets {
+		for _, s := range copiedPullSecrets {
 			job.Spec.Template.Spec.ImagePullSecrets = append(
-				job.Spec.Template.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
+				job.Spec.Template.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: s.Name})
 		}
 	}
 
