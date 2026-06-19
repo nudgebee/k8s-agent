@@ -94,6 +94,11 @@ stringData:
   # disabled the runner must NOT autodiscover a neighbouring namespace's OpenCost,
   # so the server side detects cost is off and takes over centrally.
   OPENCOST_ENABLED: {{ .Values.opencost.enabled | quote }}
+  {{- if .Values.opencost.endpoint }}
+  # Explicit OpenCost cost-model API endpoint (serves /healthz). Overrides
+  # in-cluster autodiscovery; set when OpenCost runs under non-standard labels.
+  OPENCOST_ENDPOINT: {{ .Values.opencost.endpoint | quote }}
+  {{- end }}
   {{- if .Values.globalConfig.prometheus_url }}
   PROMETHEUS_URL: {{ .Values.globalConfig.prometheus_url | quote }}
   {{- end }}
