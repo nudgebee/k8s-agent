@@ -50,8 +50,26 @@ type JobSpec struct {
 	Volumes      []corev1.Volume      `json:"volumes,omitempty"`       // for kube-bench /etc, /var/lib/etcd hostPath mounts; image_scanner's shared emptyDir
 	VolumeMounts []corev1.VolumeMount `json:"volume_mounts,omitempty"` // matching mounts inside the main container
 
+	// ImagePullSecretsFrom names a pod whose effective image-pull secrets the
+	// agent should make available to this Job, so a scan can pull the workload's
+	// private image. The agent resolves the pod's pod-level + ServiceAccount-level
+	// imagePullSecrets, copies those Secrets into the scanner namespace, and
+	// attaches them to the Job's pod (GC'd with the Job via ownerReference).
+	//
+	// Honored ONLY when the agent runs with auto-copy enabled
+	// (SCANNER_AUTO_COPY_PULL_SECRETS); ignored otherwise, so a server can always
+	// send it without assuming the agent's posture.
+	ImagePullSecretsFrom *PodRef `json:"image_pull_secrets_from,omitempty"`
+
 	// TimeoutHintSeconds is the api-server orchestrator's expected upper bound
 	// for this Job. Agent ignores it — the api-server polls and decides when to
 	// give up. Carried through purely so audit logs can record server intent.
 	TimeoutHintSeconds int `json:"timeout_hint_seconds,omitempty"`
+}
+
+// PodRef identifies a pod by namespace+name. Used by ImagePullSecretsFrom to
+// point the agent at the workload whose pull credentials a scan needs.
+type PodRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
 }

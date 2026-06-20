@@ -461,6 +461,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	if cfg.ScannersEnabled {
 		runner := scanners.NewRunner(typedKube, cfg.ScannerNamespace, cfg.ScannerServiceAccount)
+		runner.AutoCopyPullSecrets = cfg.ScannerAutoCopyPullSecrets
 		sh := scanners.Handlers(runner)
 		maps.Copy(handlers, sh)
 		// schedule_k8s_job / wait_for_k8s_job / get_k8s_job_logs are light-actions.
