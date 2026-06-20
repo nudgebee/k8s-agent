@@ -235,18 +235,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Warn("invalid OPENCOST_ENABLED, defaulting to enabled", "value", v, "err", err)
 		}
 	}
-	opencostURL := ""
-	if opencostEnabled {
-		// Mirrors OpenCostDiscovery.find_open_cost_url.
-		// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
-		opencostURL = os.Getenv("OPENCOST_ENDPOINT")
-		if opencostURL == "" {
-			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
-				opencostURL = u
-				logger.Info("opencost auto-discovered", "url", u)
-			}
-		}
-	} else {
+	// OPENCOST_ENDPOINT (if set) wins over autodiscovery; read once since env
+	// doesn't change. The URL itself is resolved per telemetry tick inside the
+	// Datasources closure below (not here) so the agent self-heals when OpenCost
+	// is deployed after the agent boots — resolving only at startup would latch
+	// the boot-time result (empty → opencostConnection stuck false) forever.
+	opencostEndpoint := os.Getenv("OPENCOST_ENDPOINT")
+	if !opencostEnabled {
 		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
 	}
 
@@ -924,6 +919,18 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				logsProvider, logsURL, logsOK, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				// Resolve OpenCost per tick (cached ~CacheTTL by the Discoverer) so a
+				// late-deployed OpenCost is picked up without an agent restart. Mirrors
+				// OpenCostDiscovery.find_open_cost_url: OPENCOST_ENDPOINT wins, else
+				// autodiscover — preferring the cost-model API port (9003, serves
+				// /healthz) over a UI port. Empty when OpenCost is disabled or absent.
+				opencostURL := ""
+				if opencostEnabled {
+					opencostURL = opencostEndpoint
+					if opencostURL == "" {
+						opencostURL = disc.FindFirstPreferPort(probeCtx, svcdiscover.OpencostSelectors, 9003)
+					}
+				}
 				return telemetry.Datasources{
 					PrometheusURL:              cfg.PrometheusURL,
 					AlertManagerURL:            cfg.AlertManagerURL,

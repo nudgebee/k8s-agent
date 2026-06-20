@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -106,10 +107,24 @@ func New(cs kubernetes.Interface, clusterDomain string) *Discoverer {
 // or "" if none. Negative results are cached too so we don't keep listing
 // services on every call.
 func (d *Discoverer) FindFirst(ctx context.Context, selectors []string) string {
+	return d.FindFirstPreferPort(ctx, selectors)
+}
+
+// FindFirstPreferPort is FindFirst with port preference: when a matched Service
+// exposes multiple ports, the first port whose number appears in preferredPorts
+// (in order) is used, falling back to the Service's first port. This matters for
+// OpenCost, whose Service can expose both the cost-model API (9003, which serves
+// /healthz) and a UI port (9090) — probing /healthz on the UI port reports an
+// otherwise-healthy OpenCost as down. Results (including misses) are cached per
+// (selectors, preferredPorts) for CacheTTL.
+func (d *Discoverer) FindFirstPreferPort(ctx context.Context, selectors []string, preferredPorts ...int32) string {
 	if d == nil || d.cs == nil {
 		return ""
 	}
 	cacheKey := strings.Join(selectors, "|")
+	for _, p := range preferredPorts {
+		cacheKey += fmt.Sprintf("#%d", p)
+	}
 	now := time.Now()
 
 	d.mu.Lock()
@@ -121,7 +136,7 @@ func (d *Discoverer) FindFirst(ctx context.Context, selectors []string) string {
 
 	url := ""
 	for _, sel := range selectors {
-		if u := d.findOne(ctx, sel); u != "" {
+		if u := d.findOne(ctx, sel, preferredPorts); u != "" {
 			url = u
 			break
 		}
@@ -133,7 +148,7 @@ func (d *Discoverer) FindFirst(ctx context.Context, selectors []string) string {
 	return url
 }
 
-func (d *Discoverer) findOne(ctx context.Context, selector string) string {
+func (d *Discoverer) findOne(ctx context.Context, selector string, preferredPorts []int32) string {
 	list, err := d.cs.CoreV1().Services("").List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil || len(list.Items) == 0 {
 		return ""
@@ -142,8 +157,22 @@ func (d *Discoverer) findOne(ctx context.Context, selector string) string {
 	if len(svc.Spec.Ports) == 0 {
 		return ""
 	}
-	port := svc.Spec.Ports[0].Port
+	port := selectPort(svc.Spec.Ports, preferredPorts)
 	return fmt.Sprintf("http://%s.%s.svc.%s:%d", svc.Name, svc.Namespace, d.clusterDomain, port)
+}
+
+// selectPort returns the first port whose number is in preferredPorts (in
+// preference order); if none match — or preferredPorts is empty — it returns the
+// Service's first port, preserving the original single-port behaviour.
+func selectPort(ports []corev1.ServicePort, preferredPorts []int32) int32 {
+	for _, want := range preferredPorts {
+		for i := range ports {
+			if ports[i].Port == want {
+				return want
+			}
+		}
+	}
+	return ports[0].Port
 }
 
 // Coalesce returns the first non-empty value. Used at startup when wiring

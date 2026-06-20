@@ -101,11 +101,86 @@ func TestNilDiscovererReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestFindFirstPreferPort_PicksAPIPortOverUI seeds an OpenCost Service whose
+// first port is the UI (9090) and second is the cost-model API (9003, /healthz).
+// Without a preference the first port wins and /healthz is probed on the UI port
+// — reporting a healthy OpenCost as down. With prefer 9003 the API port wins.
+func TestFindFirstPreferPort_PicksAPIPortOverUI(t *testing.T) {
+	cs := fake.NewClientset(
+		mkServicePorts("opencost", "opencost", map[string]string{"app": "opencost"}, 9090, 9003),
+	)
+	d := New(cs, "cluster.local")
+
+	// Default behaviour: first port (UI) — the bug.
+	if got, want := d.FindFirst(context.Background(), OpencostSelectors),
+		"http://opencost.opencost.svc.cluster.local:9090"; got != want {
+		t.Errorf("FindFirst got %q; want %q", got, want)
+	}
+	// With preference the cost-model API port wins.
+	if got, want := d.FindFirstPreferPort(context.Background(), OpencostSelectors, 9003),
+		"http://opencost.opencost.svc.cluster.local:9003"; got != want {
+		t.Errorf("FindFirstPreferPort got %q; want %q", got, want)
+	}
+}
+
+// TestFindFirstPreferPort_FallsBackToFirstPort verifies that when none of the
+// preferred ports are exposed, selection falls back to the Service's first port.
+func TestFindFirstPreferPort_FallsBackToFirstPort(t *testing.T) {
+	cs := fake.NewClientset(
+		mkServicePorts("opencost", "opencost", map[string]string{"app": "opencost"}, 9003),
+	)
+	d := New(cs, "cluster.local")
+	if got, want := d.FindFirstPreferPort(context.Background(), OpencostSelectors, 12345),
+		"http://opencost.opencost.svc.cluster.local:9003"; got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+}
+
+func TestSelectPort(t *testing.T) {
+	ports := func(ns ...int32) []corev1.ServicePort {
+		out := make([]corev1.ServicePort, len(ns))
+		for i, n := range ns {
+			out[i] = corev1.ServicePort{Port: n}
+		}
+		return out
+	}
+	cases := []struct {
+		name      string
+		ports     []corev1.ServicePort
+		preferred []int32
+		want      int32
+	}{
+		{"empty preference uses first", ports(9090, 9003), nil, 9090},
+		{"preferred present", ports(9090, 9003), []int32{9003}, 9003},
+		{"preference order honoured", ports(9090, 9003), []int32{9003, 9090}, 9003},
+		{"preferred absent falls back", ports(9090, 9003), []int32{8080}, 9090},
+		{"second preference matches", ports(9090, 9003), []int32{8080, 9090}, 9090},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := selectPort(tc.ports, tc.preferred); got != tc.want {
+				t.Errorf("selectPort = %d; want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func mkService(name, namespace string, port int32, labels map[string]string) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{{Port: port}},
 		},
+	}
+}
+
+func mkServicePorts(name, namespace string, labels map[string]string, ports ...int32) *corev1.Service {
+	sp := make([]corev1.ServicePort, len(ports))
+	for i, p := range ports {
+		sp[i] = corev1.ServicePort{Port: p}
+	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		Spec:       corev1.ServiceSpec{Ports: sp},
 	}
 }

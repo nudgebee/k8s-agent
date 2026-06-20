@@ -229,6 +229,11 @@ nodeAgent:
 # `--set opencost.enabled=true`.
 opencost:
   enabled: false
+  # Optional explicit OpenCost cost-model API endpoint (the one that serves
+  # /healthz, typically port 9003). Leave empty to autodiscover the in-cluster
+  # OpenCost Service by label; set it when OpenCost runs under non-standard
+  # labels that autodiscovery won't match. Maps to OPENCOST_ENDPOINT.
+  endpoint: ""
   nameOverride: ""
   fullnameOverride: ""
   opencost:
