@@ -26,13 +26,13 @@ RUN go build \
 # we test against. The binary is amd64; if the agent runs on arm64 nodes, the
 # build pipeline should pull the arm64 variant. Currently we only build amd64
 # images (.github/workflows/build-image.yaml).
-FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4 AS kubectl
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS kubectl
 ARG KUBECTL_VERSION=v1.32.1
 RUN apk add --no-cache curl ca-certificates && \
 	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
 	chmod +x /usr/local/bin/kubectl
 
-FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 WORKDIR /
 RUN apk add --no-cache ca-certificates && \
 	addgroup -S nonroot -g 65532 && \
