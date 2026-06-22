@@ -29,7 +29,9 @@ func Handlers(m *Mutator) map[string]dispatch.Handler {
 	if m.dynamic != nil {
 		hs["create_or_replace_alert_rule"] = wrap(m, handleCreateOrReplacePromRule)
 		hs["delete_alert_rule"] = wrapErr(m, handleDeletePromRule)
+		hs["create_workload"] = wrap(m, handleCreateWorkload)
 		hs["replace_workload"] = wrap(m, handleReplaceWorkload)
+		hs["delete_workload"] = wrap(m, handleDeleteWorkload)
 		// replica_rightsizing scales Deployment/StatefulSet/Rollout via the
 		// dynamic client. Delivered through the agent_task poller (trusted),
 		// so — like rightsizing_resource — it is deliberately NOT a lightAction.
@@ -224,6 +226,52 @@ func handleReplaceWorkload(ctx context.Context, m *Mutator, p map[string]any) (a
 	return map[string]any{
 		"updated": updated,
 		"message": fmt.Sprintf("%s/%s updated", kind, loc),
+	}, nil
+}
+
+// handleDeleteWorkload deletes a workload by kind/namespace/name. The delete UI
+// sends `kind` lowercased (KubernetesWorkloads.jsx); DeleteWorkload resolves the
+// kind case-insensitively, so no normalisation is needed here. DeleteWorkload
+// already returns the success {success, message} map.
+func handleDeleteWorkload(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	kind := str(p, "kind")
+	if kind == "" {
+		return nil, errors.New("delete_workload: kind required (Deployment|DaemonSet|StatefulSet|ReplicaSet|Rollout|NodePool|EC2NodeClass)")
+	}
+	return m.DeleteWorkload(ctx, kind, str(p, "namespace"), str(p, "name"))
+}
+
+// handleCreateWorkload mirrors handleReplaceWorkload's body handling (per-kind
+// field, `body`, or top-level manifest) but creates rather than replaces. The
+// kind is canonicalised before picking the per-kind body field so a caller that
+// sends a non-TitleCase kind still resolves the right field name.
+func handleCreateWorkload(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	kind := str(p, "kind")
+	if kind == "" {
+		return nil, errors.New("create_workload: kind required (Deployment|DaemonSet|StatefulSet|ReplicaSet|Rollout|NodePool|EC2NodeClass)")
+	}
+	bodyKind := kind
+	if canonical, _, ok := resolveWorkloadKind(kind); ok {
+		bodyKind = canonical
+	}
+	name := str(p, "name")
+	namespace := str(p, "namespace")
+	body := pickReplaceBody(bodyKind, p)
+	if body == nil {
+		return nil, fmt.Errorf("create_workload: body required (pass under %q, %q, or full manifest at top level)",
+			perKindBodyField(bodyKind), "body")
+	}
+	created, err := m.CreateWorkload(ctx, kind, namespace, name, body)
+	if err != nil {
+		return nil, err
+	}
+	loc := name
+	if namespace != "" {
+		loc = namespace + "/" + name
+	}
+	return map[string]any{
+		"created": created,
+		"message": fmt.Sprintf("%s/%s created", kind, loc),
 	}, nil
 }
 

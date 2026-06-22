@@ -372,3 +372,211 @@ func TestHandleReplaceWorkload_NotRegisteredWithoutDynamic(t *testing.T) {
 		t.Error("replace_workload registered without dynamic client — gating broken")
 	}
 }
+
+// ---------- delete_workload ----------
+
+// TestDeleteWorkload_Deployment_LowercaseKind covers the delete UI's casing:
+// KubernetesWorkloads.jsx sends kind.toLowerCase(), so "deployment" must resolve
+// to the Deployment GVR via the case-insensitive lookup.
+func TestDeleteWorkload_Deployment_LowercaseKind(t *testing.T) {
+	existing := seedExisting("apps/v1", "Deployment", "web", "shop", "100")
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme(), existing)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	got, err := m.DeleteWorkload(context.Background(), "deployment", "shop", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotMap := got.(map[string]any)
+	if gotMap["success"] != true {
+		t.Errorf("success = %v; want true", gotMap["success"])
+	}
+	if msg, _ := gotMap["message"].(string); !strings.Contains(msg, "Deployment/shop/web deleted") {
+		t.Errorf("message = %q; want canonical 'Deployment/shop/web deleted'", msg)
+	}
+	// The object must actually be gone from the tracker.
+	gvr := supportedWorkloadKinds["Deployment"].gvr
+	if _, err := dyn.Resource(gvr).Namespace("shop").Get(context.Background(), "web", metav1.GetOptions{}); err == nil {
+		t.Error("deployment still present after DeleteWorkload")
+	}
+}
+
+func TestDeleteWorkload_NodePool_ClusterScoped(t *testing.T) {
+	existing := seedExisting("karpenter.sh/v1", "NodePool", "default", "", "1")
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme(), existing)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	if _, err := m.DeleteWorkload(context.Background(), "NodePool", "", "default"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteWorkload_UnsupportedKind(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme())
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	_, err := m.DeleteWorkload(context.Background(), "Pod", "shop", "web")
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("err = %v; want 'not supported' rejection", err)
+	}
+}
+
+func TestDeleteWorkload_NoDynamicClient(t *testing.T) {
+	m := New(fake.NewClientset(), "", nil)
+	_, err := m.DeleteWorkload(context.Background(), "Deployment", "shop", "web")
+	if err == nil || !strings.Contains(err.Error(), "dynamic client") {
+		t.Errorf("err = %v; want 'dynamic client not configured'", err)
+	}
+}
+
+func TestDeleteWorkload_NamespacedRequiresNamespace(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme())
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	_, err := m.DeleteWorkload(context.Background(), "Deployment", "", "web")
+	if err == nil || !strings.Contains(err.Error(), "namespace required") {
+		t.Errorf("err = %v; want 'namespace required'", err)
+	}
+}
+
+// ---------- create_workload ----------
+
+func TestCreateWorkload_Deployment(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme())
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	body := newWorkloadManifest("apps/v1", "Deployment", "web", "shop", map[string]any{"replicas": int64(3)})
+	got, err := m.CreateWorkload(context.Background(), "Deployment", "shop", "web", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotMap := got.(map[string]any)
+	if spec, _ := gotMap["spec"].(map[string]any); spec["replicas"] != float64(3) {
+		t.Errorf("replicas = %v; want 3", gotMap["spec"])
+	}
+	// Verify it persisted.
+	gvr := supportedWorkloadKinds["Deployment"].gvr
+	if _, err := dyn.Resource(gvr).Namespace("shop").Get(context.Background(), "web", metav1.GetOptions{}); err != nil {
+		t.Errorf("created deployment not found: %v", err)
+	}
+}
+
+func TestCreateWorkload_NodePool_ClusterScoped(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme())
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	body := newWorkloadManifest("karpenter.sh/v1", "NodePool", "default", "", nil)
+	if _, err := m.CreateWorkload(context.Background(), "NodePool", "", "default", body); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateWorkload_UnsupportedKind(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme())
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	_, err := m.CreateWorkload(context.Background(), "Pod", "shop", "web", map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("err = %v; want 'not supported' rejection", err)
+	}
+}
+
+func TestCreateWorkload_NoDynamicClient(t *testing.T) {
+	m := New(fake.NewClientset(), "", nil)
+	_, err := m.CreateWorkload(context.Background(), "Deployment", "shop", "web", map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "dynamic client") {
+		t.Errorf("err = %v; want 'dynamic client not configured'", err)
+	}
+}
+
+// ---------- handler registration + dispatch shape ----------
+
+// TestHandlers_RegistersWorkloadMutationsWithDynamic verifies create/replace/
+// delete_workload are wired only when the dynamic client is present (they live
+// in the m.dynamic != nil block).
+func TestHandlers_RegistersWorkloadMutationsWithDynamic(t *testing.T) {
+	want := []string{"create_workload", "replace_workload", "delete_workload"}
+
+	bare := New(fake.NewClientset(), "", nil)
+	for _, a := range want {
+		if _, ok := Handlers(bare)[a]; ok {
+			t.Errorf("%q should not be registered without a dynamic client", a)
+		}
+	}
+
+	withDyn := New(fake.NewClientset(), "", nil)
+	withDyn.SetDynamic(dynamicfake.NewSimpleDynamicClient(workloadScheme()))
+	for _, a := range want {
+		if _, ok := Handlers(withDyn)[a]; !ok {
+			t.Errorf("missing %q with dynamic client set", a)
+		}
+	}
+}
+
+func TestHandleDeleteWorkload_HappyPath(t *testing.T) {
+	existing := seedExisting("apps/v1", "Deployment", "web", "shop", "1")
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dynamicfake.NewSimpleDynamicClient(workloadScheme(), existing))
+	hs := Handlers(m)
+
+	// kind lowercased, exactly as the delete UI sends it.
+	got, err := hs["delete_workload"](context.Background(), map[string]any{
+		"kind": "deployment", "namespace": "shop", "name": "web",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := got.(map[string]any); r["success"] != true {
+		t.Errorf("response = %v", got)
+	}
+}
+
+func TestHandleDeleteWorkload_KindRequired(t *testing.T) {
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dynamicfake.NewSimpleDynamicClient(workloadScheme()))
+	hs := Handlers(m)
+
+	_, err := hs["delete_workload"](context.Background(), map[string]any{"namespace": "shop", "name": "web"})
+	if err == nil || !strings.Contains(err.Error(), "kind required") {
+		t.Errorf("err = %v; want 'kind required'", err)
+	}
+}
+
+func TestHandleCreateWorkload_PerKindBody(t *testing.T) {
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dynamicfake.NewSimpleDynamicClient(workloadScheme()))
+	hs := Handlers(m)
+
+	// NodePool create UI shape: kind TitleCase, manifest under the per-kind
+	// `nodepool` field, cluster-scoped (empty namespace).
+	manifest := newWorkloadManifest("karpenter.sh/v1", "NodePool", "default", "", nil)
+	got, err := hs["create_workload"](context.Background(), map[string]any{
+		"kind": "NodePool", "namespace": "", "name": "default", "nodepool": manifest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := got.(map[string]any); r["created"] == nil {
+		t.Errorf("response missing created object: %v", got)
+	}
+}
+
+func TestHandleCreateWorkload_BodyRequired(t *testing.T) {
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dynamicfake.NewSimpleDynamicClient(workloadScheme()))
+	hs := Handlers(m)
+
+	_, err := hs["create_workload"](context.Background(), map[string]any{
+		"kind": "Deployment", "namespace": "shop", "name": "web",
+	})
+	if err == nil || !strings.Contains(err.Error(), "body required") {
+		t.Errorf("err = %v; want 'body required'", err)
+	}
+}

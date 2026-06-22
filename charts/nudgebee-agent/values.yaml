@@ -188,6 +188,11 @@ runner:
   nudgebee:
     endpoint: https://collector.nudgebee.com
     auth_secret_key: ""
+    # Relay Ed25519 public key. Lets the agent verify relay-signed requests and
+    # authorize UI-triggered workload mutations (delete/create/replace/restart/
+    # scale). The UI install command populates this from the server's
+    # SIGNING_PUBLIC_KEY. Empty = relay signatures ignored (mutations stay 401).
+    relay_signing_public_key: ''
   serviceAccount:
     annotations: {}
 nodeAgent:

@@ -156,6 +156,13 @@ type Config struct {
 	// fall back to HMAC signature only.
 	RSAPrivateKeyPath string
 
+	// RelaySigningPublicKey is the relay-server's global Ed25519 PUBLIC key(s)
+	// (comma/whitespace-separated for rotation). When set, the agent verifies
+	// relay-signed requests and authorizes any action carrying a valid relay
+	// signature — this is how UI-triggered mutations are authorized on native
+	// k8s agents. Unset = relay signatures ignored (back-compat).
+	RelaySigningPublicKey string
+
 	// ClickHouse — backs the `query_data` action. The chart sets these from
 	// the in-cluster ClickHouse Service the agent ships alongside.
 	ClickHouseEnabled  bool
@@ -172,6 +179,7 @@ type Config struct {
 func FromEnv() (*Config, error) {
 	c := &Config{
 		AuthSecretKey:         os.Getenv("NUDGEBEE_AUTH_SECRET_KEY"),
+		RelaySigningPublicKey: os.Getenv("RELAY_SIGNING_PUBLIC_KEY"),
 		RelayURL:              os.Getenv("WEBSOCKET_RELAY_ADDRESS"),
 		BackendEndpoint:       os.Getenv("NUDGEBEE_ENDPOINT"),
 		AccountID:             os.Getenv("ACCOUNT_ID"),

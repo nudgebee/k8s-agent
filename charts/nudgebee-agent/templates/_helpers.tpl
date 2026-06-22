@@ -156,6 +156,14 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: RSA_PRIVATE_KEY_PATH
       value: /etc/nudgebee/auth/prv
     {{- end }}
+    {{- if .Values.runner.nudgebee.relay_signing_public_key }}
+    # Relay Ed25519 public key — the agent verifies relay-signed requests with
+    # it and authorizes UI-triggered workload mutations. A valid relay signature
+    # is required for mutations; reads always fall back to the light-action path,
+    # so this is purely additive.
+    - name: RELAY_SIGNING_PUBLIC_KEY
+      value: {{ .Values.runner.nudgebee.relay_signing_public_key | quote }}
+    {{- end }}
     {{- if or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled }}
     {{- $clickhouseSecret := .Values.runner.clickhouse_secret }}
     {{- if not $clickhouseSecret }}
