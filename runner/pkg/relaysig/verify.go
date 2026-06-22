@@ -61,8 +61,9 @@ type Verifier struct {
 	publicKeys []ed25519.PublicKey
 	logger     *slog.Logger
 
-	seenNonces map[string]time.Time
-	nonceMu    sync.Mutex
+	seenNonces  map[string]time.Time
+	lastCleanup time.Time
+	nonceMu     sync.Mutex
 }
 
 // NewVerifier builds a verifier from one or more public keys (comma- or
@@ -120,10 +121,6 @@ func (v *Verifier) VerifyBody(bodyRaw []byte, env Envelope) error {
 		return fmt.Errorf("relay signature: relay_signed_at %s outside ±%s window", env.SignedAt, maxTimestampSkew)
 	}
 
-	if v.isReplayedNonce(env.Nonce) {
-		return fmt.Errorf("relay signature: nonce %s already seen (replay)", env.Nonce)
-	}
-
 	sig, err := base64.StdEncoding.DecodeString(env.Signature)
 	if err != nil {
 		return fmt.Errorf("relay signature: invalid signature encoding: %w", err)
@@ -140,10 +137,12 @@ func (v *Verifier) VerifyBody(bodyRaw []byte, env Envelope) error {
 		return fmt.Errorf("relay signature: invalid signature")
 	}
 
-	// Record the nonce only after a fully successful verification so a forged
-	// or stale message can't consume a nonce a legitimate retry might reuse.
-	v.recordNonce(env.Nonce)
-	return nil
+	// Check + record the nonce atomically, and only after a fully successful
+	// signature verification: a single locked operation closes the TOCTOU gap
+	// where two concurrent identical requests could both pass a separate
+	// pre-check before either records, and gating it behind verification means
+	// forged/stale messages can't burn a nonce a legitimate retry might reuse.
+	return v.checkAndRecordNonce(env.Nonce)
 }
 
 // parsePublicKeys splits on commas/whitespace and parses each entry. Returns an
@@ -218,25 +217,29 @@ func parsePublicKey(s string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(keyBytes), nil
 }
 
-func (v *Verifier) isReplayedNonce(nonce string) bool {
+// checkAndRecordNonce rejects a nonce it has already seen and otherwise records
+// it, both under a single lock so there is no check-then-record race. To keep
+// the hot path O(1), the O(N) eviction sweep runs at most once per minute once
+// the set exceeds maxNonces (entries older than 2× the skew window are pruned;
+// they can never pass the skew check again).
+func (v *Verifier) checkAndRecordNonce(nonce string) error {
 	v.nonceMu.Lock()
 	defer v.nonceMu.Unlock()
-	_, seen := v.seenNonces[nonce]
-	return seen
-}
-
-func (v *Verifier) recordNonce(nonce string) {
-	v.nonceMu.Lock()
-	defer v.nonceMu.Unlock()
-	v.seenNonces[nonce] = time.Now()
-	if len(v.seenNonces) > maxNonces {
-		cutoff := time.Now().Add(-maxTimestampSkew * 2)
+	if _, seen := v.seenNonces[nonce]; seen {
+		return fmt.Errorf("relay signature: nonce %s already seen (replay)", nonce)
+	}
+	now := time.Now()
+	v.seenNonces[nonce] = now
+	if len(v.seenNonces) > maxNonces && now.Sub(v.lastCleanup) > time.Minute {
+		v.lastCleanup = now
+		cutoff := now.Add(-maxTimestampSkew * 2)
 		for n, t := range v.seenNonces {
 			if t.Before(cutoff) {
 				delete(v.seenNonces, n)
 			}
 		}
 	}
+	return nil
 }
 
 func absDuration(d time.Duration) time.Duration {

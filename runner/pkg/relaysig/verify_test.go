@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"io"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -136,6 +138,37 @@ func TestVerifyBody_MultiKey(t *testing.T) {
 	body := []byte(vectorBody)
 	if err := v.VerifyBody(body, freshEnv(priv, body, "n5")); err != nil {
 		t.Fatalf("multi-key verify failed: %v", err)
+	}
+}
+
+// TestVerifyBody_ConcurrentReplay fires many goroutines verifying the SAME
+// valid signed message with the SAME nonce. Exactly one must succeed; the rest
+// must be rejected as replays. This guards the atomic check-and-record fix
+// against the TOCTOU race a separate pre-check would reopen.
+func TestVerifyBody_ConcurrentReplay(t *testing.T) {
+	priv := mustSeedKey(t, vectorSeedB64)
+	v, err := NewVerifier(vectorPubB64, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(vectorBody)
+	env := freshEnv(priv, body, "concurrent-nonce")
+
+	const n = 64
+	var wg sync.WaitGroup
+	var successes int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if err := v.VerifyBody(body, env); err == nil {
+				atomic.AddInt64(&successes, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if successes != 1 {
+		t.Fatalf("concurrent replay: %d goroutines succeeded, want exactly 1", successes)
 	}
 }
 
