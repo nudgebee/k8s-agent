@@ -54,6 +54,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/podrunner"
 	"github.com/nudgebee/nudgebee-agent/pkg/podshell"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
+	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 	"github.com/nudgebee/nudgebee-agent/pkg/rightsize"
 	"github.com/nudgebee/nudgebee-agent/pkg/scanners"
 	"github.com/nudgebee/nudgebee-agent/pkg/servicemap"
@@ -633,6 +634,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		validator.PrivateKey = priv
 		logger.Info("RSA partial-keys auth enabled", "key_path", cfg.RSAPrivateKeyPath)
 	}
+	// Relay-signature verification: when the relay's public key is provisioned,
+	// a valid relay signature authorizes any action (this is how UI mutations
+	// reach native k8s agents). Absent key = relay signatures ignored.
+	relayVerifier, err := relaysig.NewVerifier(cfg.RelaySigningPublicKey, logger)
+	if err != nil {
+		return fmt.Errorf("init relay signature verifier: %w", err)
+	}
+	validator.RelayVerifier = relayVerifier
 
 	// refresh_playbook hot-reloads the allowlist from the backend so we can
 	// add new actions to a running agent without a customer Helm upgrade.

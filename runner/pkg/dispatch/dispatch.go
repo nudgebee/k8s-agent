@@ -22,6 +22,7 @@ import (
 
 	"github.com/nudgebee/nudgebee-agent/pkg/auth"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
+	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
 // Handler is one action implementation. It receives a request-scoped context
@@ -239,16 +240,28 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 	// Parse the envelope as a generic map first so we can pass the body to the
 	// auth validator (which needs the raw map for canonical-JSON re-encoding).
 	var raw struct {
-		Body         map[string]any `json:"body"`
-		Signature    string         `json:"signature,omitempty"`
-		PartialAuthA string         `json:"partial_auth_a,omitempty"`
-		PartialAuthB string         `json:"partial_auth_b,omitempty"`
-		RequestID    string         `json:"request_id,omitempty"`
+		Body           map[string]any `json:"body"`
+		Signature      string         `json:"signature,omitempty"`
+		PartialAuthA   string         `json:"partial_auth_a,omitempty"`
+		PartialAuthB   string         `json:"partial_auth_b,omitempty"`
+		RequestID      string         `json:"request_id,omitempty"`
+		RelaySignature string         `json:"relay_signature,omitempty"`
+		RelaySignedAt  string         `json:"relay_signed_at,omitempty"`
+		RelayNonce     string         `json:"relay_nonce,omitempty"`
+		RelayKeyID     string         `json:"relay_key_id,omitempty"`
 	}
 	if err := json.Unmarshal(msg, &raw); err != nil {
 		d.cfg.Logger.Error("dispatch: failed to parse envelope", "err", err)
 		return
 	}
+
+	// Capture the raw `body` bytes separately (a struct can't share the "body"
+	// json tag with the decoded map). The relay signs these exact bytes, so the
+	// verifier must check them — never a re-marshaled map.
+	var bodyEnvelope struct {
+		Body json.RawMessage `json:"body"`
+	}
+	_ = json.Unmarshal(msg, &bodyEnvelope)
 
 	actionName, _ := raw.Body["action_name"].(string)
 	logger := d.cfg.Logger.With("action_name", actionName, "request_id", raw.RequestID)
@@ -260,6 +273,13 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 			Signature:    raw.Signature,
 			PartialAuthA: raw.PartialAuthA,
 			PartialAuthB: raw.PartialAuthB,
+			BodyRaw:      bodyEnvelope.Body,
+			RelaySig: relaysig.Envelope{
+				Signature: raw.RelaySignature,
+				SignedAt:  raw.RelaySignedAt,
+				Nonce:     raw.RelayNonce,
+				KeyID:     raw.RelayKeyID,
+			},
 		}
 		if err := d.auth.Validate(authReq); err != nil {
 			logger.Warn("dispatch: auth rejected", "err", err)

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -77,6 +78,114 @@ var supportedWorkloadKinds = map[string]workloadKindEntry{
 		namespaced:   false,
 		expectedKind: "EC2NodeClass",
 	},
+}
+
+// resolveWorkloadKind does a case-insensitive lookup of the user-facing kind
+// against supportedWorkloadKinds. Callers aren't consistent about casing: the
+// edit/create UI sends TitleCase ("Deployment", "NodePool") while the delete UI
+// sends `kind.toLowerCase()` ("deployment") — see
+// app/src/components/k8s/details/KubernetesWorkloads.jsx. It returns the
+// canonical map key alongside the entry so callers render messages and pick the
+// per-kind body field with the canonical spelling.
+func resolveWorkloadKind(kind string) (canonical string, entry workloadKindEntry, ok bool) {
+	for k, e := range supportedWorkloadKinds {
+		if strings.EqualFold(k, kind) {
+			return k, e, true
+		}
+	}
+	return "", workloadKindEntry{}, false
+}
+
+// DeleteWorkload deletes the named workload via the dynamic client, reusing
+// ReplaceWorkload's per-kind GVR + scope lookup. Propagation is Background so
+// the apiserver garbage-collects dependents (ReplicaSets/Pods) — matching
+// `kubectl delete deployment` rather than orphaning them.
+func (m *Mutator) DeleteWorkload(ctx context.Context, kind, namespace, name string) (any, error) {
+	if m.dynamic == nil {
+		return nil, errors.New("mutate: dynamic client not configured")
+	}
+	if name == "" {
+		return nil, errors.New("mutate: name required")
+	}
+	canonical, entry, ok := resolveWorkloadKind(kind)
+	if !ok {
+		return nil, fmt.Errorf("mutate: delete_workload not supported for kind %q", kind)
+	}
+	if entry.namespaced && namespace == "" {
+		return nil, fmt.Errorf("mutate: namespace required for %s", canonical)
+	}
+
+	prop := metav1.DeletePropagationBackground
+	opts := metav1.DeleteOptions{PropagationPolicy: &prop}
+	ri := m.dynamic.Resource(entry.gvr)
+	var err error
+	if entry.namespaced {
+		err = ri.Namespace(namespace).Delete(ctx, name, opts)
+	} else {
+		err = ri.Delete(ctx, name, opts)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("mutate: delete %s/%s: %w", canonical, name, err)
+	}
+
+	loc := name
+	if namespace != "" {
+		loc = namespace + "/" + name
+	}
+	return map[string]any{
+		"success": true,
+		"message": fmt.Sprintf("%s/%s deleted", canonical, loc),
+	}, nil
+}
+
+// CreateWorkload creates a new workload from the supplied manifest via the
+// dynamic client. It shares unstructuredFromBody + the per-kind GVR lookup with
+// ReplaceWorkload so the create/edit UI can send the same payload shape to
+// either action — the only difference is Create vs Update (no Get/ResourceVersion
+// dance, since there is no existing object). On success the apiserver-echoed
+// object is returned so the dispatch handler can render a success Finding.
+func (m *Mutator) CreateWorkload(ctx context.Context, kind, namespace, name string, body any) (any, error) {
+	if m.dynamic == nil {
+		return nil, errors.New("mutate: dynamic client not configured")
+	}
+	canonical, entry, ok := resolveWorkloadKind(kind)
+	if !ok {
+		return nil, fmt.Errorf("mutate: create_workload not supported for kind %q", kind)
+	}
+	if entry.namespaced && namespace == "" {
+		return nil, fmt.Errorf("mutate: namespace required for %s", canonical)
+	}
+
+	u, err := unstructuredFromBody(body)
+	if err != nil {
+		return nil, err
+	}
+	// Force kind/apiVersion so a body that omits them still targets the right
+	// GVR; name/namespace from params win over the body when provided (the
+	// delete/replace handlers do the same), otherwise we trust metadata.name.
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   entry.gvr.Group,
+		Version: entry.gvr.Version,
+		Kind:    entry.expectedKind,
+	})
+	if name != "" {
+		u.SetName(name)
+	}
+	if entry.namespaced {
+		u.SetNamespace(namespace)
+	}
+
+	ri := m.dynamic.Resource(entry.gvr)
+	var created *unstructured.Unstructured
+	if entry.namespaced {
+		created, err = ri.Namespace(namespace).Create(ctx, u, metav1.CreateOptions{})
+	} else {
+		created, err = ri.Create(ctx, u, metav1.CreateOptions{})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("mutate: create %s/%s: %w", canonical, u.GetName(), err)
+	}
+	return created.UnstructuredContent(), nil
 }
 
 // ReplaceWorkload runs a Replace (full-spec PUT) against the named

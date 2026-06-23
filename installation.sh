@@ -16,6 +16,7 @@ values=""
 alert_manager_url=""
 prometheus_org_id=""
 relay_address=""
+relay_signing_public_key=""
 collector_endpoint=""
 image_registry=""
 disable_opencost=""
@@ -40,6 +41,7 @@ usage() {
   echo "  -m <alert_manager_url> Alert manager URL"
   echo "  -r <prometheus-org-id> Prometheus org id"
   echo "  -w <relay_address>    WebSocket relay address (self-hosted)"
+  echo "  -S <relay_signing_public_key> Relay Ed25519 public key (authorizes UI workload mutations)"
   echo "  -c <collector_endpoint> Collector endpoint URL (self-hosted)"
   echo "  -i <image_registry>   Image registry (air-gapped/on-prem)"
   echo "  -x <disable_opencost> Disable OpenCost (true/false)"
@@ -50,7 +52,7 @@ usage() {
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:c:i:x:t:g:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -87,6 +89,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:c:i:x:t:g:" opt; do
       ;;
     w)
       relay_address="$OPTARG"
+      ;;
+    S)
+      relay_signing_public_key="$OPTARG"
       ;;
     c)
       collector_endpoint="$OPTARG"
@@ -304,6 +309,13 @@ if [ -n "$relay_address" ]; then
   relay_address_args=(--set "runner.relay_address=$relay_address")
 fi
 
+relay_signing_public_key_args=()
+if [ -n "$relay_signing_public_key" ]; then
+  # --set-string: the key may contain '=' (base64 padding) or spaces (ssh form),
+  # which plain --set would mis-parse.
+  relay_signing_public_key_args=(--set-string "runner.nudgebee.relay_signing_public_key=$relay_signing_public_key")
+fi
+
 collector_endpoint_args=()
 if [ -n "$collector_endpoint" ]; then
   collector_endpoint_args=(--set "runner.nudgebee.endpoint=$collector_endpoint")
@@ -341,6 +353,7 @@ helm_args+=(
   "${alert_manager_url_args[@]}"
   "${prometheus_org_id_args[@]}"
   "${relay_address_args[@]}"
+  "${relay_signing_public_key_args[@]}"
   "${collector_endpoint_args[@]}"
   "${image_registry_args[@]}"
   "${disable_opencost_args[@]}"

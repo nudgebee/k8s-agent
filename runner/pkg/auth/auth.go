@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/canonjson"
+	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
 // LoadPrivateKey reads a PEM-encoded RSA private key from disk. Supports
@@ -66,6 +67,12 @@ type Request struct {
 	Signature    string // HMAC mode
 	PartialAuthA string // RSA partial keys mode (encrypted, base64)
 	PartialAuthB string // RSA partial keys mode (encrypted, base64)
+
+	// RelaySig + BodyRaw drive the relay-signature path. BodyRaw is the exact
+	// bytes of the wire `body` field (a json.RawMessage) — NOT a re-marshaled
+	// Body map — so it matches the bytes the relay signed.
+	RelaySig relaysig.Envelope
+	BodyRaw  []byte
 }
 
 // Validator holds the agent's auth state.
@@ -89,6 +96,13 @@ type Validator struct {
 	// lightActionsAtomic, when non-nil, takes precedence over LightActions.
 	// Set via SetLightActions.
 	lightActionsAtomic atomic.Pointer[map[string]struct{}]
+
+	// RelayVerifier validates an Ed25519 relay signature over the raw body.
+	// When set and Enabled(), a present+valid relay signature authorizes ANY
+	// action (bypassing the HMAC/partial/lightAction modes). Nil or disabled =
+	// the relay signature is ignored and the request falls through to the
+	// existing modes, so reads keep working on un-keyed agents.
+	RelayVerifier *relaysig.Verifier
 }
 
 // SetLightActions atomically replaces the light-action allowlist. Concurrent
@@ -117,9 +131,30 @@ func (v *Validator) LightActionsSet() map[string]struct{} {
 	return v.LightActions
 }
 
-// Validate returns nil if the request is authentic per any of the three modes.
-// Mirrors the backend's dispatch logic.
+// Validate returns nil if the request is authentic per any of the supported
+// modes. Mirrors the backend's dispatch logic.
+//
+// Relay-signature handling is a non-fatal pre-check: a VALID relay signature
+// (verifier configured + enabled) authorizes any action; anything else — no
+// signature, no key, or a signature that fails verification (bad sig, clock
+// skew, replay) — FALLS THROUGH to the existing modes rather than hard-failing.
+//
+// Falling through is deliberate and load-bearing: the relay signs every k8s
+// request (reads included), so a hard 401 on a failed signature would break
+// reads that work today via lightActions — e.g. on an upgraded-but-unkeyed
+// agent, or under clock skew. With fall-through, reads always survive via
+// lightActions and only mutations (which aren't light actions) effectively
+// require a valid relay signature. Falling through never grants extra access:
+// a forged/invalid mutation signature still hits the lightAction check and is
+// rejected.
 func (v *Validator) Validate(r *Request) error {
+	if r.RelaySig.Present() && v.RelayVerifier != nil && v.RelayVerifier.Enabled() {
+		if err := v.RelayVerifier.VerifyBody(r.BodyRaw, r.RelaySig); err == nil {
+			return nil // valid relay signature authorizes any action
+		}
+		// Verification failed — fall through to the existing modes (reads keep
+		// working via lightActions; mutations get rejected there).
+	}
 	switch {
 	case r.Signature != "":
 		return v.validateHMAC(r)
