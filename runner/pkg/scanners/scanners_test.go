@@ -511,7 +511,7 @@ func TestGetJobLogs_RejectsMissingName(t *testing.T) {
 func TestHandlers_RegistersOnlyPrimitives(t *testing.T) {
 	r := NewRunner(fake.NewClientset(), "ns", "")
 	hs := Handlers(r)
-	want := []string{"schedule_k8s_job", "wait_for_k8s_job", "get_k8s_job_logs"}
+	want := []string{"schedule_k8s_job", "wait_for_k8s_job", "get_k8s_job_logs", "delete_k8s_job"}
 	if len(hs) != len(want) {
 		t.Fatalf("Handlers count = %d; want %d (primitives only)", len(hs), len(want))
 	}
