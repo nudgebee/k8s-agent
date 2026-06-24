@@ -476,6 +476,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		for name := range sh {
 			lightActions[name] = struct{}{}
 		}
+		// Background cleanup of finished Jobs/pods, independent of the cluster's
+		// TTLAfterFinished controller (which may be disabled in customer envs).
+		runner.StartReaper(ctx, logger)
 		logger.Info("scanners enabled", "namespace", cfg.ScannerNamespace, "actions", len(sh))
 	}
 

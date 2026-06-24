@@ -190,6 +190,31 @@ func (r *Runner) handleGetJobLogs(ctx context.Context, params map[string]any) (a
 	}, nil
 }
 
+// delete_k8s_job
+// --------------
+// Inbound params:  { "job_name": "<name>" }
+//
+// Outbound:        { "deleted": true }   (also returned when the Job is already gone)
+//
+// The orchestrator calls this right after it has fetched a Job's logs so the
+// Job (and its pods) are cleaned up promptly on the happy path, instead of
+// waiting out the TTL/reaper grace window. The background reaper is the backstop
+// for crash/timeout paths where this call never happens.
+//
+// Only the runner's own namespace is touched, and only by Job name handed back
+// from schedule_k8s_job — the agent never deletes arbitrary cluster objects.
+func (r *Runner) handleDeleteJob(ctx context.Context, params map[string]any) (any, error) {
+	jobName, _ := params["job_name"].(string)
+	if jobName == "" {
+		return nil, errors.New("delete_k8s_job: job_name is required")
+	}
+	if err := r.deleteJobCascade(ctx, jobName); err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("delete_k8s_job: %w", err)
+	}
+	slog.Info("delete_k8s_job: deleted", "job_name", jobName, "namespace", r.Namespace)
+	return map[string]any{"deleted": true}, nil
+}
+
 // decodeJobSpec re-marshals the params["spec"] map through encoding/json so
 // JobSpec's struct tags drive the decode (handles nested corev1.Volume /
 // VolumeMount cleanly without bespoke parsing).
