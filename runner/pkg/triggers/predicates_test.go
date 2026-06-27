@@ -321,6 +321,23 @@ func TestPodOOMKilled_DropsForOtherTerminationReasons(t *testing.T) {
 	}
 }
 
+func TestPodOOMKilled_FiresOnStateTerminatedWithoutRestart(t *testing.T) {
+	// restartPolicy:Never / Job pods OOM once: the kill lands in
+	// state.terminated with restartCount 0 and an empty lastState. The
+	// predicate must fire off state.terminated, not only lastState — the
+	// regression guard for the previously-missed Never-restart OOM.
+	pod := asObj(t, `{
+		"metadata":{"name":"oom-never","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","restartCount":0,
+			 "state":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-08T03:00:00Z"}}}
+		]}
+	}`)
+	if !podOOMKilledMatcher().Predicate(pod, nil) {
+		t.Error("OOMKilled in state.terminated (restartPolicy:Never, no lastState) must fire")
+	}
+}
+
 // ---------- pod_oom_killed enrichment ----------
 
 func TestOOMKilledEnrichBlocks_BuildsTableFromPodSpec(t *testing.T) {
@@ -741,6 +758,129 @@ func TestNodeNotReady_DoesNotFireWhenReady(t *testing.T) {
 	}`)
 	if nodeNotReadyMatcher().Predicate(ready, nil) {
 		t.Error("predicate must not fire for a Ready node")
+	}
+}
+
+// ---------- node_unschedulable ----------
+
+// cordonedNode builds a cordoned (spec.unschedulable) Node whose
+// unschedulable taint was added `ago` before now.
+func cordonedNode(t *testing.T, ago time.Duration) map[string]any {
+	t.Helper()
+	ts := time.Now().Add(-ago).UTC().Format(time.RFC3339)
+	return asObj(t, `{
+		"metadata":{"name":"n1"},
+		"spec":{"unschedulable":true,"taints":[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule","timeAdded":"`+ts+`"}]}
+	}`)
+}
+
+func TestNodeUnschedulable_FiresWhenCordonedBeyondThreshold(t *testing.T) {
+	node := cordonedNode(t, nodeUnschedulableMinDuration+5*time.Minute)
+	if !nodeUnschedulableMatcher().Predicate(node, nil) {
+		t.Error("predicate should fire once a Node has been cordoned past the threshold")
+	}
+}
+
+func TestNodeUnschedulable_DoesNotFireBeforeThreshold(t *testing.T) {
+	node := cordonedNode(t, 1*time.Minute) // brief maintenance/drain cordon
+	if nodeUnschedulableMatcher().Predicate(node, nil) {
+		t.Error("predicate must not fire for a brief cordon within the window")
+	}
+}
+
+func TestNodeUnschedulable_DoesNotFireWhenSchedulable(t *testing.T) {
+	node := asObj(t, `{"metadata":{"name":"n1"},"spec":{"unschedulable":false}}`)
+	if nodeUnschedulableMatcher().Predicate(node, nil) {
+		t.Error("predicate must not fire for a schedulable node")
+	}
+}
+
+func TestNodeUnschedulable_DoesNotFireBeforeTaintTimestampPresent(t *testing.T) {
+	// The unschedulable taint (our duration anchor) is added asynchronously
+	// after spec.unschedulable flips. Until it carries a timeAdded we can't
+	// confirm the cordon has outlasted the window, so the matcher must not
+	// fire — otherwise every cordon alerts on its first update event.
+	node := asObj(t, `{"metadata":{"name":"n1"},"spec":{"unschedulable":true}}`)
+	if nodeUnschedulableMatcher().Predicate(node, nil) {
+		t.Error("predicate must not fire while the unschedulable taint timestamp is absent")
+	}
+}
+
+// ---------- node_pressure ----------
+
+func TestNodePressure_FiresOnDiskPressure(t *testing.T) {
+	node := asObj(t, `{
+		"metadata":{"name":"n1"},
+		"status":{"conditions":[
+			{"type":"Ready","status":"True"},
+			{"type":"DiskPressure","status":"True","lastTransitionTime":"2026-05-08T03:00:00Z"}
+		]}
+	}`)
+	if !nodePressureMatcher().Predicate(node, nil) {
+		t.Error("predicate should fire when DiskPressure is True")
+	}
+}
+
+func TestNodePressure_FiresOnMemoryPressure(t *testing.T) {
+	node := asObj(t, `{
+		"metadata":{"name":"n1"},
+		"status":{"conditions":[{"type":"MemoryPressure","status":"True"}]}
+	}`)
+	if !nodePressureMatcher().Predicate(node, nil) {
+		t.Error("predicate should fire when MemoryPressure is True")
+	}
+}
+
+func TestNodePressure_DoesNotFireWhenNoPressure(t *testing.T) {
+	node := asObj(t, `{
+		"metadata":{"name":"n1"},
+		"status":{"conditions":[
+			{"type":"Ready","status":"True"},
+			{"type":"DiskPressure","status":"False"},
+			{"type":"MemoryPressure","status":"False"},
+			{"type":"PIDPressure","status":"False"}
+		]}
+	}`)
+	if nodePressureMatcher().Predicate(node, nil) {
+		t.Error("predicate must not fire when no pressure condition is True")
+	}
+}
+
+// ---------- pod_unschedulable ----------
+
+// unschedulablePod builds a Pending Pod whose PodScheduled condition has been
+// False since `ago` before now.
+func unschedulablePod(t *testing.T, ago time.Duration) map[string]any {
+	t.Helper()
+	ts := time.Now().Add(-ago).UTC().Format(time.RFC3339)
+	return asObj(t, `{
+		"metadata":{"name":"cpu-hog-0","namespace":"prod"},
+		"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","lastTransitionTime":"`+ts+`"}]}
+	}`)
+}
+
+func TestPodUnschedulable_FiresBeyondThreshold(t *testing.T) {
+	pod := unschedulablePod(t, podUnschedulableMinDuration+2*time.Minute)
+	if !podUnschedulableMatcher().Predicate(pod, nil) {
+		t.Error("predicate should fire once a Pod has been unschedulable past the threshold")
+	}
+}
+
+func TestPodUnschedulable_DoesNotFireBeforeThreshold(t *testing.T) {
+	// Brief unschedulable while the autoscaler provisions a node.
+	pod := unschedulablePod(t, 2*time.Minute)
+	if podUnschedulableMatcher().Predicate(pod, nil) {
+		t.Error("predicate must not fire while unschedulable is within the window")
+	}
+}
+
+func TestPodUnschedulable_DoesNotFireWhenScheduled(t *testing.T) {
+	pod := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"conditions":[{"type":"PodScheduled","status":"True"}]}
+	}`)
+	if podUnschedulableMatcher().Predicate(pod, nil) {
+		t.Error("predicate must not fire for a scheduled pod")
 	}
 }
 

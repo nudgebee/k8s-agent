@@ -23,6 +23,9 @@ func Builtins() []MatcherSpec {
 		imagePullBackoffMatcher(),
 		jobFailureMatcher(),
 		nodeNotReadyMatcher(),
+		nodeUnschedulableMatcher(),
+		nodePressureMatcher(),
+		podUnschedulableMatcher(),
 	}
 	// One matcher per babysitter-watched kind. We register them as
 	// separate specs (rather than `Kind: "Any"` with an in-predicate
@@ -187,12 +190,14 @@ func podOOMKilledMatcher() MatcherSpec {
 		FindingType:    "issue",
 		RateLimit:      time.Hour,
 		Predicate: func(obj, _ map[string]any) bool {
-			for _, ts := range oomKilledFinishedAts(obj) {
-				if ts != "" {
-					return true
-				}
-			}
-			return false
+			// Fire on either a current (state.terminated) or a prior
+			// (lastState.terminated) OOMKilled. A restartPolicy:Never pod or
+			// a Job OOMs once and records it in state.terminated with an empty
+			// lastState — checking only lastState missed those entirely.
+			// mostRecentOOMKilledContainerStatus already prefers state over
+			// lastState (the same logic the enricher uses), so this keeps the
+			// fire predicate and the enrichment consistent.
+			return mostRecentOOMKilledContainerStatus(obj) != nil
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			ns, name := metaNS(obj), metaName(obj)
@@ -446,6 +451,116 @@ func nodeNotReadyMatcher() MatcherSpec {
 	}
 }
 
+// nodeUnschedulableMinDuration skips brief operator cordons — drains,
+// upgrades and maintenance flip a Node unschedulable for a few minutes. Only
+// a Node left cordoned past this window is worth a Finding.
+const nodeUnschedulableMinDuration = 15 * time.Minute
+
+// nodeUnschedulableMatcher fires when a Node has been cordoned
+// (spec.unschedulable=true) for at least nodeUnschedulableMinDuration. There
+// is no Prometheus equivalent for cordon, so the agent is the only source.
+// The cordon episode is pinned in the fingerprint via the unschedulable
+// taint's timeAdded, so a re-cordon after an uncordon gets a fresh Finding.
+func nodeUnschedulableMatcher() MatcherSpec {
+	return MatcherSpec{
+		Name:           "node_unschedulable",
+		Kind:           "Node",
+		Operations:     []string{"update"},
+		AggregationKey: "node_unschedulable",
+		Priority:       "MEDIUM",
+		FindingType:    "issue",
+		RateLimit:      6 * time.Hour,
+		Predicate: func(obj, _ map[string]any) bool {
+			if !nodeUnschedulable(obj) {
+				return false
+			}
+			// The node.kubernetes.io/unschedulable taint (our duration anchor)
+			// is added asynchronously by the node controller after
+			// spec.unschedulable flips, so on the first cordon update it may
+			// be absent. Don't fire until we can read timeAdded and confirm the
+			// cordon has outlasted the window — otherwise a routine drain or
+			// upgrade fires immediately on the first update event.
+			ts := nodeUnschedulableSince(obj)
+			if ts == "" {
+				return false
+			}
+			since, ok := durationSinceRFC3339(ts)
+			if !ok {
+				return false
+			}
+			return since >= nodeUnschedulableMinDuration
+		},
+		FingerprintFn: func(obj map[string]any) string {
+			return fp("node_unschedulable", metaName(obj), nodeUnschedulableSince(obj))
+		},
+	}
+}
+
+// nodePressureMatcher fires when a Node reports Disk/Memory/PID pressure
+// (kubelet is reclaiming or evicting). The condition is read straight off the
+// watched Node object (KSM-derived, not node-exporter), so it survives a
+// degraded Prometheus rule engine — the failure mode that lets the upstream
+// KubeNodePressure rule miss it under load.
+func nodePressureMatcher() MatcherSpec {
+	return MatcherSpec{
+		Name:           "node_pressure",
+		Kind:           "Node",
+		Operations:     []string{"update"},
+		AggregationKey: "node_pressure",
+		Priority:       "HIGH",
+		FindingType:    "issue",
+		RateLimit:      6 * time.Hour,
+		Predicate: func(obj, _ map[string]any) bool {
+			return activeNodePressure(obj) != ""
+		},
+		FingerprintFn: func(obj map[string]any) string {
+			cond := activeNodePressure(obj)
+			return fp("node_pressure", metaName(obj), cond, nodeConditionLastTransition(obj, cond))
+		},
+	}
+}
+
+// podUnschedulableMinDuration is how long a Pod must stay unschedulable
+// before it's worth a Finding. A few minutes of PodScheduled=False is normal
+// while cluster-autoscaler / Karpenter provisions a node, so we wait past it.
+const podUnschedulableMinDuration = 10 * time.Minute
+
+// podUnschedulableMatcher fires when a Pod's PodScheduled condition has been
+// False (no node fits — insufficient resources, affinity, taints) for at
+// least podUnschedulableMinDuration. Pods that are scheduled but slow to
+// start (image pull, init, PVC) have PodScheduled=True and are handled by
+// other matchers, so they're excluded here.
+func podUnschedulableMatcher() MatcherSpec {
+	return MatcherSpec{
+		Name:           "pod_unschedulable",
+		Kind:           "Pod",
+		Operations:     []string{"update"},
+		AggregationKey: "pod_unschedulable",
+		Priority:       "HIGH",
+		FindingType:    "issue",
+		RateLimit:      6 * time.Hour,
+		Predicate: func(obj, _ map[string]any) bool {
+			ok, ts := podScheduledFalse(obj)
+			if !ok {
+				return false
+			}
+			since, parsed := durationSinceRFC3339(ts)
+			if !parsed {
+				return false
+			}
+			return since >= podUnschedulableMinDuration
+		},
+		FingerprintFn: func(obj map[string]any) string {
+			name := metaName(obj)
+			if owner := ResolveOwner(obj); owner.Name != "" {
+				name = owner.Name
+			}
+			_, ts := podScheduledFalse(obj)
+			return fp("pod_unschedulable", metaNS(obj), name, ts)
+		},
+	}
+}
+
 // ------- Babysitter (config-change with diff) -------
 
 // babysitterChangeMatcher implements resource_babysitter. Fires
@@ -600,6 +715,88 @@ func nodeReadyLastTransition(obj map[string]any) string {
 	return ""
 }
 
+// nodeConditionStatus returns the status ("True"/"False"/"Unknown") of the
+// named Node condition, or "" when absent.
+func nodeConditionStatus(obj map[string]any, condType string) string {
+	st, _ := obj["status"].(map[string]any)
+	conds, _ := st["conditions"].([]any)
+	for _, c := range conds {
+		cm, _ := c.(map[string]any)
+		if t, _ := cm["type"].(string); t == condType {
+			s, _ := cm["status"].(string)
+			return s
+		}
+	}
+	return ""
+}
+
+// nodeConditionLastTransition returns the lastTransitionTime of the named
+// Node condition, or "" when absent.
+func nodeConditionLastTransition(obj map[string]any, condType string) string {
+	st, _ := obj["status"].(map[string]any)
+	conds, _ := st["conditions"].([]any)
+	for _, c := range conds {
+		cm, _ := c.(map[string]any)
+		if t, _ := cm["type"].(string); t == condType {
+			ts, _ := cm["lastTransitionTime"].(string)
+			return ts
+		}
+	}
+	return ""
+}
+
+// activeNodePressure returns the first Disk/Memory/PID pressure condition that
+// is True, or "" when the node is under no pressure.
+func activeNodePressure(obj map[string]any) string {
+	for _, cond := range []string{"DiskPressure", "MemoryPressure", "PIDPressure"} {
+		if nodeConditionStatus(obj, cond) == "True" {
+			return cond
+		}
+	}
+	return ""
+}
+
+// nodeUnschedulable reports whether the Node is cordoned (spec.unschedulable).
+func nodeUnschedulable(obj map[string]any) bool {
+	spec, _ := obj["spec"].(map[string]any)
+	u, _ := spec["unschedulable"].(bool)
+	return u
+}
+
+// nodeUnschedulableSince returns the timeAdded of the
+// node.kubernetes.io/unschedulable taint (set when a Node is cordoned), or ""
+// when absent.
+func nodeUnschedulableSince(obj map[string]any) string {
+	spec, _ := obj["spec"].(map[string]any)
+	taints, _ := spec["taints"].([]any)
+	for _, t := range taints {
+		tm, _ := t.(map[string]any)
+		if k, _ := tm["key"].(string); k == "node.kubernetes.io/unschedulable" {
+			ts, _ := tm["timeAdded"].(string)
+			return ts
+		}
+	}
+	return ""
+}
+
+// podScheduledFalse reports whether the Pod's PodScheduled condition is False
+// (the scheduler can't place it) and returns its lastTransitionTime.
+func podScheduledFalse(obj map[string]any) (bool, string) {
+	st, _ := obj["status"].(map[string]any)
+	conds, _ := st["conditions"].([]any)
+	for _, c := range conds {
+		cm, _ := c.(map[string]any)
+		if t, _ := cm["type"].(string); t == "PodScheduled" {
+			if s, _ := cm["status"].(string); s == "False" {
+				ts, _ := cm["lastTransitionTime"].(string)
+				return true, ts
+			}
+			return false, ""
+		}
+	}
+	return false, ""
+}
+
 // durationSinceRFC3339 parses an RFC3339 timestamp and returns how long
 // ago it was, or ok=false if the string is empty/unparseable. RFC3339Nano
 // is used so timestamps with fractional seconds parse too (the layout
@@ -638,32 +835,6 @@ func metaUID(obj map[string]any) string {
 func fp(parts ...string) string {
 	h := sha256.Sum256([]byte(strings.Join(parts, ":")))
 	return hex.EncodeToString(h[:])
-}
-
-// oomKilledFinishedAts returns {container_name: lastState.terminated.finishedAt}
-// for every container whose most recent termination was OOMKilled. The
-// pod_oom_killed predicate uses the presence of any non-empty entry as
-// the fire signal; we keep the timestamp on the value so the enricher
-// path can differentiate which container OOMed when a Pod has several.
-func oomKilledFinishedAts(obj map[string]any) map[string]string {
-	out := map[string]string{}
-	if obj == nil {
-		return out
-	}
-	for _, cs := range podContainerStatuses(obj) {
-		name, _ := cs["name"].(string)
-		ls, _ := cs["lastState"].(map[string]any)
-		term, _ := ls["terminated"].(map[string]any)
-		if term == nil {
-			continue
-		}
-		if reason, _ := term["reason"].(string); reason != "OOMKilled" {
-			continue
-		}
-		ts, _ := term["finishedAt"].(string)
-		out[name] = ts // empty ts is fine; oldObj will also have empty ts → no-op
-	}
-	return out
 }
 
 // mostRecentOOMKilledContainerStatus walks every container status
