@@ -138,6 +138,9 @@ func TestConvertNode(t *testing.T) {
 	if !strings.Contains(m["taints"].(string), "k=v:NoSchedule") {
 		t.Errorf("taints = %v; want substring k=v:NoSchedule", m["taints"])
 	}
+	if m["unschedulable"] != true {
+		t.Errorf("unschedulable = %v; want true (cordoned node)", m["unschedulable"])
+	}
 	info, _ := m["node_info"].(map[string]any)
 	system, _ := info["system"].(map[string]any)
 	if system["kubelet_version"] != "v1.32.0" {

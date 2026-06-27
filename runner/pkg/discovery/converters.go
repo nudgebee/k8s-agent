@@ -490,6 +490,7 @@ func convertNode(obj any) (any, bool) {
 		"internal_ip":        internal,
 		"external_ip":        external,
 		"taints":             taintString(n.Spec.Taints),
+		"unschedulable":      n.Spec.Unschedulable,
 		"conditions":         conditionString(n.Status.Conditions),
 		"memory_capacity":    mbFromResourceList(n.Status.Capacity, corev1.ResourceMemory),
 		"memory_allocatable": mbFromResourceList(n.Status.Allocatable, corev1.ResourceMemory),
