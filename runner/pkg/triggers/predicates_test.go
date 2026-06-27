@@ -795,11 +795,14 @@ func TestNodeUnschedulable_DoesNotFireWhenSchedulable(t *testing.T) {
 	}
 }
 
-func TestNodeUnschedulable_FiresWhenCordonedWithoutTaintTimestamp(t *testing.T) {
-	// unschedulable set but no taint timeAdded — treat as sustained.
+func TestNodeUnschedulable_DoesNotFireBeforeTaintTimestampPresent(t *testing.T) {
+	// The unschedulable taint (our duration anchor) is added asynchronously
+	// after spec.unschedulable flips. Until it carries a timeAdded we can't
+	// confirm the cordon has outlasted the window, so the matcher must not
+	// fire — otherwise every cordon alerts on its first update event.
 	node := asObj(t, `{"metadata":{"name":"n1"},"spec":{"unschedulable":true}}`)
-	if !nodeUnschedulableMatcher().Predicate(node, nil) {
-		t.Error("predicate should fire for an unschedulable node lacking a taint timestamp")
+	if nodeUnschedulableMatcher().Predicate(node, nil) {
+		t.Error("predicate must not fire while the unschedulable taint timestamp is absent")
 	}
 }
 

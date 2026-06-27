@@ -474,13 +474,19 @@ func nodeUnschedulableMatcher() MatcherSpec {
 			if !nodeUnschedulable(obj) {
 				return false
 			}
+			// The node.kubernetes.io/unschedulable taint (our duration anchor)
+			// is added asynchronously by the node controller after
+			// spec.unschedulable flips, so on the first cordon update it may
+			// be absent. Don't fire until we can read timeAdded and confirm the
+			// cordon has outlasted the window — otherwise a routine drain or
+			// upgrade fires immediately on the first update event.
 			ts := nodeUnschedulableSince(obj)
 			if ts == "" {
-				return true // cordoned but no taint timestamp — treat as sustained
+				return false
 			}
 			since, ok := durationSinceRFC3339(ts)
 			if !ok {
-				return true
+				return false
 			}
 			return since >= nodeUnschedulableMinDuration
 		},
