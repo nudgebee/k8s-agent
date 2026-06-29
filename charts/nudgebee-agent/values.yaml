@@ -190,9 +190,15 @@ runner:
     auth_secret_key: ""
     # Relay Ed25519 public key. Lets the agent verify relay-signed requests and
     # authorize UI-triggered workload mutations (delete/create/replace/restart/
-    # scale). The UI install command populates this from the server's
-    # SIGNING_PUBLIC_KEY. Empty = relay signatures ignored (mutations stay 401).
-    relay_signing_public_key: ''
+    # scale). Default is Nudgebee Cloud's relay key, paired with the
+    # `relay_address`/`endpoint` SaaS defaults above — so a plain `helm install`
+    # against Nudgebee Cloud authorizes mutations out of the box. The UI install
+    # command also sets this (--set-string) from the server's SIGNING_PUBLIC_KEY,
+    # which overrides the default. Override it when pointing `relay_address` at a
+    # self-hosted relay (use that relay's SIGNING_PUBLIC_KEY); comma-separate
+    # multiple keys during a key rotation. Empty = relay signatures ignored
+    # (mutations stay 401).
+    relay_signing_public_key: 'KhVqjHRomIZCykcVnxlCoZBUr932GqbaullQd4G/+Zs='
   serviceAccount:
     annotations: {}
 nodeAgent:
