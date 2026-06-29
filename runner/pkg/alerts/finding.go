@@ -404,8 +404,14 @@ func alertSubject(labels map[string]string) (string, string) {
 		{"deployment", "deployment"},
 		{"statefulset", "statefulset"},
 		{"daemonset", "daemonset"},
-		{"job", "job"},
-		{"hpa", "horizontalpodautoscaler"},
+		// `job_name` is the real kubernetes Job (kube-state-metrics emits it
+		// on kube_job_* series). The prometheus `job` label is a scrape
+		// target (kubelet, kube-state-metrics, …), NOT a resource — handled
+		// as a last-resort fallback below. Mirrors robusta's
+		// ResourceMapping(RobustaJob, "job", "job_name").
+		{"job_name", "job"},
+		{"horizontalpodautoscaler", "horizontalpodautoscaler"}, // canonical kube-state-metrics label
+		{"hpa", "horizontalpodautoscaler"},                     // relabel alias
 		{"persistentvolumeclaim", "persistentvolumeclaim"},
 		{"workload", "deployment"}, // some alerts emit a generic workload label
 		{"node", "node"},
@@ -415,6 +421,17 @@ func alertSubject(labels map[string]string) (string, string) {
 			return v, candidate.kind
 		}
 	}
+	// Prometheus `job` is a scrape target, not a kubernetes resource. It is
+	// present on every series the exporter emits, so using it as the subject
+	// mis-attributes resource alerts to the scraper — e.g.
+	// KubePersistentVolumeFillingUp carries job=kubelet alongside
+	// persistentvolumeclaim=<pvc>, and the PVC (handled above) is the real
+	// subject. Only treat `job` as the subject for self-targeting alerts
+	// (KubeSchedulerDown → job=kube-scheduler) where no more-specific label
+	// exists, and never for known exporters.
+	if v := labels["job"]; v != "" && !isScrapeExporter(v) {
+		return v, "job"
+	}
 	if v := labels["kubernetes_kind"]; v != "" {
 		// kubernetes_kind tells us the type but not the name — the labels
 		// above are the only source of name, so this is reachable only if
@@ -422,6 +439,19 @@ func alertSubject(labels map[string]string) (string, string) {
 		return "", strings.ToLower(v)
 	}
 	return "", ""
+}
+
+// isScrapeExporter reports whether a prometheus `job` label value names an
+// infrastructure scrape target (exporter) rather than a workload. These jobs
+// scrape OTHER resources' metrics (kubelet exposes PVC/volume stats,
+// kube-state-metrics exposes every object's state), so their name must never
+// become a finding subject.
+func isScrapeExporter(job string) bool {
+	switch strings.ToLower(job) {
+	case "kubelet", "kube-state-metrics", "node-exporter", "cadvisor":
+		return true
+	}
+	return strings.Contains(job, "kube-state-metrics") || strings.Contains(job, "node-exporter")
 }
 
 // severityToPriority maps Prometheus alert `severity` labels to the

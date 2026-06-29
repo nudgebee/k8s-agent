@@ -31,6 +31,22 @@ func TestBuilder_Alert_SubjectFallbackOrder(t *testing.T) {
 		{"daemonset", map[string]string{"alertname": "X", "daemonset": "ds"}, "ds", "daemonset"},
 		{"node only", map[string]string{"alertname": "X", "node": "n1"}, "n1", "node"},
 		{"hpa", map[string]string{"alertname": "X", "hpa": "h"}, "h", "horizontalpodautoscaler"},
+		// kube-state-metrics emits the full `horizontalpodautoscaler` label,
+		// alongside job=kube-state-metrics — the HPA is the subject.
+		{"hpa canonical label wins over scrape job", map[string]string{"alertname": "KubeHpaMaxedOut", "job": "kube-state-metrics", "horizontalpodautoscaler": "frontend", "namespace": "shop"}, "frontend", "horizontalpodautoscaler"},
+		// PVC alerts (KubePersistentVolumeFillingUp/Errors) carry the
+		// persistentvolumeclaim label alongside job=kubelet (the scrape
+		// target). The PVC is the subject, never the kubelet scraper.
+		{"pvc wins over scrape job", map[string]string{"alertname": "KubePersistentVolumeFillingUp", "job": "kubelet", "namespace": "hive", "persistentvolumeclaim": "dfs-hive-metastore-hdfs-datanode-0"}, "dfs-hive-metastore-hdfs-datanode-0", "persistentvolumeclaim"},
+		// Real k8s Job alerts (KubeJobFailed) come from kube-state-metrics:
+		// job_name is the Job, job=kube-state-metrics is the scraper.
+		{"job_name is the subject, not the scraper job", map[string]string{"alertname": "KubeJobFailed", "job": "kube-state-metrics", "job_name": "backup-1234", "namespace": "ops"}, "backup-1234", "job"},
+		// A bare exporter `job` is never a subject — falls through to the
+		// alertname placeholder with an empty subject type.
+		{"scrape exporter job is not a subject", map[string]string{"alertname": "KubeletTooManyPods", "job": "kubelet"}, "KubeletTooManyPods", ""},
+		// Self-targeting control-plane alerts: the job IS the component and
+		// no more-specific label exists, so it is a usable last resort.
+		{"control-plane job used as last resort", map[string]string{"alertname": "KubeSchedulerDown", "job": "kube-scheduler"}, "kube-scheduler", "job"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
