@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -100,8 +101,16 @@ func (r *Runner) handleScheduleJob(ctx context.Context, params map[string]any) (
 		if err := r.resumeJob(ctx, created.Name); err != nil {
 			// Couldn't release the Job; delete it so we don't leave a suspended Job
 			// idling forever (its owned pull-secret copies are GC'd along with it).
-			_ = r.Client.BatchV1().Jobs(r.Namespace).Delete(ctx, created.Name,
-				metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationBackground)})
+			// resumeJob most often fails because ctx was cancelled/timed out, so the
+			// cleanup Delete must run on a detached (but still bounded) context —
+			// reusing ctx would make the Delete fail immediately and leak the Job.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			if delErr := r.Client.BatchV1().Jobs(r.Namespace).Delete(cleanupCtx, created.Name,
+				metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationBackground)}); delErr != nil {
+				slog.Error("schedule_k8s_job: failed to delete suspended job after resume failure; it will idle until manual cleanup",
+					"job_name", created.Name, "error", delErr)
+			}
 			return nil, fmt.Errorf("schedule_k8s_job: resume suspended job: %w", err)
 		}
 	}
