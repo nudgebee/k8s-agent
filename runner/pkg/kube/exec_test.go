@@ -295,6 +295,38 @@ func TestKubectl_RejectsPipesAndRedirects(t *testing.T) {
 	}
 }
 
+func TestKubectl_Chained_AcceptsTrailingSemicolon(t *testing.T) {
+	// A trailing ";" is a valid shell no-op and must not be rejected.
+	bin, counter := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin}
+	out, err := k.Run(context.Background(), "kubectl get pods ;")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["exit_code"] != 0 {
+		t.Errorf("exit_code = %v; want 0", out["exit_code"])
+	}
+	if n := callCount(t, counter); n != 1 {
+		t.Errorf("segments executed = %d; want 1", n)
+	}
+}
+
+func TestKubectl_Chained_RespectsCancelledContext(t *testing.T) {
+	// A done context stops the chain before any kubectl runs and propagates the
+	// context error rather than reporting success.
+	bin, counter := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := k.Run(ctx, "kubectl get pods && kubectl get svc")
+	if err == nil {
+		t.Error("expected a context error")
+	}
+	if n := callCount(t, counter); n != 0 {
+		t.Errorf("no segment should run under a cancelled context; got %d", n)
+	}
+}
+
 func TestKubectl_RejectsEmptySegments(t *testing.T) {
 	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
 	for _, cmd := range []string{

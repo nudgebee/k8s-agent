@@ -181,6 +181,15 @@ func splitSegments(tokens []string) ([]cmdSegment, error) {
 			args = args[1:]
 		}
 		if len(args) == 0 {
+			// A trailing ";" is a valid shell no-op ("kubectl get pods ;") — drop it.
+			if op == ";" && nextOp == "" {
+				return nil
+			}
+			// Nothing but a prefix: an empty command or a bare "kubectl".
+			if op == "" && nextOp == "" {
+				return errors.New("kubectl: empty command after stripping prefix")
+			}
+			// A leading, trailing, or doubled && / || is genuinely malformed.
 			return errors.New("kubectl: empty command segment; && , || and ; each need a command on both sides")
 		}
 		segments = append(segments, cmdSegment{op: op, args: args})
@@ -234,14 +243,29 @@ func shouldRunSegment(op string, prevExit int) bool {
 	}
 }
 
+// execResult packages the aggregated stdout/stderr and the running exit code
+// into the map shape the action handler consumes.
+func execResult(stdout, stderr *bytes.Buffer, exitCode int) map[string]any {
+	return map[string]any{
+		"stdout":    stdout.String(),
+		"stderr":    stderr.String(),
+		"exit_code": exitCode,
+	}
+}
+
 // runSegments executes segments in order, honoring &&/||/; short-circuiting, and
 // aggregates their output. exit_code is the status of the last command that
 // actually ran (skipped segments carry the prior status forward, as in a shell).
+// A cancelled or timed-out context stops the chain and propagates its error.
 func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments []cmdSegment) (map[string]any, error) {
 	var stdout, stderr bytes.Buffer
 	exitCode := 0 // status carried between segments for &&/|| short-circuit
 
 	for i, seg := range segments {
+		// Don't start another kubectl once the context is done (deadline/cancel).
+		if err := ctx.Err(); err != nil {
+			return execResult(&stdout, &stderr, exitCode), err
+		}
 		if i > 0 && !shouldRunSegment(seg.op, exitCode) {
 			continue
 		}
@@ -260,24 +284,24 @@ func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments 
 			exitCode = -1
 		}
 
+		// A cancelled/timed-out context kills the process, so cmd.Run returns an
+		// ExitError that must NOT be mistaken for a normal non-zero kubectl exit
+		// (which we'd otherwise surface as data or, on the last segment, as
+		// success). Propagate the context error and stop the chain.
+		if err := ctx.Err(); err != nil {
+			return execResult(&stdout, &stderr, exitCode), err
+		}
+
 		if runErr != nil {
 			// kubectl returns non-zero for cases the caller may want to inspect
 			// (e.g. "not found"); surface those as data via exit_code. A real
 			// exec failure (binary missing) is a hard error and stops the chain.
 			var exitErr *exec.ExitError
 			if !errors.As(runErr, &exitErr) {
-				return map[string]any{
-					"stdout":    stdout.String(),
-					"stderr":    stderr.String(),
-					"exit_code": exitCode,
-				}, fmt.Errorf("kubectl exec: %w", runErr)
+				return execResult(&stdout, &stderr, exitCode), fmt.Errorf("kubectl exec: %w", runErr)
 			}
 		}
 	}
 
-	return map[string]any{
-		"stdout":    stdout.String(),
-		"stderr":    stderr.String(),
-		"exit_code": exitCode,
-	}, nil
+	return execResult(&stdout, &stderr, exitCode), nil
 }
