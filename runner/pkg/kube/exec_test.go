@@ -2,6 +2,9 @@ package kube
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -133,5 +136,175 @@ func TestKubectl_StripsLeadingKubectl(t *testing.T) {
 	}
 	if out["exit_code"] != 0 {
 		t.Errorf("got exit_code %v", out["exit_code"])
+	}
+}
+
+// fakeKubectl writes a stand-in kubectl script that logs each invocation's args
+// to a counter file and exits with the given code. Returns the binary path and
+// the counter path so tests can assert how many segments actually executed.
+func fakeKubectl(t *testing.T, exitCode int) (bin, counter string) {
+	t.Helper()
+	dir := t.TempDir()
+	counter = filepath.Join(dir, "calls.log")
+	bin = filepath.Join(dir, "kubectl.sh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit %d\n", counter, exitCode)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, counter
+}
+
+func callCount(t *testing.T, counter string) int {
+	t.Helper()
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return 0
+	}
+	return len(strings.Split(s, "\n"))
+}
+
+func TestKubectl_ChainedCommands_Issue33447(t *testing.T) {
+	// Regression for #33447: two valid kubectl commands joined with && used to
+	// collapse into one invocation (the second command's tokens became NAME args
+	// of the first), yielding "name cannot be provided when a selector is
+	// specified". Both segments must now run as separate kubectl processes.
+	bin, counter := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin}
+	cmd := "kubectl get pods -n default --field-selector status.phase=Failed -o wide && " +
+		"kubectl get pods -n default --field-selector status.phase=Succeeded -o wide"
+	out, err := k.Run(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out["exit_code"] != 0 {
+		t.Errorf("exit_code = %v; want 0", out["exit_code"])
+	}
+	if n := callCount(t, counter); n != 2 {
+		t.Errorf("segments executed = %d; want 2", n)
+	}
+}
+
+func TestKubectl_Chained_AcceptsSequentialOperators(t *testing.T) {
+	bin, _ := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin}
+	for _, cmd := range []string{
+		"kubectl get pods && kubectl get svc",
+		"kubectl get pods ; kubectl top nodes",
+		"kubectl get pods || describe deployment foo",
+		"get pods && get svc && top nodes",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err != nil {
+			t.Errorf("%s: unexpected error: %v", cmd, err)
+		}
+	}
+}
+
+func TestKubectl_Chained_ValidatesEverySegment(t *testing.T) {
+	// The read-only allowlist must hold for EACH chained command, not just the
+	// first — otherwise `get && delete` would bypass it. The whole chain is
+	// rejected before anything executes.
+	bin, counter := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin}
+	for _, cmd := range []string{
+		"kubectl get pods && kubectl delete pod foo",
+		"kubectl get pods ; kubectl scale deploy foo --replicas=0",
+		"kubectl delete pod foo || kubectl get pods", // mutating verb in the FIRST segment
+	} {
+		_, err := k.Run(context.Background(), cmd)
+		if err == nil {
+			t.Errorf("%s: expected rejection (mutating verb in a segment)", cmd)
+		}
+	}
+	if n := callCount(t, counter); n != 0 {
+		t.Errorf("no segment should have executed on rejection; got %d", n)
+	}
+}
+
+func TestKubectl_Chained_ShortCircuit(t *testing.T) {
+	tests := []struct {
+		name      string
+		exitCode  int
+		command   string
+		wantCalls int
+		wantExit  int
+	}{
+		{"&& stops on failure", 1, "get pods && get svc", 1, 1},
+		{"&& continues on success", 0, "get pods && get svc", 2, 0},
+		{"|| skips on success", 0, "get pods || get svc", 1, 0},
+		{"|| runs on failure", 1, "get pods || get svc", 2, 1},
+		{"; always runs both", 1, "get pods ; get svc", 2, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, counter := fakeKubectl(t, tc.exitCode)
+			k := &KubectlExecutor{BinaryPath: bin}
+			out, err := k.Run(context.Background(), tc.command)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if n := callCount(t, counter); n != tc.wantCalls {
+				t.Errorf("segments executed = %d; want %d", n, tc.wantCalls)
+			}
+			if out["exit_code"] != tc.wantExit {
+				t.Errorf("exit_code = %v; want %d", out["exit_code"], tc.wantExit)
+			}
+		})
+	}
+}
+
+func TestKubectl_Chained_AllowWrite_PermitsMutations(t *testing.T) {
+	bin, counter := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin, AllowWrite: true}
+	out, err := k.Run(context.Background(), "kubectl delete pod a && kubectl delete pod b")
+	if err != nil {
+		t.Fatalf("unexpected error with AllowWrite: %v", err)
+	}
+	if out["exit_code"] != 0 {
+		t.Errorf("exit_code = %v; want 0", out["exit_code"])
+	}
+	if n := callCount(t, counter); n != 2 {
+		t.Errorf("segments executed = %d; want 2", n)
+	}
+}
+
+func TestKubectl_RejectsPipesAndRedirects(t *testing.T) {
+	bin, counter := fakeKubectl(t, 0)
+	k := &KubectlExecutor{BinaryPath: bin}
+	for _, cmd := range []string{
+		"kubectl get pods | grep Running",
+		"kubectl get pods > out.txt",
+		"kubectl get pods >> out.txt",
+		"kubectl logs foo & ",
+	} {
+		_, err := k.Run(context.Background(), cmd)
+		if err == nil {
+			t.Errorf("%s: expected rejection (pipe/redirect)", cmd)
+		} else if !strings.Contains(err.Error(), "not supported") {
+			t.Errorf("%s: error %q should explain the operator is unsupported", cmd, err.Error())
+		}
+	}
+	if n := callCount(t, counter); n != 0 {
+		t.Errorf("no segment should have executed; got %d", n)
+	}
+}
+
+func TestKubectl_RejectsEmptySegments(t *testing.T) {
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl get pods &&",
+		"&& kubectl get pods",
+		"kubectl get pods ; ; kubectl get svc",
+		"kubectl get pods || || kubectl get svc",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err == nil {
+			t.Errorf("%s: expected rejection (empty command segment)", cmd)
+		}
 	}
 }
