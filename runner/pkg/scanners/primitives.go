@@ -9,11 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 )
 
 // schedule_k8s_job
@@ -68,23 +71,49 @@ func (r *Runner) handleScheduleJob(ctx context.Context, params map[string]any) (
 	// Opt-in: make the target workload's image-pull credentials available so the
 	// Job can pull a private image. Gated by AutoCopyPullSecrets — when off, the
 	// field is ignored and no credentials are read or copied.
-	var copiedPullSecrets []*corev1.Secret
+	//
+	// Ordering matters: the copies must be owned by the Job (so they are GC'd with
+	// it), but the ownerReference needs the Job's UID, and the agent has `create`
+	// but not `update` on secrets — so it can't attach the reference after the
+	// fact. We therefore create the Job SUSPENDED (its pod won't start, so it
+	// can't try to pull before the credentials exist), reference the not-yet-
+	// created copies on the pod, create those copies owned by the Job, then resume
+	// it.
+	var pendingPullSecrets []*corev1.Secret
 	if r.AutoCopyPullSecrets && spec.ImagePullSecretsFrom != nil {
-		copiedPullSecrets = r.resolveAndCopyPullSecrets(ctx, *spec.ImagePullSecretsFrom, jobName)
-		for _, s := range copiedPullSecrets {
+		pendingPullSecrets = r.resolvePullSecrets(ctx, *spec.ImagePullSecretsFrom, jobName)
+		for _, s := range pendingPullSecrets {
 			job.Spec.Template.Spec.ImagePullSecrets = append(
 				job.Spec.Template.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: s.Name})
+		}
+		if len(pendingPullSecrets) > 0 {
+			job.Spec.Suspend = ptr.To(true)
 		}
 	}
 
 	created, err := r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
-		// Don't leak the copied credentials if the Job never came up to own them.
-		r.deleteCopiedSecrets(ctx, copiedPullSecrets)
 		return nil, fmt.Errorf("schedule_k8s_job: create: %w", err)
 	}
-	// GC the copies with the Job (ownerReference; Job TTL cleans both up).
-	r.ownReferencedSecrets(ctx, copiedPullSecrets, created)
+
+	if len(pendingPullSecrets) > 0 {
+		r.createOwnedSecrets(ctx, pendingPullSecrets, created)
+		if err := r.resumeJob(ctx, created.Name); err != nil {
+			// Couldn't release the Job; delete it so we don't leave a suspended Job
+			// idling forever (its owned pull-secret copies are GC'd along with it).
+			// resumeJob most often fails because ctx was cancelled/timed out, so the
+			// cleanup Delete must run on a detached (but still bounded) context —
+			// reusing ctx would make the Delete fail immediately and leak the Job.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			if delErr := r.Client.BatchV1().Jobs(r.Namespace).Delete(cleanupCtx, created.Name,
+				metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationBackground)}); delErr != nil {
+				slog.Error("schedule_k8s_job: failed to delete suspended job after resume failure; it will idle until manual cleanup",
+					"job_name", created.Name, "error", delErr)
+			}
+			return nil, fmt.Errorf("schedule_k8s_job: resume suspended job: %w", err)
+		}
+	}
 
 	slog.Info("schedule_k8s_job: created",
 		"job_name", created.Name,
@@ -103,6 +132,16 @@ func (r *Runner) handleScheduleJob(ctx context.Context, params map[string]any) (
 		"job_name": created.Name,
 		"job_uuid": jobUUID,
 	}, nil
+}
+
+// resumeJob clears spec.suspend so the Job controller starts the Job's pod. Used
+// after the Job's copied pull secrets have been created. A strategic-merge patch
+// (rather than a read-modify-update) avoids clobbering any concurrent status
+// write and needs only `patch` on jobs, which the agent has.
+func (r *Runner) resumeJob(ctx context.Context, jobName string) error {
+	_, err := r.Client.BatchV1().Jobs(r.Namespace).Patch(
+		ctx, jobName, types.StrategicMergePatchType, []byte(`{"spec":{"suspend":false}}`), metav1.PatchOptions{})
+	return err
 }
 
 // wait_for_k8s_job
