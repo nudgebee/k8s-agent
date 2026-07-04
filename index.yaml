@@ -57,6 +57,54 @@ entries:
         - name: Source
           url: https://github.com/nudgebee/k8s-agent
     apiVersion: v2
+    appVersion: 0.1.5-rc-2
+    created: "2026-07-04T09:23:30.333444267Z"
+    dependencies:
+    - condition: opencost.enabled
+      name: opencost
+      repository: https://opencost.github.io/opencost-helm-chart
+      version: 2.0.1
+    - condition: opentelemetry-collector.enabled
+      name: clickhouse
+      repository: https://charts.bitnami.com/bitnami
+      version: 3.1.*
+    - condition: opentelemetry-collector.enabled
+      name: opentelemetry-collector
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.52.*
+    description: NudgeBee Kubernetes agent — connects your cluster to the NudgeBee
+      backend for observability, cost, and incident automation.
+    digest: 3fe0c11cb461209525ed6564299e1faee677163ee0d3ed1892c04f7ec90ef974
+    home: https://github.com/nudgebee/k8s-agent
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    keywords:
+    - kubernetes
+    - observability
+    - opentelemetry
+    - opencost
+    - monitoring
+    - clickhouse
+    - kubewatch
+    - sre
+    maintainers:
+    - email: support@nudgebee.com
+      name: NudgeBee
+      url: https://nudgebee.com
+    name: nudgebee-agent
+    sources:
+    - https://github.com/nudgebee/k8s-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.1.5-rc-2/nudgebee-agent-0.1.5-rc-2.tgz
+    version: 0.1.5-rc-2
+  - annotations:
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://app.nudgebee.com/help/docs/installation/agent/installation/
+        - name: Source
+          url: https://github.com/nudgebee/k8s-agent
+    apiVersion: v2
     appVersion: 0.1.5-rc-1
     created: "2026-06-29T08:41:30.980956982Z"
     dependencies:
@@ -4612,4 +4660,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2026-06-29T10:17:16.367765399Z"
+generated: "2026-07-04T09:23:30.334029554Z"
