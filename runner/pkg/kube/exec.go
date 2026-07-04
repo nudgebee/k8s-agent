@@ -100,35 +100,63 @@ var verbFlagsWithValue = map[string]struct{}{
 	"--client-key":            {},
 }
 
-// Run parses the command string, validates the verb against the allowlist,
-// and executes kubectl. Stdout, stderr, and exit code are returned together
-// — callers consume all three.
+// rejectedShellTokens are shell metacharacters we refuse rather than silently
+// mis-execute. kubectl is exec'd directly (no shell), so a pipe or redirect
+// would not do what the author expects — and worse, a pipe hands output to a
+// non-kubectl binary, escaping the per-command verb allowlist. Sequential
+// chaining (&&, ||, ;) IS supported (see runSegments); these are not.
+var rejectedShellTokens = map[string]struct{}{
+	"|": {}, "|&": {},
+	">": {}, ">>": {}, "<": {}, "<<": {}, "<<<": {},
+	"&": {}, "&>": {}, "&>>": {},
+}
+
+// segmentSeparators are the sequential list operators that may chain kubectl
+// commands. They map to shell short-circuit semantics in shouldRunSegment.
+var segmentSeparators = map[string]struct{}{
+	"&&": {}, "||": {}, ";": {},
+}
+
+// cmdSegment is one kubectl invocation within a chained command, together with
+// the operator that precedes it ("" for the first segment).
+type cmdSegment struct {
+	op   string   // "", "&&", "||", ";"
+	args []string // verb + args, leading "kubectl" already stripped
+}
+
+// Run parses the command string, validates the verb of every chained segment
+// against the allowlist, and executes kubectl. A command may chain multiple
+// invocations with &&, || and ; (matching shell short-circuit semantics);
+// pipes and redirects are rejected. Stdout, stderr, and exit code are returned
+// together — callers consume all three.
 func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]any, error) {
 	if command == "" {
 		return nil, errors.New("kubectl: command is required")
 	}
-	args, err := shlex.Split(command)
+	tokens, err := shlex.Split(command)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl: parse command: %w", err)
 	}
 
-	// Strip a leading "kubectl" if the caller included it.
-	if len(args) > 0 && args[0] == "kubectl" {
-		args = args[1:]
-	}
-	if len(args) == 0 {
-		return nil, errors.New("kubectl: empty command after stripping prefix")
+	// Reject pipes/redirects up front. shlex yields these as standalone tokens,
+	// so an operator quoted inside an argument (e.g. a label value) is untouched.
+	for _, t := range tokens {
+		if _, bad := rejectedShellTokens[t]; bad {
+			return nil, fmt.Errorf("kubectl: shell operator %q is not supported; chain commands with && , || or ; (no pipes or redirects)", t)
+		}
 	}
 
-	// Resolve the verb past any leading global flags so `kubectl -n ns get
-	// pods` validates as "get", not "-n".
-	verb := firstVerb(args)
-	if verb == "" {
-		return nil, errors.New("kubectl: no verb found (only flags supplied)")
+	segments, err := splitSegments(tokens)
+	if err != nil {
+		return nil, err
 	}
-	if !k.AllowWrite {
-		if _, ok := allowedKubectlVerbs[verb]; !ok {
-			return nil, fmt.Errorf("kubectl: verb %q not in read-only allowlist; enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", verb)
+
+	// Validate every segment BEFORE running any, so a chain such as
+	// `get pods && delete pod foo` is rejected atomically — the read-only verb
+	// allowlist must hold for each command, not merely the first one.
+	for _, seg := range segments {
+		if err := k.validateSegment(seg.args); err != nil {
+			return nil, err
 		}
 	}
 
@@ -136,35 +164,144 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 	if bin == "" {
 		bin = "kubectl"
 	}
+	return k.runSegments(ctx, bin, segments)
+}
 
-	var stdout, stderr bytes.Buffer
-	// args are validated upstream against a read-verb allowlist
-	// (pkg/kube/dynamic.go) before reaching this shell-out.
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // verb-allowlist enforced
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+// splitSegments partitions shlex tokens into command segments on the sequential
+// operators && || ; . A leading "kubectl" is stripped from each segment. Empty
+// segments (a leading/trailing/doubled operator) are an error.
+func splitSegments(tokens []string) ([]cmdSegment, error) {
+	var segments []cmdSegment
+	op := "" // operator preceding the segment currently being accumulated
+	var cur []string
 
-	// ProcessState is nil if the process never started (e.g. kubectl not
-	// on PATH); the real-exec-failure branch below turns that into an error.
-	exitCode := -1
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
+	flush := func(nextOp string) error {
+		args := cur
+		if len(args) > 0 && args[0] == "kubectl" {
+			args = args[1:]
+		}
+		if len(args) == 0 {
+			// A trailing ";" is a valid shell no-op ("kubectl get pods ;") — drop it.
+			if op == ";" && nextOp == "" {
+				return nil
+			}
+			// Nothing but a prefix: an empty command or a bare "kubectl".
+			if op == "" && nextOp == "" {
+				return errors.New("kubectl: empty command after stripping prefix")
+			}
+			// A leading, trailing, or doubled && / || is genuinely malformed.
+			return errors.New("kubectl: empty command segment; && , || and ; each need a command on both sides")
+		}
+		segments = append(segments, cmdSegment{op: op, args: args})
+		op = nextOp
+		cur = nil
+		return nil
 	}
-	out := map[string]any{
+
+	for _, t := range tokens {
+		if _, isSep := segmentSeparators[t]; isSep {
+			if err := flush(t); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		cur = append(cur, t)
+	}
+	if err := flush(""); err != nil {
+		return nil, err
+	}
+	return segments, nil
+}
+
+// validateSegment resolves the verb past leading global flags and enforces the
+// read-only allowlist when write mode is off.
+func (k *KubectlExecutor) validateSegment(args []string) error {
+	verb := firstVerb(args)
+	if verb == "" {
+		return errors.New("kubectl: no verb found (only flags supplied)")
+	}
+	if !k.AllowWrite {
+		if _, ok := allowedKubectlVerbs[verb]; !ok {
+			return fmt.Errorf("kubectl: verb %q not in read-only allowlist; enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", verb)
+		}
+	}
+	return nil
+}
+
+// shouldRunSegment applies shell short-circuit semantics: a segment after && runs
+// only when the previous command succeeded, after || only when it failed, and
+// after ; always. &&/|| are equal-precedence and left-associative, so evaluating
+// left-to-right against the carried exit code reproduces bash for mixed chains.
+func shouldRunSegment(op string, prevExit int) bool {
+	switch op {
+	case "&&":
+		return prevExit == 0
+	case "||":
+		return prevExit != 0
+	default: // ";" — unconditional
+		return true
+	}
+}
+
+// execResult packages the aggregated stdout/stderr and the running exit code
+// into the map shape the action handler consumes.
+func execResult(stdout, stderr *bytes.Buffer, exitCode int) map[string]any {
+	return map[string]any{
 		"stdout":    stdout.String(),
 		"stderr":    stderr.String(),
 		"exit_code": exitCode,
 	}
-	// kubectl returns non-zero for cases the caller may want to inspect
-	// (e.g. "not found"); surface as data, not Go error.
-	if runErr != nil {
-		// Real exec failure (e.g. binary not found) is a hard error.
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			return out, nil
+}
+
+// runSegments executes segments in order, honoring &&/||/; short-circuiting, and
+// aggregates their output. exit_code is the status of the last command that
+// actually ran (skipped segments carry the prior status forward, as in a shell).
+// A cancelled or timed-out context stops the chain and propagates its error.
+func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments []cmdSegment) (map[string]any, error) {
+	var stdout, stderr bytes.Buffer
+	exitCode := 0 // status carried between segments for &&/|| short-circuit
+
+	for i, seg := range segments {
+		// Don't start another kubectl once the context is done (deadline/cancel).
+		if err := ctx.Err(); err != nil {
+			return execResult(&stdout, &stderr, exitCode), err
 		}
-		return out, fmt.Errorf("kubectl exec: %w", runErr)
+		if i > 0 && !shouldRunSegment(seg.op, exitCode) {
+			continue
+		}
+
+		// Verb allowlist enforced per segment in validateSegment above.
+		cmd := exec.CommandContext(ctx, bin, seg.args...) //nolint:gosec // verb-allowlist enforced per segment
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+
+		// ProcessState is nil if the process never started (e.g. kubectl not on
+		// PATH); the real-exec-failure branch below turns that into an error.
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		} else {
+			exitCode = -1
+		}
+
+		// A cancelled/timed-out context kills the process, so cmd.Run returns an
+		// ExitError that must NOT be mistaken for a normal non-zero kubectl exit
+		// (which we'd otherwise surface as data or, on the last segment, as
+		// success). Propagate the context error and stop the chain.
+		if err := ctx.Err(); err != nil {
+			return execResult(&stdout, &stderr, exitCode), err
+		}
+
+		if runErr != nil {
+			// kubectl returns non-zero for cases the caller may want to inspect
+			// (e.g. "not found"); surface those as data via exit_code. A real
+			// exec failure (binary missing) is a hard error and stops the chain.
+			var exitErr *exec.ExitError
+			if !errors.As(runErr, &exitErr) {
+				return execResult(&stdout, &stderr, exitCode), fmt.Errorf("kubectl exec: %w", runErr)
+			}
+		}
 	}
-	return out, nil
+
+	return execResult(&stdout, &stderr, exitCode), nil
 }
