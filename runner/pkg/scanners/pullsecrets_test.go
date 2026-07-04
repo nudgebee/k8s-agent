@@ -86,6 +86,12 @@ func TestAutoCopyPullSecrets_CopiesRegistrySecretsAndAttaches(t *testing.T) {
 	if got := len(jobs.Items[0].Spec.Template.Spec.ImagePullSecrets); got != 2 {
 		t.Errorf("job imagePullSecrets = %d; want 2", got)
 	}
+	// The Job is created suspended (so its pod can't pull before the copied
+	// credentials exist) and must be resumed once they do — it must not be left
+	// suspended, or the scan never runs.
+	if s := jobs.Items[0].Spec.Suspend; s != nil && *s {
+		t.Errorf("job left suspended after schedule; resume did not run")
+	}
 }
 
 func TestAutoCopyPullSecrets_DisabledIgnoresField(t *testing.T) {
