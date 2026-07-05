@@ -7,7 +7,7 @@
                   /____/                       
 ============================================================================
 
-Thank you for installing {{ .Chart.Name | title }} {{ .Chart.AppVersion }}
+Thank you for installing {{ .Chart.Name | title }} {{ .Chart.Version }}
 
 Visit the web UI at: https://app.nudgebee.com
 

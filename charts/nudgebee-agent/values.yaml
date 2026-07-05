@@ -61,7 +61,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-07-04T08-07-20_16e73b6bee276ad9e112b06f69d8a88f91e52ec1
+    tag: 2026-07-04T11-16-26_e1730394cb5e420b38fb79351f2a23ab46490ede
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
