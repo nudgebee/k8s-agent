@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "nudgebee-agent",
+  "description": "Top-level values accepted by the nudgebee-agent chart. Rejects unknown top-level keys (e.g. typos, or keys copied from unrelated charts/docs) so a misconfigured value fails at `helm install`/`upgrade` time instead of silently no-oping.",
+  "type": "object",
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "enablePrometheusStack": { "type": "boolean" },
+    "automountServiceAccountToken": { "type": "boolean" },
+    "globalConfig": { "type": "object" },
+    "enableServiceMonitors": { "type": "boolean" },
+    "kubewatch": { "type": "object" },
+    "runnerServiceAccount": { "type": "object" },
+    "runner": { "type": "object" },
+    "nodeAgent": { "type": "object" },
+    "opencost": { "type": "object" },
+    "rsa": { "type": ["object", "null"] },
+    "openshift": { "type": "object" },
+    "opentelemetry-collector": { "type": "object" },
+    "clickhouse": { "type": "object" },
+    "alertmanager": { "type": "object" }
+  },
+  "additionalProperties": false
+}
