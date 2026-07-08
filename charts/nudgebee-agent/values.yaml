@@ -153,7 +153,11 @@ runner:
   signoz:
     # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
     url: ""
+    # Auth: either apiKey (SIGNOZ-API-KEY header) or user/password
+    # (JWT via /api/v1/login). apiKey takes precedence when both are set.
     apiKey: ""
+    user: ""
+    password: ""
   jaeger:
     # In-cluster Jaeger query endpoint. Set when the account uses
     # traces=jaeger-via-agent so the agent can serve jaeger_query_* actions the

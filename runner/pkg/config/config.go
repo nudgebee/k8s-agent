@@ -39,8 +39,10 @@ type Config struct {
 	ElasticsearchEnabled  bool // ELASTICSEARCH_ENABLED; default true when URL is set
 
 	// Signoz
-	SignozURL    string
-	SignozAPIKey string
+	SignozURL      string
+	SignozAPIKey   string
+	SignozUser     string
+	SignozPassword string
 
 	// Jaeger
 	JaegerURL string
@@ -199,6 +201,8 @@ func FromEnv() (*Config, error) {
 		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", true),
 		SignozURL:            os.Getenv("SIGNOZ_URL"),
 		SignozAPIKey:         os.Getenv("SIGNOZ_API_KEY"),
+		SignozUser:           os.Getenv("SIGNOZ_USER"),
+		SignozPassword:       os.Getenv("SIGNOZ_PASSWORD"),
 		// JAEGER_URL drives the jaeger read-proxy handlers + light-action
 		// allowlist. Fall back to JAEGER_QUERY_URL (the var the telemetry
 		// heartbeat uses to tell the backend jaeger is enabled) so a

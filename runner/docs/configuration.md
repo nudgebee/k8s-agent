@@ -52,6 +52,7 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | `ELASTICSEARCH_USERNAME` / `_PASSWORD` | optional | Basic auth (one of these or `_APIKEY` is needed if ES requires auth) |
 | `ELASTICSEARCH_APIKEY` | optional | Alternative to user/pass |
 | `SIGNOZ_URL` / `SIGNOZ_API_KEY` | optional | `signoz_*` actions; API key sent as `SIGNOZ-API-KEY` header |
+| `SIGNOZ_USER` / `SIGNOZ_PASSWORD` | optional | Alternative auth: JWT minted via `/api/v1/login` (used when `SIGNOZ_API_KEY` is unset) |
 | `JAEGER_URL` | optional | `jaeger_*` actions |
 | `CHRONOSPHERE_URL` / `CHRONOSPHERE_API_KEY` | optional | `chronosphere_query_traces`; API key sent as `Authorization: Bearer` |
 | `HTTP_PROXY_TARGETS` | optional | `name=url;name=url` for `http_proxy_request` named targets |
