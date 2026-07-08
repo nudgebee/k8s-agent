@@ -979,6 +979,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
 					LogProviderConfig:          logCfg,
+					PrometheusConnected:        prometheusConnected(probeCtx, promClient, logger),
 					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
@@ -1127,6 +1128,33 @@ func (a *grafanaAdapter) HandlePrometheus(ctx context.Context, r *dispatch.Grafa
 		Body:          r.Body,
 		Header:        r.Header,
 	})
+}
+
+// prometheusConnected reports whether the agent can actually query Prometheus,
+// using the authenticated prometheus client (which carries PROMETHEUS_HEADERS).
+// It runs a trivial `vector(1)` query instead of GET /-/healthy so query-only
+// backends that don't serve the Prometheus admin/health endpoints and require
+// auth — Chronosphere, Thanos Query, Grafana Mimir, Amazon Managed Prometheus —
+// are reported Connected when metric queries work. Returns false on any error
+// so a broken backend shows Disconnected rather than panicking the tick.
+func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) bool {
+	if c == nil || c.BaseURL == "" {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	raw, err := c.Query(cctx, "vector(1)", "", "")
+	if err != nil {
+		logger.Debug("prometheus health query failed", "err", err)
+		return false
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	return resp.Status == "success"
 }
 
 // queryNodeAgentCount

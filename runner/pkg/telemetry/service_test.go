@@ -17,9 +17,8 @@ import (
 // and verifies the service POSTs the expected wire shape to /v1/k8s/telemetry —
 // keys the collector reads plus the URLs the UI
 // shows. Confirms:
-//   - in-package probes (Prometheus /-/healthy, AlertManager /-/healthy) flip
-//     *Connection bools correctly
-//   - caller-provided LogsProviderStatus / NodeAgentCount round-trip
+//   - AlertManager /-/healthy in-package probe flips its Connection bool
+//   - caller-provided PrometheusConnected / LogsProviderStatus / NodeAgentCount round-trip
 //   - Authorization header is bare base64 (no "Basic " prefix)
 //   - URL set + probe down → Connection=false but URL still emitted
 //   - traceProvider mirrors get_trace_provider() default ("otel_clickhouse")
@@ -61,12 +60,13 @@ func TestService_PostsActivityStatsWithProbedStatus(t *testing.T) {
 		Logger:       slog.Default(),
 		Datasources: func() Datasources {
 			return Datasources{
-				PrometheusURL:      prom.URL,
-				AlertManagerURL:    am.URL,
-				LogsProvider:       "loki",
-				LogsProviderURL:    "http://loki.svc:3100",
-				LogsProviderStatus: true,
-				NodeAgentCount:     3,
+				PrometheusURL:       prom.URL,
+				PrometheusConnected: true, // caller-computed (authenticated query)
+				AlertManagerURL:     am.URL,
+				LogsProvider:        "loki",
+				LogsProviderURL:     "http://loki.svc:3100",
+				LogsProviderStatus:  true,
+				NodeAgentCount:      3,
 			}
 		},
 		LightActions: func() []string { return []string{"prometheus_enricher"} },
@@ -253,6 +253,28 @@ func TestProbe_TraceProviderSelection(t *testing.T) {
 				t.Errorf("traceURL = %q; want %q", got, tc.url)
 			}
 		})
+	}
+}
+
+// TestProbe_PrometheusConnectionFromCaller verifies PrometheusConnection is
+// driven by the caller-computed PrometheusConnected flag, NOT an in-package
+// /-/healthy probe. This is what lets query-only backends (Chronosphere/Thanos/
+// Mimir/AMP) — which don't serve /-/healthy and require auth — report Connected.
+func TestProbe_PrometheusConnectionFromCaller(t *testing.T) {
+	// A server that 404s everything, standing in for Chronosphere (no /-/healthy).
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer backend.Close()
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}, Logger: slog.Default()}
+
+	// Connected=true flows through even though /-/healthy would 404.
+	if got := s.probe(context.Background(), Datasources{PrometheusURL: backend.URL, PrometheusConnected: true}); !got.PrometheusConnection {
+		t.Error("PrometheusConnection should be true when caller reports connected")
+	}
+	// Connected=false → Disconnected, even with a URL set.
+	if got := s.probe(context.Background(), Datasources{PrometheusURL: backend.URL, PrometheusConnected: false}); got.PrometheusConnection {
+		t.Error("PrometheusConnection should be false when caller reports not connected")
 	}
 }
 
