@@ -136,6 +136,12 @@ stringData:
   {{- if .Values.runner.signoz.apiKey }}
   SIGNOZ_API_KEY: {{ .Values.runner.signoz.apiKey }}
   {{- end }}
+  {{- if .Values.runner.signoz.user }}
+  SIGNOZ_USER: {{ .Values.runner.signoz.user }}
+  {{- end }}
+  {{- if .Values.runner.signoz.password }}
+  SIGNOZ_PASSWORD: {{ .Values.runner.signoz.password }}
+  {{- end }}
   {{- if .Values.runner.signoz.url }}
   SIGNOZ_URL: {{ .Values.runner.signoz.url }}
   {{- end }}

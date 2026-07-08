@@ -343,6 +343,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	sc := signoz.New(cfg.SignozURL, nil)
 	sc.APIKey = cfg.SignozAPIKey
+	sc.User = cfg.SignozUser
+	sc.Password = cfg.SignozPassword
 	registerProxy("signoz", cfg.SignozURL != "", signoz.Handlers(sc))
 	if cfg.SignozURL != "" {
 		logger.Info("signoz enabled", "url", cfg.SignozURL)

@@ -49,6 +49,59 @@ func TestAPIKey_SetAsCustomHeader(t *testing.T) {
 	}
 }
 
+func TestUserPassword_LoginsAndSetsBearer(t *testing.T) {
+	var logins int
+	var authHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/login" {
+			logins++
+			_, _ = w.Write([]byte(`{"accessJwt":"jwt-tok","accessJwtExpiry":9999999999}`))
+			return
+		}
+		authHeader = r.Header.Get("Authorization")
+		if r.Header.Get("SIGNOZ-API-KEY") != "" {
+			t.Errorf("unexpected api key header on password auth")
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, nil)
+	c.User = "u@x.com"
+	c.Password = "secret"
+	for i := 0; i < 3; i++ {
+		if _, err := c.QueryRange(context.Background(), map[string]any{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if authHeader != "Bearer jwt-tok" {
+		t.Errorf("Authorization = %q", authHeader)
+	}
+	if logins != 1 {
+		t.Errorf("expected token to be cached (1 login), got %d", logins)
+	}
+}
+
+func TestAPIKey_TakesPrecedenceOverPassword(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/login" {
+			t.Errorf("should not login when API key is set")
+		}
+		if r.Header.Get("SIGNOZ-API-KEY") != "k" {
+			t.Errorf("SIGNOZ-API-KEY = %q", r.Header.Get("SIGNOZ-API-KEY"))
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, nil)
+	c.APIKey = "k"
+	c.User = "u"
+	c.Password = "p"
+	if _, err := c.QueryRange(context.Background(), map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEachEndpoint_RoutesCorrectly(t *testing.T) {
 	cases := []struct {
 		name string
