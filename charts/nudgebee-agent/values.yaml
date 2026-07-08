@@ -139,9 +139,33 @@ runner:
   relay_address: wss://relay.nudgebee.com/register
   clickhouse_enabled: true
   clickhouse_secret: ""
+  prometheus:
+    # Managed-provider auth for Prometheus-compatible backends. Leave empty
+    # for in-cluster Prometheus / plain-header auth (use globalConfig.
+    # prometheus_headers for a static Authorization header). Precedence:
+    # AWS → Coralogix → Azure.
+    auth:
+      # Coralogix: surfaces as CORALOGIX_PROMETHEUS_TOKEN (sent as `token` header).
+      coralogixToken: ""
+      # AWS SigV4 (Amazon Managed Prometheus). accessKey+secretAccessKey required
+      # together; serviceName defaults to "aps".
+      awsAccessKey: ""
+      awsSecretAccessKey: ""
+      awsRegion: ""
+      awsServiceName: ""
+      # Azure AD (Azure Monitor managed Prometheus). Set azureUseManagedId
+      # (any non-empty value) OR azureClientSecret; clientId + tenantId required.
+      azureUseManagedId: ""
+      azureClientId: ""
+      azureClientSecret: ""
+      azureTenantId: ""
+      azureResource: ""
   loki:
     url: ""
     headers: ""
+    # Optional HTTP Basic-Auth. Surfaces as LOKI_USERNAME / LOKI_PASSWORD.
+    username: ""
+    password: ""
   es:
     # Set to enable Elasticsearch actions. Surfaces as ELASTICSEARCH_URL.
     url: ""
@@ -150,6 +174,9 @@ runner:
     # configured `url` from overriding another logs provider (e.g. Loki) while
     # still exposing the ES query actions. Surfaces as ELASTICSEARCH_ENABLED.
     enabled: true
+    # Verify the ES server's TLS certificate (https URLs only). Defaults off to
+    # match the legacy client. Surfaces as ELASTICSEARCH_SSL_VERIFY.
+    sslVerify: false
   signoz:
     # Set to enable SigNoz actions. Surfaces as SIGNOZ_URL.
     url: ""
@@ -165,6 +192,8 @@ runner:
     # it for JAEGER_URL). When empty, jaeger_query_* return a clear
     # "not configured" error instead of failing auth.
     queryUrl: ""
+    # Optional Bearer token for the Jaeger query API. Surfaces as JAEGER_TOKEN.
+    token: ""
   chronosphere:
     # Chronosphere trace API endpoint. Surfaces as CHRONOSPHERE_URL. Empty →
     # chronosphere_query_traces returns "not configured".

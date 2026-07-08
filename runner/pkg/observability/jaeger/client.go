@@ -24,6 +24,7 @@ type Client struct {
 	BaseURL      string
 	HTTP         *http.Client
 	ExtraHeaders http.Header
+	Token        string // optional Bearer token (JAEGER_TOKEN)
 }
 
 func New(baseURL string, httpClient *http.Client) *Client {
@@ -110,6 +111,9 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) (json.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	for k, vv := range c.ExtraHeaders {
 		for _, v := range vv {

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -255,6 +256,32 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.PrometheusURL != "" {
 		promClient = prometheus.New(cfg.PrometheusURL, nil)
 		promClient.ExtraHeaders = config.ParseHeaders(cfg.PrometheusHeaders)
+		// Managed-provider auth, same precedence as the legacy
+		// generate_prometheus_config: AWS SigV4 → Coralogix token → Azure AD.
+		// Plain header/basic auth stays in PROMETHEUS_HEADERS above.
+		switch {
+		case cfg.AWSAccessKey != "":
+			promClient.Auth = prometheus.NewAWSAuth(cfg.AWSAccessKey, cfg.AWSSecretAccessKey, cfg.AWSRegion, cfg.AWSServiceName)
+			logger.Info("prometheus auth: AWS SigV4", "service", cfg.AWSServiceName, "region", cfg.AWSRegion)
+		case cfg.CoralogixPrometheusToken != "":
+			promClient.Auth = prometheus.NewCoralogixAuth(cfg.CoralogixPrometheusToken)
+			logger.Info("prometheus auth: Coralogix token")
+		case cfg.AzureUseManagedID != "" || cfg.AzureClientSecret != "":
+			if a := prometheus.NewAzureAuth(prometheus.AzureAuthConfig{
+				UseManagedID:     cfg.AzureUseManagedID,
+				ClientID:         cfg.AzureClientID,
+				ClientSecret:     cfg.AzureClientSecret,
+				TenantID:         cfg.AzureTenantID,
+				Resource:         cfg.AzureResource,
+				MetadataEndpoint: cfg.AzureMetadataEndpoint,
+				TokenEndpoint:    cfg.AzureTokenEndpoint,
+			}, nil); a != nil {
+				promClient.Auth = a
+				logger.Info("prometheus auth: Azure AD")
+			} else {
+				logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
+			}
+		}
 		ph := prometheus.Handlers(promClient)
 		maps.Copy(handlers, ph)
 		for name := range ph {
@@ -313,6 +340,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.LokiURL != "" {
 		lc := loki.New(cfg.LokiURL, nil)
 		lc.ExtraHeaders = config.ParseHeaders(cfg.LokiHeaders)
+		lc.Username = cfg.LokiUsername
+		lc.Password = cfg.LokiPassword
 		lh := loki.Handlers(lc)
 		maps.Copy(handlers, lh)
 		for name := range lh {
@@ -332,7 +361,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	esEnabled := cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != ""
-	ec := elasticsearch.New(cfg.ElasticsearchURL, nil)
+	// Legacy ES client defaults verify_certs=False; skip TLS verification
+	// unless ELASTICSEARCH_SSL_VERIFY is set. Only affects https URLs.
+	ec := elasticsearch.New(cfg.ElasticsearchURL, esHTTPClient(cfg.ElasticsearchSSLVerify))
 	ec.Username = cfg.ElasticsearchUser
 	ec.Password = cfg.ElasticsearchPassword
 	ec.APIKey = cfg.ElasticsearchAPIKey
@@ -351,6 +382,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	jc := jaeger.New(cfg.JaegerURL, nil)
+	jc.Token = cfg.JaegerToken
 	registerProxy("jaeger", cfg.JaegerURL != "", jaeger.Handlers(jc))
 	if cfg.JaegerURL != "" {
 		logger.Info("jaeger enabled", "url", cfg.JaegerURL)
@@ -1213,6 +1245,22 @@ func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[s
 	}
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// esHTTPClient returns the HTTP client the ES query client uses. When
+// sslVerify is false (the legacy default), it disables TLS certificate
+// verification to match the legacy client's verify_certs=False. For plain
+// http URLs the TLS config is inert.
+func esHTTPClient(sslVerify bool) *http.Client {
+	if sslVerify {
+		return nil // nil → elasticsearch.New builds a default verifying client
+	}
+	return &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // legacy parity: ELASTICSEARCH_SSL_VERIFY defaults false
+		},
+	}
 }
 
 // esAuthHeader builds the Authorization header for ES probes from the

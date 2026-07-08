@@ -45,15 +45,21 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | Variable | Required | Description |
 |---|---|---|
 | `PROMETHEUS_URL` | recommended | Enables `prometheus_*` actions and `service_map` |
-| `PROMETHEUS_HEADERS` | optional | Comma-separated `Header: value` pairs (e.g. `X-Scope-OrgID: tenant-1`) |
+| `PROMETHEUS_HEADERS` | optional | Comma-separated `Header: value` pairs (e.g. `X-Scope-OrgID: tenant-1`); use for static basic/bearer auth |
+| `AWS_ACCESS_KEY` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | optional | Managed Prometheus: sign requests with AWS SigV4. `AWS_SERVICE_NAME` defaults to `aps` |
+| `CORALOGIX_PROMETHEUS_TOKEN` | optional | Managed Prometheus: sent as `token` header |
+| `AZURE_USE_MANAGED_ID` / `AZURE_CLIENT_SECRET` (+ `AZURE_CLIENT_ID` / `AZURE_TENANT_ID`) | optional | Managed Prometheus: Azure AD Bearer token (managed identity or client-secret). Precedence: AWS → Coralogix → Azure |
 | `LOKI_URL` | optional | Enables `loki_*` actions |
 | `LOKI_EXTRA_HEADER` | optional | Same format as PROMETHEUS_HEADERS |
+| `LOKI_USERNAME` / `LOKI_PASSWORD` | optional | Loki HTTP Basic-Auth |
 | `ELASTICSEARCH_URL` | optional | Enables `query_es*` actions |
 | `ELASTICSEARCH_USERNAME` / `_PASSWORD` | optional | Basic auth (one of these or `_APIKEY` is needed if ES requires auth) |
 | `ELASTICSEARCH_APIKEY` | optional | Alternative to user/pass |
+| `ELASTICSEARCH_SSL_VERIFY` | optional | Verify the ES server TLS cert (https only). Default `false` (skip verify), matching the legacy client |
 | `SIGNOZ_URL` / `SIGNOZ_API_KEY` | optional | `signoz_*` actions; API key sent as `SIGNOZ-API-KEY` header |
 | `SIGNOZ_USER` / `SIGNOZ_PASSWORD` | optional | Alternative auth: JWT minted via `/api/v1/login` (used when `SIGNOZ_API_KEY` is unset) |
 | `JAEGER_URL` | optional | `jaeger_*` actions |
+| `JAEGER_TOKEN` | optional | Bearer token for the Jaeger query API |
 | `CHRONOSPHERE_URL` / `CHRONOSPHERE_API_KEY` | optional | `chronosphere_query_traces`; API key sent as `Authorization: Bearer` |
 | `HTTP_PROXY_TARGETS` | optional | `name=url;name=url` for `http_proxy_request` named targets |
 
