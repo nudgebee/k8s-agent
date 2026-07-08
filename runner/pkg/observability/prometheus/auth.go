@@ -20,7 +20,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -214,10 +213,10 @@ func (a *azureAuth) requestToken(ctx context.Context) (string, time.Time, error)
 // the absolute expires_on and falling back to now+expires_in. A short default
 // keeps us from caching indefinitely if neither field parses.
 func azureExpiry(tr azureTokenResponse) time.Time {
-	if secs, err := strconv.ParseInt(tr.ExpiresOn.String(), 10, 64); err == nil && secs > 0 {
+	if secs, err := tr.ExpiresOn.Int64(); err == nil && secs > 0 {
 		return time.Unix(secs, 0)
 	}
-	if secs, err := strconv.ParseInt(tr.ExpiresIn.String(), 10, 64); err == nil && secs > 0 {
+	if secs, err := tr.ExpiresIn.Int64(); err == nil && secs > 0 {
 		return time.Now().Add(time.Duration(secs) * time.Second)
 	}
 	return time.Now().Add(5 * time.Minute)

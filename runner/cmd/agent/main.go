@@ -1255,11 +1255,13 @@ func esHTTPClient(sslVerify bool) *http.Client {
 	if sslVerify {
 		return nil // nil → elasticsearch.New builds a default verifying client
 	}
+	// Clone DefaultTransport so we keep its connection pooling, keep-alives,
+	// dial timeouts, and HTTP/2 support — only TLS verification is relaxed.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // legacy parity: ELASTICSEARCH_SSL_VERIFY defaults false
 	return &http.Client{
-		Timeout: 60 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // legacy parity: ELASTICSEARCH_SSL_VERIFY defaults false
-		},
+		Timeout:   60 * time.Second,
+		Transport: transport,
 	}
 }
 
