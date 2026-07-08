@@ -100,6 +100,34 @@ stringData:
   {{- if .Values.globalConfig.prometheus_headers }}
   PROMETHEUS_HEADERS: {{ .Values.globalConfig.prometheus_headers | quote }}
   {{- end }}
+  {{- with .Values.runner.prometheus.auth }}
+  {{- if .coralogixToken }}
+  CORALOGIX_PROMETHEUS_TOKEN: {{ .coralogixToken | quote }}
+  {{- end }}
+  {{- if .awsAccessKey }}
+  AWS_ACCESS_KEY: {{ .awsAccessKey | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ .awsSecretAccessKey | quote }}
+  {{- if .awsRegion }}
+  AWS_REGION: {{ .awsRegion | quote }}
+  {{- end }}
+  {{- if .awsServiceName }}
+  AWS_SERVICE_NAME: {{ .awsServiceName | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if or .azureUseManagedId .azureClientSecret }}
+  {{- if .azureUseManagedId }}
+  AZURE_USE_MANAGED_ID: {{ .azureUseManagedId | quote }}
+  {{- end }}
+  {{- if .azureClientSecret }}
+  AZURE_CLIENT_SECRET: {{ .azureClientSecret | quote }}
+  {{- end }}
+  AZURE_CLIENT_ID: {{ .azureClientId | quote }}
+  AZURE_TENANT_ID: {{ .azureTenantId | quote }}
+  {{- if .azureResource }}
+  AZURE_RESOURCE: {{ .azureResource | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.runner.grafana.password }}
   GRAFANA_PASSWORD: {{ .Values.runner.grafana.password | quote }}
   {{- end }}
@@ -118,6 +146,12 @@ stringData:
   {{- if .Values.runner.loki.headers }}
   LOKI_EXTRA_HEADER: {{ .Values.runner.loki.headers }}
   {{- end }}
+  {{- if .Values.runner.loki.username }}
+  LOKI_USERNAME: {{ .Values.runner.loki.username | quote }}
+  {{- end }}
+  {{- if .Values.runner.loki.password }}
+  LOKI_PASSWORD: {{ .Values.runner.loki.password | quote }}
+  {{- end }}
   {{- if .Values.runner.es.url }}
   ELASTICSEARCH_URL: {{ .Values.runner.es.url }}
   {{- end }}
@@ -133,6 +167,9 @@ stringData:
   {{- if not .Values.runner.es.enabled }}
   ELASTICSEARCH_ENABLED: {{ .Values.runner.es.enabled | quote }}
   {{- end }}
+  {{- if .Values.runner.es.sslVerify }}
+  ELASTICSEARCH_SSL_VERIFY: {{ .Values.runner.es.sslVerify | quote }}
+  {{- end }}
   {{- if .Values.runner.signoz.apiKey }}
   SIGNOZ_API_KEY: {{ .Values.runner.signoz.apiKey }}
   {{- end }}
@@ -147,6 +184,9 @@ stringData:
   {{- end }}
   {{- if .Values.runner.jaeger.queryUrl }}
   JAEGER_QUERY_URL: {{ .Values.runner.jaeger.queryUrl | quote }}
+  {{- end }}
+  {{- if .Values.runner.jaeger.token }}
+  JAEGER_TOKEN: {{ .Values.runner.jaeger.token | quote }}
   {{- end }}
   {{- if .Values.runner.chronosphere.url }}
   CHRONOSPHERE_URL: {{ .Values.runner.chronosphere.url | quote }}

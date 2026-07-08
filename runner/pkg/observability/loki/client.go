@@ -27,6 +27,8 @@ type Client struct {
 	BaseURL      string
 	HTTP         *http.Client
 	ExtraHeaders http.Header
+	Username     string // optional Basic-Auth (LOKI_USERNAME)
+	Password     string // optional Basic-Auth (LOKI_PASSWORD)
 }
 
 func New(baseURL string, httpClient *http.Client) *Client {
@@ -134,6 +136,10 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) (json.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
+	}
+	// LOKI_USERNAME/LOKI_PASSWORD → Basic-Auth header (legacy get_headers).
+	if c.Username != "" && c.Password != "" {
+		req.SetBasicAuth(c.Username, c.Password)
 	}
 	for k, vv := range c.ExtraHeaders {
 		for _, v := range vv {

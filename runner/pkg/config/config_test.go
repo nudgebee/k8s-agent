@@ -50,6 +50,12 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		LokiURL:           "http://loki:3100",
 		LokiHeaders:       "X-Scope-OrgID: t1",
 		HTTPListenAddr:    ":7000",
+		// Managed-provider auth defaults, applied even when the env vars are
+		// unset (mirrors the legacy prometrix defaults).
+		AWSServiceName:        "aps",
+		AzureResource:         "https://prometheus.monitor.azure.com",
+		AzureMetadataEndpoint: "http://169.254.169.254/metadata/identity/oauth2/token",
+		AzureTokenEndpoint:    "https://login.microsoftonline.com//oauth2/token",
 		// ES enable defaults on when ELASTICSEARCH_ENABLED is unset.
 		ElasticsearchEnabled: true,
 		// K8s subsystems default-on (drop-in compatible with the legacy runner);

@@ -167,3 +167,39 @@ func TestStrSlice_Variants(t *testing.T) {
 }
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
+
+func TestBasicAuth_SetWhenConfigured(t *testing.T) {
+	var user, pass string
+	var ok bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok = r.BasicAuth()
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &http.Client{Timeout: 5 * time.Second})
+	c.Username = "u"
+	c.Password = "p"
+	if _, err := c.Query(context.Background(), `{job="x"}`, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !ok || user != "u" || pass != "p" {
+		t.Errorf("basic auth = %q/%q ok=%v", user, pass, ok)
+	}
+}
+
+func TestBasicAuth_AbsentWhenUnset(t *testing.T) {
+	var hadAuth bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _, hadAuth = r.BasicAuth()
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, &http.Client{Timeout: 5 * time.Second})
+	if _, err := c.Query(context.Background(), `{job="x"}`, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if hadAuth {
+		t.Error("unexpected basic auth header when username/password unset")
+	}
+}

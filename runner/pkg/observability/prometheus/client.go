@@ -38,6 +38,11 @@ type Client struct {
 	// (Cortex/Mimir multi-tenant) and any auth headers the operator
 	// configures via the runner secret today (LOKI_EXTRA_HEADER pattern).
 	ExtraHeaders http.Header
+
+	// Auth applies a managed-provider auth scheme (AWS SigV4 / Azure AD /
+	// Coralogix) to each request. Nil when the backend uses plain headers
+	// or no auth. See auth.go.
+	Auth Authorizer
 }
 
 // New returns a Client. Pass an empty BaseURL to disable Prometheus access
@@ -181,6 +186,13 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) (json.
 	for k, vv := range c.ExtraHeaders {
 		for _, v := range vv {
 			req.Header.Add(k, v)
+		}
+	}
+	// Auth is applied last so provider signing (AWS SigV4) covers the final
+	// header set, including any ExtraHeaders above.
+	if c.Auth != nil {
+		if err := c.Auth.Apply(ctx, req); err != nil {
+			return nil, fmt.Errorf("prometheus auth: %w", err)
 		}
 	}
 
