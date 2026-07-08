@@ -107,6 +107,35 @@ func TestAzureAuth_MintsAndCachesBearer(t *testing.T) {
 	}
 }
 
+func TestAzureAuth_AcceptsNumericExpiry(t *testing.T) {
+	// The client-credentials (v2) endpoint returns expires_in as a JSON
+	// number, not a string — the response must still decode.
+	var seenBearer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/oauth2/token") {
+			_, _ = w.Write([]byte(`{"access_token":"az-num","expires_in":3600,"expires_on":1700000000}`))
+			return
+		}
+		seenBearer = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &http.Client{Timeout: 5 * time.Second})
+	c.Auth = NewAzureAuth(AzureAuthConfig{
+		ClientID:      "cid",
+		ClientSecret:  "csecret",
+		TenantID:      "tid",
+		TokenEndpoint: srv.URL + "/tenant/oauth2/token",
+	}, &http.Client{Timeout: 5 * time.Second})
+	if _, err := c.Query(context.Background(), "up", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if seenBearer != "Bearer az-num" {
+		t.Errorf("Authorization = %q", seenBearer)
+	}
+}
+
 func TestNewAzureAuth_NilWhenIncomplete(t *testing.T) {
 	// Missing tenant + no managed id / secret → not authorized.
 	if a := NewAzureAuth(AzureAuthConfig{ClientID: "cid"}, nil); a != nil {

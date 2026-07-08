@@ -151,11 +151,13 @@ func (a *azureAuth) bearer(ctx context.Context) (string, error) {
 }
 
 // azureTokenResponse matches both the IMDS and the client-credentials shapes.
-// Azure returns the numeric fields as JSON strings in these endpoints.
+// The expiry fields come back as JSON strings from IMDS but as JSON numbers
+// from the client-credentials (v2) endpoint, so use json.Number, which
+// unmarshals from either.
 type azureTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn   string `json:"expires_in"`
-	ExpiresOn   string `json:"expires_on"` // unix seconds (absolute)
+	AccessToken string      `json:"access_token"`
+	ExpiresIn   json.Number `json:"expires_in"`
+	ExpiresOn   json.Number `json:"expires_on"` // unix seconds (absolute)
 }
 
 func (a *azureAuth) requestToken(ctx context.Context) (string, time.Time, error) {
@@ -212,10 +214,10 @@ func (a *azureAuth) requestToken(ctx context.Context) (string, time.Time, error)
 // the absolute expires_on and falling back to now+expires_in. A short default
 // keeps us from caching indefinitely if neither field parses.
 func azureExpiry(tr azureTokenResponse) time.Time {
-	if secs, err := strconv.ParseInt(tr.ExpiresOn, 10, 64); err == nil && secs > 0 {
+	if secs, err := strconv.ParseInt(tr.ExpiresOn.String(), 10, 64); err == nil && secs > 0 {
 		return time.Unix(secs, 0)
 	}
-	if secs, err := strconv.ParseInt(tr.ExpiresIn, 10, 64); err == nil && secs > 0 {
+	if secs, err := strconv.ParseInt(tr.ExpiresIn.String(), 10, 64); err == nil && secs > 0 {
 		return time.Now().Add(time.Duration(secs) * time.Second)
 	}
 	return time.Now().Add(5 * time.Minute)
