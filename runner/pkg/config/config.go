@@ -30,13 +30,32 @@ type Config struct {
 	PrometheusHeaders string // raw "Header: value" string, parsed into http.Header
 	LokiURL           string
 	LokiHeaders       string
+	LokiUsername      string // optional Basic-Auth (LOKI_USERNAME)
+	LokiPassword      string // optional Basic-Auth (LOKI_PASSWORD)
+
+	// Prometheus managed-provider auth (mirrors the legacy prometrix configs).
+	// Coralogix uses a `token` header; AWS signs each request with SigV4;
+	// Azure mints a Bearer token via managed identity or client-secret.
+	CoralogixPrometheusToken string
+	AWSAccessKey             string
+	AWSSecretAccessKey       string
+	AWSServiceName           string // default "aps" (Amazon Managed Prometheus)
+	AWSRegion                string
+	AzureUseManagedID        string
+	AzureClientSecret        string
+	AzureClientID            string
+	AzureTenantID            string
+	AzureResource            string
+	AzureMetadataEndpoint    string
+	AzureTokenEndpoint       string
 
 	// Elasticsearch
-	ElasticsearchURL      string
-	ElasticsearchUser     string
-	ElasticsearchPassword string
-	ElasticsearchAPIKey   string
-	ElasticsearchEnabled  bool // ELASTICSEARCH_ENABLED; default true when URL is set
+	ElasticsearchURL       string
+	ElasticsearchUser      string
+	ElasticsearchPassword  string
+	ElasticsearchAPIKey    string
+	ElasticsearchEnabled   bool // ELASTICSEARCH_ENABLED; default true when URL is set
+	ElasticsearchSSLVerify bool // ELASTICSEARCH_SSL_VERIFY; default false (skip cert verify) to match legacy
 
 	// Signoz
 	SignozURL      string
@@ -45,7 +64,8 @@ type Config struct {
 	SignozPassword string
 
 	// Jaeger
-	JaegerURL string
+	JaegerURL   string
+	JaegerToken string // optional Bearer token (JAEGER_TOKEN)
 
 	// Chronosphere
 	ChronosphereURL    string
@@ -190,19 +210,43 @@ func FromEnv() (*Config, error) {
 		PrometheusHeaders:     os.Getenv("PROMETHEUS_HEADERS"), // matches runner.yaml secret
 		LokiURL:               os.Getenv("LOKI_URL"),
 		LokiHeaders:           os.Getenv("LOKI_EXTRA_HEADER"), // matches runner.yaml secret
-		ElasticsearchURL:      os.Getenv("ELASTICSEARCH_URL"),
-		ElasticsearchUser:     os.Getenv("ELASTICSEARCH_USERNAME"),
-		ElasticsearchPassword: os.Getenv("ELASTICSEARCH_PASSWORD"),
-		ElasticsearchAPIKey:   os.Getenv("ELASTICSEARCH_APIKEY"),
-		// ELASTICSEARCH_ENABLED gates ES as a logs provider independent of the
-		// URL: operators set it false to keep a stray ELASTICSEARCH_URL from
-		// overriding a working provider (e.g. Loki). Unset → enabled when a URL
-		// is present, preserving legacy URL-presence behaviour.
-		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", true),
-		SignozURL:            os.Getenv("SIGNOZ_URL"),
-		SignozAPIKey:         os.Getenv("SIGNOZ_API_KEY"),
-		SignozUser:           os.Getenv("SIGNOZ_USER"),
-		SignozPassword:       os.Getenv("SIGNOZ_PASSWORD"),
+		LokiUsername:          os.Getenv("LOKI_USERNAME"),
+		LokiPassword:          os.Getenv("LOKI_PASSWORD"),
+		// Prometheus managed-provider auth. Defaults mirror the legacy
+		// prometrix env handling (utils.py): AWS service defaults to "aps",
+		// Azure resource/endpoints have the same fallbacks.
+		CoralogixPrometheusToken: os.Getenv("CORALOGIX_PROMETHEUS_TOKEN"),
+		AWSAccessKey:             os.Getenv("AWS_ACCESS_KEY"),
+		AWSSecretAccessKey:       os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		AWSServiceName:           cmp(os.Getenv("AWS_SERVICE_NAME"), "aps"),
+		AWSRegion:                os.Getenv("AWS_REGION"),
+		AzureUseManagedID:        os.Getenv("AZURE_USE_MANAGED_ID"),
+		AzureClientSecret:        os.Getenv("AZURE_CLIENT_SECRET"),
+		AzureClientID:            os.Getenv("AZURE_CLIENT_ID"),
+		AzureTenantID:            os.Getenv("AZURE_TENANT_ID"),
+		AzureResource:            cmp(os.Getenv("AZURE_RESOURCE"), "https://prometheus.monitor.azure.com"),
+		AzureMetadataEndpoint:    cmp(os.Getenv("AZURE_METADATA_ENDPOINT"), "http://169.254.169.254/metadata/identity/oauth2/token"),
+		AzureTokenEndpoint:       os.Getenv("AZURE_TOKEN_ENDPOINT"),
+		ElasticsearchURL:         os.Getenv("ELASTICSEARCH_URL"),
+		ElasticsearchUser:        os.Getenv("ELASTICSEARCH_USERNAME"),
+		ElasticsearchPassword:    os.Getenv("ELASTICSEARCH_PASSWORD"),
+		ElasticsearchAPIKey:      os.Getenv("ELASTICSEARCH_APIKEY"),
+		// ELASTICSEARCH_ENABLED is the explicit opt-in for ES as the logs
+		// provider, defaulting false to match the legacy agent
+		// (env_vars.ELASTICSEARCH_ENABLED = load_bool(..., False)) and the prod
+		// chart (runner.es.enabled: false). ES must be turned on deliberately —
+		// a bare ELASTICSEARCH_URL (e.g. the prod chart's default
+		// monitoring.svc URL carried into a values file) must NOT auto-select
+		// ES and mask an explicitly-configured provider like SigNoz.
+		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", false),
+		// ELASTICSEARCH_SSL_VERIFY defaults false — the legacy client passes
+		// verify_certs=False by default, so we skip cert verification unless
+		// the operator opts in. Only affects https URLs.
+		ElasticsearchSSLVerify: envBool("ELASTICSEARCH_SSL_VERIFY", false),
+		SignozURL:              os.Getenv("SIGNOZ_URL"),
+		SignozAPIKey:           os.Getenv("SIGNOZ_API_KEY"),
+		SignozUser:             os.Getenv("SIGNOZ_USER"),
+		SignozPassword:         os.Getenv("SIGNOZ_PASSWORD"),
 		// JAEGER_URL drives the jaeger read-proxy handlers + light-action
 		// allowlist. Fall back to JAEGER_QUERY_URL (the var the telemetry
 		// heartbeat uses to tell the backend jaeger is enabled) so a
@@ -210,6 +254,7 @@ func FromEnv() (*Config, error) {
 		// backend dispatching jaeger_query_* while the agent rejects them as
 		// "not in light-action allowlist".
 		JaegerURL:          cmp(os.Getenv("JAEGER_URL"), os.Getenv("JAEGER_QUERY_URL")),
+		JaegerToken:        os.Getenv("JAEGER_TOKEN"),
 		ChronosphereURL:    os.Getenv("CHRONOSPHERE_URL"),
 		ChronosphereAPIKey: os.Getenv("CHRONOSPHERE_API_KEY"),
 		PinotURL:           os.Getenv("PINOT_URL"),
@@ -255,6 +300,11 @@ func FromEnv() (*Config, error) {
 		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
+	}
+	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring
+	// the legacy f-string default (utils.py).
+	if c.AzureTokenEndpoint == "" {
+		c.AzureTokenEndpoint = "https://login.microsoftonline.com/" + c.AzureTenantID + "/oauth2/token"
 	}
 	if c.RelayURL == "" {
 		return nil, errors.New("WEBSOCKET_RELAY_ADDRESS not set")

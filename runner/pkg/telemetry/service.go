@@ -118,6 +118,16 @@ type Datasources struct {
 	LogsProviderStatus bool
 	LogProviderConfig  map[string]any
 
+	// PrometheusConnected is the caller-computed connectivity result: an
+	// authenticated `vector(1)` query via the prometheus client (which carries
+	// PROMETHEUS_HEADERS). Computed by the caller — like NodeAgentCount — so it
+	// reflects "can we actually query metrics?" rather than "does GET /-/healthy
+	// return 2xx?". Query-only backends (Chronosphere, Thanos Query, Grafana
+	// Mimir, Amazon Managed Prometheus) don't serve the Prometheus /-/healthy
+	// admin endpoint and require auth, so the old unauthenticated /-/healthy
+	// probe reported them Disconnected even when queries worked.
+	PrometheusConnected bool
+
 	// Prometheus retention from `flags.retentionTime` (utils.get_prometheus_flags).
 	PrometheusRetentionTime    string
 	PrometheusAdditionalLabels map[string]string
@@ -297,12 +307,12 @@ func (s *Service) postOnce(ctx context.Context) error {
 //
 // Probes implemented in-package:
 //
-//	Prometheus  /-/healthy   (utils.get_prometheus_connect.check_prometheus_connection)
 //	AlertManager /-/healthy  (silence_utils.get_alertmanager_silences_connection)
 //	OpenCost    /healthz
 //
 // Inputs the caller pre-computes (see Datasources):
 //
+//	PrometheusConnected   — authenticated `vector(1)` query via prometheus client
 //	NodeAgentCount        — Prometheus query, mirrors lines 246-264
 //	LogsProviderStatus    — loki/es/signoz health, mirrors lines 204-242
 //	GrafanaEnabled        — grafana_client.health(), mirrors lines 284-293
@@ -329,13 +339,12 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 		AgentURL:                   ds.AgentURL,
 	}
 
-	// Prometheus + AlertManager: HTTP /-/healthy. A fuller connection
-	// check with prometrix is possible; we rely on /-/healthy because
-	// it's the same shape kube-prometheus-stack ships, and a working
-	// /-/healthy implies the rest.
-	if ds.PrometheusURL != "" {
-		out.PrometheusConnection = httpHealth(ctx, s.HTTP, ds.PrometheusURL+"/-/healthy")
-	}
+	// Prometheus: connectivity is computed by the caller via an authenticated
+	// query (see Datasources.PrometheusConnected) so query-only backends that
+	// don't serve /-/healthy (Chronosphere/Thanos/Mimir/AMP) report correctly.
+	out.PrometheusConnection = ds.PrometheusConnected
+	// AlertManager: HTTP /-/healthy — the endpoint kube-prometheus-stack ships,
+	// no auth needed for in-cluster AlertManager.
 	if ds.AlertManagerURL != "" {
 		out.AlertManagerConnection = httpHealth(ctx, s.HTTP, ds.AlertManagerURL+"/-/healthy")
 	}

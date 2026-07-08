@@ -174,3 +174,34 @@ func TestHandlers_TraceByID_Roundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestToken_SetsBearer(t *testing.T) {
+	var auth string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	})
+	defer srv.Close()
+	c.Token = "tok123"
+	if _, err := c.Services(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if auth != "Bearer tok123" {
+		t.Errorf("Authorization = %q", auth)
+	}
+}
+
+func TestToken_AbsentWhenUnset(t *testing.T) {
+	var auth string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	})
+	defer srv.Close()
+	if _, err := c.Services(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if auth != "" {
+		t.Errorf("unexpected Authorization = %q", auth)
+	}
+}
