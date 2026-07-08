@@ -56,8 +56,9 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		AzureResource:         "https://prometheus.monitor.azure.com",
 		AzureMetadataEndpoint: "http://169.254.169.254/metadata/identity/oauth2/token",
 		AzureTokenEndpoint:    "https://login.microsoftonline.com//oauth2/token",
-		// ES enable defaults on when ELASTICSEARCH_ENABLED is unset.
-		ElasticsearchEnabled: true,
+		// ES is opt-in: defaults off when ELASTICSEARCH_ENABLED is unset, so a
+		// bare ELASTICSEARCH_URL doesn't auto-select ES (matches prod/legacy).
+		ElasticsearchEnabled: false,
 		// K8s subsystems default-on (drop-in compatible with the legacy runner);
 		// operators opt out per-subsystem via DISCOVERY_ENABLED=false etc.
 		DiscoveryEnabled:   true,

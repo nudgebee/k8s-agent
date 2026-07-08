@@ -164,9 +164,10 @@ stringData:
   {{- if .Values.runner.es.apiKey }}
   ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
   {{- end }}
-  {{- if not .Values.runner.es.enabled }}
+  # Always emit the explicit opt-in so the agent never falls back to a default:
+  # ES is the logs provider only when es.enabled is true, matching the prod
+  # chart. A bare es.url does NOT enable ES.
   ELASTICSEARCH_ENABLED: {{ .Values.runner.es.enabled | quote }}
-  {{- end }}
   {{- if .Values.runner.es.sslVerify }}
   ELASTICSEARCH_SSL_VERIFY: {{ .Values.runner.es.sslVerify | quote }}
   {{- end }}

@@ -231,11 +231,14 @@ func FromEnv() (*Config, error) {
 		ElasticsearchUser:        os.Getenv("ELASTICSEARCH_USERNAME"),
 		ElasticsearchPassword:    os.Getenv("ELASTICSEARCH_PASSWORD"),
 		ElasticsearchAPIKey:      os.Getenv("ELASTICSEARCH_APIKEY"),
-		// ELASTICSEARCH_ENABLED gates ES as a logs provider independent of the
-		// URL: operators set it false to keep a stray ELASTICSEARCH_URL from
-		// overriding a working provider (e.g. Loki). Unset → enabled when a URL
-		// is present, preserving legacy URL-presence behaviour.
-		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", true),
+		// ELASTICSEARCH_ENABLED is the explicit opt-in for ES as the logs
+		// provider, defaulting false to match the legacy agent
+		// (env_vars.ELASTICSEARCH_ENABLED = load_bool(..., False)) and the prod
+		// chart (runner.es.enabled: false). ES must be turned on deliberately —
+		// a bare ELASTICSEARCH_URL (e.g. the prod chart's default
+		// monitoring.svc URL carried into a values file) must NOT auto-select
+		// ES and mask an explicitly-configured provider like SigNoz.
+		ElasticsearchEnabled: envBool("ELASTICSEARCH_ENABLED", false),
 		// ELASTICSEARCH_SSL_VERIFY defaults false — the legacy client passes
 		// verify_certs=False by default, so we skip cert verification unless
 		// the operator opts in. Only affects https URLs.

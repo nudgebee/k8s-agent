@@ -167,13 +167,13 @@ runner:
     username: ""
     password: ""
   es:
-    # Set to enable Elasticsearch actions. Surfaces as ELASTICSEARCH_URL.
+    # ES as the logs provider is OPT-IN: set enabled: true AND url. Defaults off
+    # (matching the prod chart) so a stray/leftover `url` never auto-selects ES
+    # and masks an explicitly-configured provider like SigNoz. Surfaces as
+    # ELASTICSEARCH_ENABLED / ELASTICSEARCH_URL.
+    enabled: false
     url: ""
     apiKey: ""
-    # Gate ES as a logs provider independent of the URL. Set false to keep a
-    # configured `url` from overriding another logs provider (e.g. Loki) while
-    # still exposing the ES query actions. Surfaces as ELASTICSEARCH_ENABLED.
-    enabled: true
     # Verify the ES server's TLS certificate (https URLs only). Defaults off to
     # match the legacy client. Surfaces as ELASTICSEARCH_SSL_VERIFY.
     sslVerify: false
