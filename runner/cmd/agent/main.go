@@ -329,7 +329,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// migrating from the legacy agent (which read prometheus_url from the
 		// Robusta global_config ConfigMap) by only bumping the image tag on the
 		// old chart, which never sets the PROMETHEUS_URL env the Go agent reads.
-		logger.Warn("prometheus disabled: PROMETHEUS_URL not set and none autodiscovered — prometheus_* actions, rightsizing, service-map, and the Prometheus health badge are unavailable")
+		logger.Warn("prometheus disabled: PROMETHEUS_URL not set and none autodiscovered; prometheus_* actions, rightsizing, service-map, and the Prometheus health badge are unavailable")
 	}
 
 	// Service map needs the same Prometheus client (queries Coroot eBPF
