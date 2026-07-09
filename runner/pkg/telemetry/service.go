@@ -38,34 +38,42 @@ import (
 // We keep `omitempty` on the strings/maps and explicit emit on
 // numerics/bools so a `false`/`0` is always present.
 type ActivityStats struct {
-	AlertManagerConnection     bool              `json:"alertManagerConnection"`
-	PrometheusConnection       bool              `json:"prometheusConnection"`
-	PrometheusRetentionTime    string            `json:"prometheusRetentionTime,omitempty"`
-	TracesEnabled              bool              `json:"tracesEnabled"`
-	LogsConnectionProvider     string            `json:"logsConnectionProvider,omitempty"`
-	LogsConnection             bool              `json:"logsConnection"`
-	NodeAgentConnection        bool              `json:"nodeAgentConnection"`
-	NodeAgentCount             int               `json:"nodeAgentCount"`
-	OpencostConnection         bool              `json:"opencostConnection"`
-	GrafanaEnabled             bool              `json:"grafanaEnabled"`
-	Errors                     []string          `json:"errors"`
-	InstallationNamespace      string            `json:"installationNamespace,omitempty"`
-	LogProviderConfig          map[string]any    `json:"log_provider_config,omitempty"`
-	LogProviderURL             string            `json:"logProviderUrl,omitempty"`
-	PrometheusURL              string            `json:"prometheusUrl,omitempty"`
-	PrometheusAdditionalLabels map[string]string `json:"prometheusAdditionalLabels,omitempty"`
-	AlertManagerURL            string            `json:"alertmanagerUrl,omitempty"`
-	OpencostURL                string            `json:"opencostUrl,omitempty"`
-	TracesURL                  string            `json:"tracesUrl,omitempty"`
-	AutoScalerVersion          string            `json:"autoScalerVersion,omitempty"`
-	AutoScalerEnabled          bool              `json:"autoScalerEnabled"`
-	AutoScalerNamespace        string            `json:"autoScalerNamespace,omitempty"`
-	AutoScalerType             string            `json:"autoScalerType,omitempty"`
-	AgentURL                   string            `json:"agentUrl,omitempty"`
-	AgentWSEnabled             bool              `json:"agentWSEnabled"`
-	HealthCheckDuration        float64           `json:"healthCheckDuration,omitempty"`
-	TraceProvider              string            `json:"traceProvider,omitempty"`
-	TraceProviderConfig        map[string]any    `json:"traceProviderConfig,omitempty"`
+	AlertManagerConnection  bool     `json:"alertManagerConnection"`
+	PrometheusConnection    bool     `json:"prometheusConnection"`
+	PrometheusRetentionTime string   `json:"prometheusRetentionTime,omitempty"`
+	TracesEnabled           bool     `json:"tracesEnabled"`
+	LogsConnectionProvider  string   `json:"logsConnectionProvider,omitempty"`
+	LogsConnection          bool     `json:"logsConnection"`
+	NodeAgentConnection     bool     `json:"nodeAgentConnection"`
+	NodeAgentCount          int      `json:"nodeAgentCount"`
+	OpencostConnection      bool     `json:"opencostConnection"`
+	GrafanaEnabled          bool     `json:"grafanaEnabled"`
+	Errors                  []string `json:"errors"`
+	// Per-feature health-check failure reasons, populated only when the
+	// corresponding *Connection probe failed (e.g. "HTTP 401: token is
+	// expired"). Empty/omitted when healthy or the datasource is unconfigured.
+	// The UI renders these next to the "Disconnected" status.
+	PrometheusConnectionError   string            `json:"prometheusConnectionError,omitempty"`
+	AlertManagerConnectionError string            `json:"alertManagerConnectionError,omitempty"`
+	LogsConnectionError         string            `json:"logsConnectionError,omitempty"`
+	OpencostConnectionError     string            `json:"opencostConnectionError,omitempty"`
+	InstallationNamespace       string            `json:"installationNamespace,omitempty"`
+	LogProviderConfig           map[string]any    `json:"log_provider_config,omitempty"`
+	LogProviderURL              string            `json:"logProviderUrl,omitempty"`
+	PrometheusURL               string            `json:"prometheusUrl,omitempty"`
+	PrometheusAdditionalLabels  map[string]string `json:"prometheusAdditionalLabels,omitempty"`
+	AlertManagerURL             string            `json:"alertmanagerUrl,omitempty"`
+	OpencostURL                 string            `json:"opencostUrl,omitempty"`
+	TracesURL                   string            `json:"tracesUrl,omitempty"`
+	AutoScalerVersion           string            `json:"autoScalerVersion,omitempty"`
+	AutoScalerEnabled           bool              `json:"autoScalerEnabled"`
+	AutoScalerNamespace         string            `json:"autoScalerNamespace,omitempty"`
+	AutoScalerType              string            `json:"autoScalerType,omitempty"`
+	AgentURL                    string            `json:"agentUrl,omitempty"`
+	AgentWSEnabled              bool              `json:"agentWSEnabled"`
+	HealthCheckDuration         float64           `json:"healthCheckDuration,omitempty"`
+	TraceProvider               string            `json:"traceProvider,omitempty"`
+	TraceProviderConfig         map[string]any    `json:"traceProviderConfig,omitempty"`
 }
 
 // ClusterStatus is the wire payload posted to /v1/k8s/telemetry.
@@ -116,7 +124,11 @@ type Datasources struct {
 	LogsProvider       string // "ES" | "signoz" | "loki" | ""
 	LogsProviderURL    string
 	LogsProviderStatus bool
-	LogProviderConfig  map[string]any
+	// LogsProviderError is the health-probe failure reason for the logs
+	// provider, set by the caller when LogsProviderStatus is false (e.g.
+	// "HTTP 401: token is expired"). Empty when healthy or unconfigured.
+	LogsProviderError string
+	LogProviderConfig map[string]any
 
 	// PrometheusConnected is the caller-computed connectivity result: an
 	// authenticated `vector(1)` query via the prometheus client (which carries
@@ -127,6 +139,10 @@ type Datasources struct {
 	// admin endpoint and require auth, so the old unauthenticated /-/healthy
 	// probe reported them Disconnected even when queries worked.
 	PrometheusConnected bool
+	// PrometheusConnectedError is the failure reason set by the caller when
+	// PrometheusConnected is false (query error / non-success status). Empty
+	// when connected or unconfigured. Surfaced next to "Disconnected" in the UI.
+	PrometheusConnectedError string
 
 	// Prometheus retention from `flags.retentionTime` (utils.get_prometheus_flags).
 	PrometheusRetentionTime    string
@@ -328,6 +344,7 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 		LogProviderConfig:          ds.LogProviderConfig,
 		LogsConnectionProvider:     ds.LogsProvider,
 		LogsConnection:             ds.LogsProviderStatus,
+		LogsConnectionError:        ds.LogsProviderError,
 		NodeAgentCount:             ds.NodeAgentCount,
 		NodeAgentConnection:        ds.NodeAgentCount > 0, // line 254: count > 0
 		OpencostURL:                ds.OpencostURL,
@@ -343,15 +360,16 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	// query (see Datasources.PrometheusConnected) so query-only backends that
 	// don't serve /-/healthy (Chronosphere/Thanos/Mimir/AMP) report correctly.
 	out.PrometheusConnection = ds.PrometheusConnected
+	out.PrometheusConnectionError = ds.PrometheusConnectedError
 	// AlertManager: HTTP /-/healthy — the endpoint kube-prometheus-stack ships,
 	// no auth needed for in-cluster AlertManager.
 	if ds.AlertManagerURL != "" {
-		out.AlertManagerConnection = httpHealth(ctx, s.HTTP, ds.AlertManagerURL+"/-/healthy")
+		out.AlertManagerConnection, out.AlertManagerConnectionError = httpHealth(ctx, s.HTTP, ds.AlertManagerURL+"/-/healthy")
 	}
 	// OpenCost: only probe if a URL is set.
 	// where missing URL → opencost=False, no request.
 	if ds.OpencostURL != "" {
-		out.OpencostConnection = httpHealth(ctx, s.HTTP, ds.OpencostURL+"/healthz")
+		out.OpencostConnection, out.OpencostConnectionError = httpHealth(ctx, s.HTTP, ds.OpencostURL+"/healthz")
 	}
 
 	// Trace status / provider / URL — verbatim port of the backend.
@@ -426,19 +444,39 @@ func isJaegerEnabled(ds Datasources) bool {
 	return ds.JaegerEnabled && ds.JaegerQueryURL != ""
 }
 
-// httpHealth returns true iff GET <url> returns 2xx within 5s.
-func httpHealth(ctx context.Context, c *http.Client, url string) bool {
+// httpHealth probes GET <url> with a 5s budget. It returns ok=true iff the
+// response is 2xx; on failure it also returns a short one-line reason
+// (transport error or "HTTP <status>: <body-snippet>") that the UI surfaces
+// next to the "Disconnected" status. reason is empty when ok is true.
+func httpHealth(ctx context.Context, c *http.Client, url string) (ok bool, reason string) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, ""
+	}
+	return false, healthErr(resp.StatusCode, body)
+}
+
+// healthErr formats a non-2xx probe response into a compact single-line reason
+// suitable for the health UI: whitespace collapsed and truncated so a verbose
+// JSON error body doesn't blow up the payload.
+func healthErr(status int, body []byte) string {
+	msg := strings.Join(strings.Fields(string(body)), " ")
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	if msg == "" {
+		return fmt.Sprintf("HTTP %d", status)
+	}
+	return fmt.Sprintf("HTTP %d: %s", status, msg)
 }
