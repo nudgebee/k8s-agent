@@ -27,7 +27,7 @@ RUN go build \
 # build pipeline should pull the arm64 variant. Currently we only build amd64
 # images (.github/workflows/build-image.yaml).
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS kubectl
-ARG KUBECTL_VERSION=v1.32.1
+ARG KUBECTL_VERSION=v1.32.13
 RUN apk add --no-cache curl ca-certificates && \
 	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
 	chmod +x /usr/local/bin/kubectl
