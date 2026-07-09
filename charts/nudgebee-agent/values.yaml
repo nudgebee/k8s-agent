@@ -10,6 +10,10 @@ globalConfig:
   prometheus_url: ""
   # Optional headers (comma-separated "Header: value" pairs). Surfaces as PROMETHEUS_HEADERS.
   prometheus_headers: ""
+  # Optional labels appended to every PromQL query (legacy multi-cluster parity).
+  # A YAML map, e.g. {k8s_cluster: aws-prod}. Surfaces as PROMETHEUS_ADDITIONAL_LABELS
+  # in the "key=value,key=value" form the runner expects.
+  prometheus_additional_labels: {}
 enableServiceMonitors: true
 # parameters for the nudgebee forwarder deployment
 kubewatch:

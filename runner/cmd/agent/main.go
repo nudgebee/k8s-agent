@@ -323,6 +323,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		lightActions["slo_generator"] = struct{}{}
 
 		logger.Info("prometheus compat enrichers enabled", "actions", 4)
+	} else {
+		// Loud, explicit signal so a missing URL is obvious in the logs rather
+		// than inferred from the absence of "prometheus enabled". Common cause:
+		// migrating from the legacy agent (which read prometheus_url from the
+		// Robusta global_config ConfigMap) by only bumping the image tag on the
+		// old chart, which never sets the PROMETHEUS_URL env the Go agent reads.
+		logger.Warn("prometheus disabled: PROMETHEUS_URL not set and none autodiscovered — prometheus_* actions, rightsizing, service-map, and the Prometheus health badge are unavailable")
 	}
 
 	// Service map needs the same Prometheus client (queries Coroot eBPF
@@ -379,6 +386,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	registerProxy("signoz", cfg.SignozURL != "", signoz.Handlers(sc))
 	if cfg.SignozURL != "" {
 		logger.Info("signoz enabled", "url", cfg.SignozURL)
+	}
+
+	// Log which single logs provider will be reported to the UI and why —
+	// selection is priority-ordered (pinot → es → signoz → loki), so a
+	// configured provider can be masked by a higher-priority one (e.g. a stray
+	// ELASTICSEARCH_URL hiding SigNoz). Making the winner explicit turns that
+	// class of "I configured X but see Y" into a one-line grep.
+	if provider, url := selectedLogsProvider(cfg); provider != "" {
+		logger.Info("logs provider selected", "provider", provider, "url", url)
+	} else {
+		logger.Info("logs provider: none configured")
 	}
 
 	jc := jaeger.New(cfg.JaegerURL, nil)
@@ -1189,6 +1207,24 @@ func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog
 		return 0
 	}
 	return len(resp.Data.Result)
+}
+
+// selectedLogsProvider returns the provider (and its URL) that probeLogsProvider
+// would pick, without the network probe — for a startup log. Precedence must
+// stay in sync with probeLogsProvider: pinot → ES → signoz → loki.
+func selectedLogsProvider(cfg *config.Config) (provider, url string) {
+	switch {
+	case cfg.PinotURL != "":
+		return "pinot", cfg.PinotURL
+	case cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "":
+		return "ES", cfg.ElasticsearchURL
+	case cfg.SignozURL != "":
+		return "signoz", cfg.SignozURL
+	case cfg.LokiURL != "":
+		return "loki", cfg.LokiURL
+	default:
+		return "", ""
+	}
 }
 
 // probeLogsProvider

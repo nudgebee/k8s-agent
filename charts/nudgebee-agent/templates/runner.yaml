@@ -100,6 +100,10 @@ stringData:
   {{- if .Values.globalConfig.prometheus_headers }}
   PROMETHEUS_HEADERS: {{ .Values.globalConfig.prometheus_headers | quote }}
   {{- end }}
+  {{- with .Values.globalConfig.prometheus_additional_labels }}
+  {{- $p := list }}{{ range $k, $v := . }}{{ $p = append $p (printf "%s=%s" $k $v) }}{{ end }}
+  PROMETHEUS_ADDITIONAL_LABELS: {{ join "," $p | quote }}
+  {{- end }}
   {{- with .Values.runner.prometheus.auth }}
   {{- if .coralogixToken }}
   CORALOGIX_PROMETHEUS_TOKEN: {{ .coralogixToken | quote }}

@@ -159,3 +159,29 @@ func TestPrometheusConnected_FailuresReportDisconnected(t *testing.T) {
 		t.Error("expected connected=false for empty base URL")
 	}
 }
+
+// selectedLogsProvider must match probeLogsProvider's precedence
+// (pinot → ES → signoz → loki), including that a stray ES URL only wins when
+// ES is enabled.
+func TestSelectedLogsProvider_Precedence(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.Config
+		want string
+	}{
+		{"none", config.Config{}, ""},
+		{"loki only", config.Config{LokiURL: "http://loki"}, "loki"},
+		{"signoz over loki", config.Config{SignozURL: "http://sz", LokiURL: "http://loki"}, "signoz"},
+		{"es disabled → signoz wins", config.Config{ElasticsearchURL: "http://es", ElasticsearchEnabled: false, SignozURL: "http://sz"}, "signoz"},
+		{"es enabled beats signoz", config.Config{ElasticsearchURL: "http://es", ElasticsearchEnabled: true, SignozURL: "http://sz"}, "ES"},
+		{"pinot wins all", config.Config{PinotURL: "http://pinot", ElasticsearchURL: "http://es", ElasticsearchEnabled: true}, "pinot"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := selectedLogsProvider(&tc.cfg)
+			if got != tc.want {
+				t.Errorf("selectedLogsProvider = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
