@@ -10,6 +10,10 @@ globalConfig:
   prometheus_url: ""
   # Optional headers (comma-separated "Header: value" pairs). Surfaces as PROMETHEUS_HEADERS.
   prometheus_headers: ""
+  # Optional labels appended to every PromQL query (legacy multi-cluster parity).
+  # A YAML map, e.g. {k8s_cluster: aws-prod}. Surfaces as PROMETHEUS_ADDITIONAL_LABELS
+  # in the "key=value,key=value" form the runner expects.
+  prometheus_additional_labels: {}
 enableServiceMonitors: true
 # parameters for the nudgebee forwarder deployment
 kubewatch:
@@ -61,7 +65,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-07-08T10-06-14_f2d9b536e5ebb3fa0b470241b64b01c6534c6bba
+    tag: 2026-07-08T12-07-17_760acd19456f642a6af7c95b2df8e071bad809fc
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
