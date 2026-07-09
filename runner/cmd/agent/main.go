@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -967,9 +968,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				probeCtx, probeCancel := context.WithTimeout(gctx, 30*time.Second)
 				defer probeCancel()
 				probeClient := &http.Client{Timeout: 5 * time.Second}
-				logsProvider, logsURL, logsOK, logCfg := probeLogsProvider(probeCtx, cfg)
+				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              cfg.PrometheusURL,
 					AlertManagerURL:            cfg.AlertManagerURL,
@@ -978,8 +980,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogsProvider:               logsProvider,
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
+					LogsProviderError:          logsErr,
 					LogProviderConfig:          logCfg,
-					PrometheusConnected:        prometheusConnected(probeCtx, promClient, logger),
+					PrometheusConnected:        promConnected,
+					PrometheusConnectedError:   promErr,
 					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
@@ -1137,24 +1141,27 @@ func (a *grafanaAdapter) HandlePrometheus(ctx context.Context, r *dispatch.Grafa
 // auth — Chronosphere, Thanos Query, Grafana Mimir, Amazon Managed Prometheus —
 // are reported Connected when metric queries work. Returns false on any error
 // so a broken backend shows Disconnected rather than panicking the tick.
-func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) bool {
+func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) (ok bool, reason string) {
 	if c == nil || c.BaseURL == "" {
-		return false
+		return false, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := c.Query(cctx, "vector(1)", "", "")
 	if err != nil {
 		logger.Debug("prometheus health query failed", "err", err)
-		return false
+		return false, err.Error()
 	}
 	var resp struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return false
+		return false, err.Error()
 	}
-	return resp.Status == "success"
+	if resp.Status == "success" {
+		return true, ""
+	}
+	return false, fmt.Sprintf("prometheus query returned status %q", resp.Status)
 }
 
 // queryNodeAgentCount
@@ -1199,37 +1206,37 @@ func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog
 // configured provider's own client at action-handler time. Fail-closed: any
 // non-2xx → status=false, URL stays in payload so the UI can show "URL
 // configured but unhealthy".
-func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url string, ok bool, providerCfg map[string]any) {
+func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url string, ok bool, reason string, providerCfg map[string]any) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 	switch {
 	case cfg.PinotURL != "":
-		ok = httpProbe(ctx, httpClient, cfg.PinotURL+"/health")
-		return "pinot", cfg.PinotURL, ok, map[string]any{}
+		ok, reason = httpProbeErr(ctx, httpClient, cfg.PinotURL+"/health")
+		return "pinot", cfg.PinotURL, ok, reason, map[string]any{}
 	case cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "":
 		// ES exposes a `_cluster/health` endpoint; we treat 200 as healthy.
 		// Probe with the configured credentials so the badge reflects whether
 		// queries will actually succeed — a secured OpenSearch/ES otherwise 401s
 		// on an unauthenticated probe even when the configured creds work fine.
-		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
+		ok, reason = httpProbeErr(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
 		providerCfg = map[string]any{}
 		if v := os.Getenv("ELASTICSEARCH_LOG_INDEX"); v != "" {
 			providerCfg["default_index"] = v
 		}
-		return "ES", cfg.ElasticsearchURL, ok, providerCfg
+		return "ES", cfg.ElasticsearchURL, ok, reason, providerCfg
 	case cfg.SignozURL != "":
 		// Signoz health endpoint: /api/v1/health.
-		ok = httpProbe(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
-		return "signoz", cfg.SignozURL, ok, map[string]any{}
+		ok, reason = httpProbeErr(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
+		return "signoz", cfg.SignozURL, ok, reason, map[string]any{}
 	case cfg.LokiURL != "":
 		// LOKI_URL points at the loki gateway, whose nginx only proxies the
 		// `/loki/...` API paths — the backend `/ready` is not exposed there and
 		// 404s. Probe a gateway-served API endpoint instead so the badge
 		// reflects query reachability.
-		ok = httpProbe(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
+		ok, reason = httpProbeErr(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
 		providerCfg = map[string]any{"url": cfg.LokiURL}
-		return "loki", cfg.LokiURL, ok, providerCfg
+		return "loki", cfg.LokiURL, ok, reason, providerCfg
 	default:
-		return "", "", false, map[string]any{}
+		return "", "", false, "", map[string]any{}
 	}
 }
 
@@ -1258,9 +1265,17 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) boo
 // URL is sourced from operator-provided config (PROMETHEUS_URL, LOKI_URL,
 // etc.), not request-derived — taint flow is operator → probe by design.
 func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[string]string) bool {
+	ok, _ := httpProbeErr(ctx, c, url, headers...)
+	return ok
+}
+
+// httpProbeErr is httpProbe with the failure reason. Returns ok=true and an
+// empty reason on 2xx; otherwise ok=false and a compact one-line reason
+// (transport error or "HTTP <status>: <body-snippet>") for the health UI.
+func httpProbeErr(ctx context.Context, c *http.Client, url string, headers ...map[string]string) (ok bool, reason string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // operator-provided URL
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	for _, h := range headers {
 		for k, v := range h {
@@ -1269,10 +1284,21 @@ func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[s
 	}
 	resp, err := c.Do(req) //nolint:gosec // operator-provided URL
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, ""
+	}
+	msg := strings.Join(strings.Fields(string(body)), " ")
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	if msg == "" {
+		return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+	return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, msg)
 }
 
 // esHTTPClient returns the HTTP client the ES query client uses. When

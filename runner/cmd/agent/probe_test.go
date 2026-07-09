@@ -31,7 +31,7 @@ func TestProbeLogsProvider_ESDisabledFallsThroughToLoki(t *testing.T) {
 		ElasticsearchEnabled: false,
 		LokiURL:              loki.URL,
 	}
-	provider, url, ok, _ := probeLogsProvider(context.Background(), cfg)
+	provider, url, ok, _, _ := probeLogsProvider(context.Background(), cfg)
 	if provider != "loki" {
 		t.Fatalf("provider = %q, want loki", provider)
 	}
@@ -64,7 +64,7 @@ func TestProbeLogsProvider_StrayESURLDoesNotMaskSignoz(t *testing.T) {
 		ElasticsearchEnabled: false,
 		SignozURL:            signoz.URL,
 	}
-	provider, url, ok, _ := probeLogsProvider(context.Background(), cfg)
+	provider, url, ok, _, _ := probeLogsProvider(context.Background(), cfg)
 	if provider != "signoz" {
 		t.Fatalf("provider = %q, want signoz (stray ES URL must not mask SigNoz)", provider)
 	}
@@ -94,7 +94,7 @@ func TestProbeLogsProvider_ESProbeSendsAuth(t *testing.T) {
 		ElasticsearchUser:     "admin",
 		ElasticsearchPassword: "pw",
 	}
-	provider, _, ok, _ := probeLogsProvider(context.Background(), cfg)
+	provider, _, ok, _, _ := probeLogsProvider(context.Background(), cfg)
 	if provider != "ES" {
 		t.Fatalf("provider = %q, want ES", provider)
 	}
@@ -131,7 +131,7 @@ func TestPrometheusConnected_ChronosphereStyleBackend(t *testing.T) {
 
 	c := prometheus.New(srv.URL, nil)
 	c.ExtraHeaders = config.ParseHeaders("Authorization: Bearer tok")
-	if !prometheusConnected(context.Background(), c, slog.Default()) {
+	if ok, _ := prometheusConnected(context.Background(), c, slog.Default()); !ok {
 		t.Error("expected connected=true for query-only backend serving /api/v1/query")
 	}
 	if !queried {
@@ -148,14 +148,16 @@ func TestPrometheusConnected_FailuresReportDisconnected(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer down.Close()
-	if prometheusConnected(context.Background(), prometheus.New(down.URL, nil), slog.Default()) {
+	if ok, reason := prometheusConnected(context.Background(), prometheus.New(down.URL, nil), slog.Default()); ok {
 		t.Error("expected connected=false when backend returns 500")
+	} else if reason == "" {
+		t.Error("expected a non-empty failure reason when backend returns 500")
 	}
 	// Nil / unconfigured client → not connected, no panic.
-	if prometheusConnected(context.Background(), nil, slog.Default()) {
+	if ok, _ := prometheusConnected(context.Background(), nil, slog.Default()); ok {
 		t.Error("expected connected=false for nil client")
 	}
-	if prometheusConnected(context.Background(), prometheus.New("", nil), slog.Default()) {
+	if ok, _ := prometheusConnected(context.Background(), prometheus.New("", nil), slog.Default()); ok {
 		t.Error("expected connected=false for empty base URL")
 	}
 }
