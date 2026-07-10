@@ -199,10 +199,18 @@ runner:
     # Optional Bearer token for the Jaeger query API. Surfaces as JAEGER_TOKEN.
     token: ""
   chronosphere:
-    # Chronosphere trace API endpoint. Surfaces as CHRONOSPHERE_URL. Empty →
-    # chronosphere_query_traces returns "not configured".
+    # Chronosphere endpoint for trace queries. Surfaces as CHRONOSPHERE_URL.
+    # Empty → chronosphere_query_traces returns "not configured".
     url: ""
     apiKey: ""
+    # Report Chronosphere as the traces provider (surfaces as
+    # CHRONOSPHERE_TRACES_ENABLED). Defaults on when `url` is set, so
+    # configuring the block "just works" for the Traces status; set false to
+    # keep the query action but not surface Chronosphere traces.
+    tracesEnabled: true
+    # Optional explicit traces URL (CHRONOSPHERE_TRACES_URL). When empty the
+    # agent falls back to prometheus_url if it points at chronosphere.io.
+    tracesUrl: ""
   pinot:
     # Apache Pinot broker endpoint. Surfaces as PINOT_URL. Empty →
     # pinot_* actions return "not configured".

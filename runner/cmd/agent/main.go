@@ -1006,6 +1006,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					JaegerQueryURL:             jaegerQueryURL,
 					ChronosphereTracesEnabled:  chronosphereEnabled,
 					ChronosphereTracesURL:      chronosphereURL,
+					ChronosphereURL:            cfg.ChronosphereURL,
 					ClickHouseStatus:           clickhouseStatus,
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),

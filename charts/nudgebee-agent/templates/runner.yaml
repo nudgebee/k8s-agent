@@ -195,6 +195,12 @@ stringData:
   {{- end }}
   {{- if .Values.runner.chronosphere.url }}
   CHRONOSPHERE_URL: {{ .Values.runner.chronosphere.url | quote }}
+  {{- if .Values.runner.chronosphere.tracesEnabled }}
+  CHRONOSPHERE_TRACES_ENABLED: "true"
+  {{- end }}
+  {{- if .Values.runner.chronosphere.tracesUrl }}
+  CHRONOSPHERE_TRACES_URL: {{ .Values.runner.chronosphere.tracesUrl | quote }}
+  {{- end }}
   {{- end }}
   {{- if .Values.runner.chronosphere.apiKey }}
   CHRONOSPHERE_API_KEY: {{ .Values.runner.chronosphere.apiKey | quote }}
