@@ -208,15 +208,21 @@ func TestProbe_TraceProviderSelection(t *testing.T) {
 			url:      "bq.dataset.traces",
 		},
 		{
-			name:     "chronosphere via explicit URL",
+			name:     "chronosphere reports explicit traces URL",
 			ds:       Datasources{ChronosphereTracesEnabled: true, ChronosphereTracesURL: "https://traces.example.io"},
 			provider: "chronosphere",
 			enabled:  true,
-			// get_trace_url falls through to "" when neither TRACE_TABLE nor jaeger
-			url: "",
+			url:      "https://traces.example.io",
 		},
 		{
-			name:     "chronosphere inferred from prometheus URL",
+			name:     "chronosphere falls back to CHRONOSPHERE_URL for the traces URL",
+			ds:       Datasources{ChronosphereTracesEnabled: true, PrometheusURL: "https://abc.chronosphere.io/api/prom", ChronosphereURL: "https://abc.chronosphere.io"},
+			provider: "chronosphere",
+			enabled:  true,
+			url:      "https://abc.chronosphere.io",
+		},
+		{
+			name:     "chronosphere inferred from prometheus URL, no chronosphere URL → empty",
 			ds:       Datasources{ChronosphereTracesEnabled: true, PrometheusURL: "https://abc.chronosphere.io/api/prom"},
 			provider: "chronosphere",
 			enabled:  true,

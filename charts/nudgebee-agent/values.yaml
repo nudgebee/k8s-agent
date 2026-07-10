@@ -65,11 +65,11 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-07-09T11-31-19_a8e27effd8f5ccfc4f8a5fc80e901e62a405f0b4
+    tag: 2026-07-09T12-54-36_10e2c3944495656eea7955fa063091cfe99866eb
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
-  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:dc5fd6d"
+  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:e50de43"
   imagePullPolicy: IfNotPresent
   # Expose net/http/pprof on the runner HTTP listener (surfaces as
   # PPROF_ENABLED). Off by default — the endpoints are unauthenticated;
@@ -199,10 +199,18 @@ runner:
     # Optional Bearer token for the Jaeger query API. Surfaces as JAEGER_TOKEN.
     token: ""
   chronosphere:
-    # Chronosphere trace API endpoint. Surfaces as CHRONOSPHERE_URL. Empty →
-    # chronosphere_query_traces returns "not configured".
+    # Chronosphere endpoint for trace queries. Surfaces as CHRONOSPHERE_URL.
+    # Empty → chronosphere_query_traces returns "not configured".
     url: ""
     apiKey: ""
+    # Report Chronosphere as the traces provider (surfaces as
+    # CHRONOSPHERE_TRACES_ENABLED). Defaults on when `url` is set, so
+    # configuring the block "just works" for the Traces status; set false to
+    # keep the query action but not surface Chronosphere traces.
+    tracesEnabled: true
+    # Optional explicit traces URL (CHRONOSPHERE_TRACES_URL). When empty the
+    # agent falls back to prometheus_url if it points at chronosphere.io.
+    tracesUrl: ""
   pinot:
     # Apache Pinot broker endpoint. Surfaces as PINOT_URL. Empty →
     # pinot_* actions return "not configured".
@@ -245,7 +253,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.0
+    tag: 0.1.1
   resources:
     requests:
       cpu: "100m"

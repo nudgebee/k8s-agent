@@ -2,9 +2,12 @@
 // search API.
 //
 // Action surface:
-//   - chronosphere_query_traces : POST /api/unstable/data/traces/searches
+//   - chronosphere_query_traces : POST /api/v1/data/traces
 //
-// The action_params is forwarded as the JSON body unchanged.
+// The action_params is forwarded as the JSON body unchanged. The backend
+// composes the ListTraces request body (query_type, tag_filters, time range),
+// matching the legacy agent which posts to the same /api/v1/data/traces path.
+// (The earlier /api/unstable/data/traces/searches path 404s on Chronosphere.)
 package chronosphere
 
 import (
@@ -45,7 +48,7 @@ func (c *Client) QueryTraces(ctx context.Context, params any) (json.RawMessage, 
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.BaseURL+"/api/unstable/data/traces/searches", bytes.NewReader(body))
+		c.BaseURL+"/api/v1/data/traces", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

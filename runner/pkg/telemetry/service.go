@@ -138,6 +138,7 @@ type Datasources struct {
 	JaegerQueryURL            string // JAEGER_QUERY_URL
 	ChronosphereTracesEnabled bool   // CHRONOSPHERE_TRACES_ENABLED
 	ChronosphereTracesURL     string // CHRONOSPHERE_TRACES_URL
+	ChronosphereURL           string // CHRONOSPHERE_URL (query endpoint; reported as the traces URL when no explicit traces URL)
 	// ClickHouseStatus is the `clickhouse_status` flag — used only as the
 	// fallback for tracesEnabled when no other provider matches.
 	ClickHouseStatus bool
@@ -406,6 +407,15 @@ func traceURL(ds Datasources) string {
 	}
 	if isJaegerEnabled(ds) {
 		return ds.JaegerQueryURL
+	}
+	// For Chronosphere, report a real endpoint so the UI shows the trace
+	// backend instead of a "localhost" placeholder: explicit traces URL first,
+	// then the query endpoint (CHRONOSPHERE_URL).
+	if isChronosphereEnabled(ds) {
+		if ds.ChronosphereTracesURL != "" {
+			return ds.ChronosphereTracesURL
+		}
+		return ds.ChronosphereURL
 	}
 	return ""
 }

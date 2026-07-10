@@ -26,7 +26,7 @@ func TestQueryTraces_PostsBodyAndAuth(t *testing.T) {
 	if _, err := c.QueryTraces(context.Background(), map[string]any{"service": "frontend"}); err != nil {
 		t.Fatal(err)
 	}
-	if path != "/api/unstable/data/traces/searches" {
+	if path != "/api/v1/data/traces" {
 		t.Errorf("path = %q", path)
 	}
 	if auth != "Bearer tk-1" {
