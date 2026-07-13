@@ -1256,7 +1256,13 @@ func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url s
 	case cfg.SignozURL != "":
 		// Signoz health endpoint: /api/v1/health.
 		ok = httpProbe(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
-		return "signoz", cfg.SignozURL, ok, map[string]any{}
+		providerCfg = map[string]any{}
+		// Report the Signoz server version so the backend/UI can surface it
+		// and gate version-specific behaviour. /api/v1/version is unauthed.
+		if v := fetchSignozVersion(ctx, httpClient, cfg.SignozURL); v != "" {
+			providerCfg["version"] = v
+		}
+		return "signoz", cfg.SignozURL, ok, providerCfg
 	case cfg.LokiURL != "":
 		// LOKI_URL points at the loki gateway, whose nginx only proxies the
 		// `/loki/...` API paths — the backend `/ready` is not exposed there and
@@ -1287,6 +1293,31 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) boo
 		return false
 	}
 	return httpProbe(ctx, c, fmt.Sprintf("http://%s:%s/ping", host, port))
+}
+
+// fetchSignozVersion GETs Signoz's /api/v1/version and returns the reported
+// server version (e.g. "v0.51.0"), or "" on any error. Unauthenticated —
+// the endpoint is public. Best-effort: a failure just omits the version.
+func fetchSignozVersion(ctx context.Context, c *http.Client, baseURL string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/v1/version", nil) //nolint:gosec // operator-provided URL
+	if err != nil {
+		return ""
+	}
+	resp, err := c.Do(req) //nolint:gosec // operator-provided URL
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		return ""
+	}
+	return v.Version
 }
 
 // httpProbe is a copy of telemetry.httpHealth — kept here to avoid exporting
