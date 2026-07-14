@@ -28,10 +28,23 @@ type Config struct {
 	// Optional datasource URLs. Empty = subsystem disabled.
 	PrometheusURL     string
 	PrometheusHeaders string // raw "Header: value" string, parsed into http.Header
-	LokiURL           string
-	LokiHeaders       string
-	LokiUsername      string // optional Basic-Auth (LOKI_USERNAME)
-	LokiPassword      string // optional Basic-Auth (LOKI_PASSWORD)
+	// PrometheusAuth (PROMETHEUS_AUTH) is a static Authorization header value
+	// (e.g. "Basic dXNlcjpwYXNz" or "Bearer tok"). Applied to every Prometheus
+	// request, matching the legacy prometheus_auth. Takes precedence over any
+	// Authorization set via PrometheusHeaders.
+	PrometheusAuth string
+	// PrometheusURLQueryString (PROMETHEUS_URL_QUERY_STRING) is appended to the
+	// query string of every Prometheus request (e.g. a tenant selector the
+	// upstream requires). Mirrors the legacy prometheus_url_query_string.
+	PrometheusURLQueryString string
+	// PrometheusRetentionTime (PROMETHEUS_RETENTION_TIME) is a fallback
+	// retention value reported to the UI when /status/flags is unavailable
+	// (e.g. VictoriaMetrics' vmsingle 404s that endpoint).
+	PrometheusRetentionTime string
+	LokiURL                 string
+	LokiHeaders             string
+	LokiUsername            string // optional Basic-Auth (LOKI_USERNAME)
+	LokiPassword            string // optional Basic-Auth (LOKI_PASSWORD)
 
 	// Prometheus managed-provider auth (mirrors the legacy prometrix configs).
 	// Coralogix uses a `token` header; AWS signs each request with SigV4;
@@ -200,18 +213,21 @@ type Config struct {
 // produce an error; missing optional fields are left blank.
 func FromEnv() (*Config, error) {
 	c := &Config{
-		AuthSecretKey:         os.Getenv("NUDGEBEE_AUTH_SECRET_KEY"),
-		RelaySigningPublicKey: os.Getenv("RELAY_SIGNING_PUBLIC_KEY"),
-		RelayURL:              os.Getenv("WEBSOCKET_RELAY_ADDRESS"),
-		BackendEndpoint:       os.Getenv("NUDGEBEE_ENDPOINT"),
-		AccountID:             os.Getenv("ACCOUNT_ID"),
-		ClusterName:           os.Getenv("CLUSTER_NAME"),
-		PrometheusURL:         os.Getenv("PROMETHEUS_URL"),
-		PrometheusHeaders:     os.Getenv("PROMETHEUS_HEADERS"), // matches runner.yaml secret
-		LokiURL:               os.Getenv("LOKI_URL"),
-		LokiHeaders:           os.Getenv("LOKI_EXTRA_HEADER"), // matches runner.yaml secret
-		LokiUsername:          os.Getenv("LOKI_USERNAME"),
-		LokiPassword:          os.Getenv("LOKI_PASSWORD"),
+		AuthSecretKey:            os.Getenv("NUDGEBEE_AUTH_SECRET_KEY"),
+		RelaySigningPublicKey:    os.Getenv("RELAY_SIGNING_PUBLIC_KEY"),
+		RelayURL:                 os.Getenv("WEBSOCKET_RELAY_ADDRESS"),
+		BackendEndpoint:          os.Getenv("NUDGEBEE_ENDPOINT"),
+		AccountID:                os.Getenv("ACCOUNT_ID"),
+		ClusterName:              os.Getenv("CLUSTER_NAME"),
+		PrometheusURL:            os.Getenv("PROMETHEUS_URL"),
+		PrometheusHeaders:        os.Getenv("PROMETHEUS_HEADERS"), // matches runner.yaml secret
+		PrometheusAuth:           os.Getenv("PROMETHEUS_AUTH"),
+		PrometheusURLQueryString: os.Getenv("PROMETHEUS_URL_QUERY_STRING"),
+		PrometheusRetentionTime:  os.Getenv("PROMETHEUS_RETENTION_TIME"),
+		LokiURL:                  os.Getenv("LOKI_URL"),
+		LokiHeaders:              os.Getenv("LOKI_EXTRA_HEADER"), // matches runner.yaml secret
+		LokiUsername:             os.Getenv("LOKI_USERNAME"),
+		LokiPassword:             os.Getenv("LOKI_PASSWORD"),
 		// Prometheus managed-provider auth. Defaults mirror the legacy
 		// prometrix env handling (utils.py): AWS service defaults to "aps",
 		// Azure resource/endpoints have the same fallbacks.
