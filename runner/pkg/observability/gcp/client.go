@@ -9,8 +9,8 @@
 // gcloud user creds.
 //
 // Action surface:
-//   - gke_logs   : Cloud Logging entries for a GKE node pool in a zone
-//   - gke_traces : arbitrary BigQuery SQL (used for traces stored in BQ)
+//   - gke_logs   : GKE cluster-autoscaler visibility logs for a node pool
+//   - gke_traces : arbitrary BigQuery SQL (reshaped to {data,columns,column_types})
 package gcp
 
 import (
@@ -63,8 +63,12 @@ func NewWithHTTP(c *http.Client) *Client {
 	return &Client{HTTP: c}
 }
 
-// FetchNodePoolLogs queries Cloud Logging for GCE-instance entries scoped
-// to a zone.
+// FetchNodePoolLogs queries Cloud Logging for the GKE cluster-autoscaler
+// visibility logs (node-pool scale-up/scale-down decisions), matching the
+// legacy gcloud_client. These logs live under the k8s_cluster resource and
+// are keyed by the cluster's location — zonal clusters use the zone, regional
+// clusters use the region — so we try the zone first and fall back to the
+// derived region.
 //
 // projectID : GCP project (required)
 // zone      : compute zone, e.g. "us-central1-a" (required)
@@ -80,22 +84,69 @@ func (c *Client) FetchNodePoolLogs(ctx context.Context, projectID, zone string, 
 		limit = 100
 	}
 
-	body := map[string]any{
+	locations := []string{zone}
+	if region := zoneToRegion(zone); region != "" && region != zone {
+		locations = append(locations, region)
+	}
+
+	var last json.RawMessage
+	for _, loc := range locations {
+		raw, err := c.postJSON(ctx, c.loggingURL()+"/v2/entries:list", nodePoolLogsBody(projectID, loc, limit))
+		if err != nil {
+			return nil, err
+		}
+		last = raw
+		if hasLogEntries(raw) {
+			return raw, nil
+		}
+	}
+	return last, nil
+}
+
+// nodePoolLogsBody builds the entries:list request scoped to one location.
+func nodePoolLogsBody(projectID, location string, limit int) map[string]any {
+	return map[string]any{
 		"resourceNames": []string{"projects/" + projectID},
 		"filter": fmt.Sprintf(
-			`resource.type="gce_instance" AND resource.labels.zone="%s"`,
-			zone,
+			`resource.type="k8s_cluster" AND resource.labels.project_id="%s" `+
+				`AND resource.labels.location="%s" `+
+				`AND logName="projects/%s/logs/container.googleapis.com%%2Fcluster-autoscaler-visibility" `+
+				`AND severity>=DEFAULT`,
+			projectID, location, projectID,
 		),
 		"pageSize": limit,
 		"orderBy":  "timestamp desc",
 	}
-	return c.postJSON(ctx, c.loggingURL()+"/v2/entries:list", body)
 }
 
-// QueryBigQuery runs an arbitrary SQL query as a synchronous query job.
-// Does not perform server-side pagination (callers needing pagination iterate
-// with maxResults + pageToken via a follow-up action).
-func (c *Client) QueryBigQuery(ctx context.Context, projectID, query string) (json.RawMessage, error) {
+// zoneToRegion strips the trailing zone suffix, e.g. "us-central1-a" ->
+// "us-central1". Returns the input unchanged when it has no suffix.
+func zoneToRegion(zone string) string {
+	if i := strings.LastIndex(zone, "-"); i > 0 {
+		return zone[:i]
+	}
+	return zone
+}
+
+// hasLogEntries reports whether a Cloud Logging entries:list response carries
+// at least one entry.
+func hasLogEntries(raw json.RawMessage) bool {
+	var resp struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	return len(resp.Entries) > 0
+}
+
+// QueryBigQuery runs an arbitrary SQL query as a synchronous query job and
+// reshapes the BigQuery REST response into the {data, columns, column_types}
+// envelope the backend warehouse consumer expects (mirroring the legacy
+// run_bigquery). location, when non-empty, scopes the job to the dataset's
+// region (required for non-US/EU datasets). Does not perform server-side
+// pagination.
+func (c *Client) QueryBigQuery(ctx context.Context, projectID, query, location string) (json.RawMessage, error) {
 	if projectID == "" {
 		return nil, errors.New("gcp: project_id required")
 	}
@@ -108,8 +159,63 @@ func (c *Client) QueryBigQuery(ctx context.Context, projectID, query string) (js
 		"timeoutMs":    30000,
 		// No maxResults — let BigQuery default; backend can cap on its end.
 	}
+	if location != "" {
+		body["location"] = location
+	}
 	url := c.bigQueryURL() + "/bigquery/v2/projects/" + projectID + "/queries"
-	return c.postJSON(ctx, url, body)
+	raw, err := c.postJSON(ctx, url, body)
+	if err != nil {
+		return nil, err
+	}
+	return reshapeBigQuery(raw)
+}
+
+// reshapeBigQuery converts the BigQuery jobs.query REST response
+// ({schema:{fields:[{name,type}]}, rows:[{f:[{v}]}]}) into the
+// {data, columns, column_types} shape the backend warehouse consumer reads.
+func reshapeBigQuery(raw json.RawMessage) (json.RawMessage, error) {
+	var resp struct {
+		Schema struct {
+			Fields []struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			} `json:"fields"`
+		} `json:"schema"`
+		Rows []struct {
+			F []struct {
+				V json.RawMessage `json:"v"`
+			} `json:"f"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("gcp: parse bigquery response: %w", err)
+	}
+
+	columns := make([]string, len(resp.Schema.Fields))
+	columnTypes := make([]string, len(resp.Schema.Fields))
+	for i, f := range resp.Schema.Fields {
+		columns[i] = f.Name
+		columnTypes[i] = f.Type
+	}
+
+	data := make([][]any, 0, len(resp.Rows))
+	for _, row := range resp.Rows {
+		vals := make([]any, len(row.F))
+		for i, cell := range row.F {
+			var v any
+			// BigQuery cell values are JSON scalars (usually strings); keep the
+			// decoded value, or nil on an unexpected shape.
+			_ = json.Unmarshal(cell.V, &v)
+			vals[i] = v
+		}
+		data = append(data, vals)
+	}
+
+	return json.Marshal(map[string]any{
+		"data":         data,
+		"columns":      columns,
+		"column_types": columnTypes,
+	})
 }
 
 func (c *Client) loggingURL() string {
