@@ -9,6 +9,54 @@ entries:
         - name: Source
           url: https://github.com/nudgebee/k8s-agent
     apiVersion: v2
+    appVersion: 0.1.10
+    created: "2026-07-14T12:19:37.26218991Z"
+    dependencies:
+    - condition: opencost.enabled
+      name: opencost
+      repository: https://opencost.github.io/opencost-helm-chart
+      version: 2.0.1
+    - condition: opentelemetry-collector.enabled
+      name: clickhouse
+      repository: https://charts.bitnami.com/bitnami
+      version: 3.1.*
+    - condition: opentelemetry-collector.enabled
+      name: opentelemetry-collector
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.52.*
+    description: NudgeBee Kubernetes agent — connects your cluster to the NudgeBee
+      backend for observability, cost, and incident automation.
+    digest: 14aa9c8bf3bddd4b416de2816bae9c3e6be4128d16c55f57174f7f81fda56f06
+    home: https://github.com/nudgebee/k8s-agent
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    keywords:
+    - kubernetes
+    - observability
+    - opentelemetry
+    - opencost
+    - monitoring
+    - clickhouse
+    - kubewatch
+    - sre
+    maintainers:
+    - email: support@nudgebee.com
+      name: NudgeBee
+      url: https://nudgebee.com
+    name: nudgebee-agent
+    sources:
+    - https://github.com/nudgebee/k8s-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.1.10/nudgebee-agent-0.1.10.tgz
+    version: 0.1.10
+  - annotations:
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://app.nudgebee.com/help/docs/installation/agent/installation/
+        - name: Source
+          url: https://github.com/nudgebee/k8s-agent
+    apiVersion: v2
     appVersion: 0.1.9
     created: "2026-07-10T11:08:11.732928638Z"
     dependencies:
@@ -4996,4 +5044,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2026-07-14T11:03:58.341460576Z"
+generated: "2026-07-14T12:19:37.262802454Z"
