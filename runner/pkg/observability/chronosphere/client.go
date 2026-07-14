@@ -24,8 +24,21 @@ import (
 
 type Client struct {
 	BaseURL string
-	APIKey  string // sent as Authorization: Bearer <key>
-	HTTP    *http.Client
+	// TracesURL (CHRONOSPHERE_TRACES_URL) overrides the traces endpoint. When
+	// set it is used verbatim; otherwise QueryTraces posts to
+	// BaseURL + /api/v1/data/traces. Mirrors the legacy chronosphere_client.
+	TracesURL string
+	APIKey    string // sent as Authorization: Bearer <key>
+	HTTP      *http.Client
+}
+
+// tracesEndpoint returns the URL QueryTraces posts to: the explicit
+// TracesURL override when set, else the composed BaseURL path.
+func (c *Client) tracesEndpoint() string {
+	if c.TracesURL != "" {
+		return c.TracesURL
+	}
+	return c.BaseURL + "/api/v1/data/traces"
 }
 
 func New(baseURL string, httpClient *http.Client) *Client {
@@ -37,7 +50,7 @@ func New(baseURL string, httpClient *http.Client) *Client {
 
 // QueryTraces forwards params as the search request body.
 func (c *Client) QueryTraces(ctx context.Context, params any) (json.RawMessage, error) {
-	if c.BaseURL == "" {
+	if c.BaseURL == "" && c.TracesURL == "" {
 		return nil, errors.New("chronosphere: base URL not configured")
 	}
 	if params == nil {
@@ -48,7 +61,7 @@ func (c *Client) QueryTraces(ctx context.Context, params any) (json.RawMessage, 
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.BaseURL+"/api/v1/data/traces", bytes.NewReader(body))
+		c.tracesEndpoint(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
