@@ -71,7 +71,16 @@ func (c *Client) ValueSuggest(ctx context.Context, params any) (json.RawMessage,
 // endpoints.
 func withAutocompleteDefaults(params any) map[string]any {
 	m := map[string]any{}
-	if params != nil {
+	switch p := params.(type) {
+	case nil:
+		// no caller params
+	case map[string]any:
+		// Common case: dispatch already hands us a map — copy it (into a fresh
+		// map so we don't mutate the caller's) instead of round-tripping JSON.
+		for k, v := range p {
+			m[k] = v
+		}
+	default:
 		if b, err := json.Marshal(params); err == nil {
 			_ = json.Unmarshal(b, &m)
 		}
