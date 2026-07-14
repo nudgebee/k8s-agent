@@ -1,9 +1,13 @@
 // Package pinot is a thin HTTP wrapper for Apache Pinot's controller REST API.
 //
 // Action surface:
-//   - pinot_query  : POST /query/sql — execute a SQL query
-//   - pinot_tables : GET  /tables    — list available tables
-//   - pinot_schema : GET  /schemas/{table} — column layout for a table
+//   - pinot_query  : POST /query/sql (broker) — execute a SQL query,
+//     falling back to POST /sql (controller) on a 404
+//   - pinot_tables : GET  /tables    — list available tables (controller)
+//   - pinot_schema : GET  /schemas/{table} — column layout for a table (controller)
+//
+// PINOT_URL is expected to point at the Pinot broker; the query path there is
+// /query/sql. The /tables and /schemas endpoints are controller-only.
 //
 // All methods forward results as raw JSON bytes; backend composes higher-level logic.
 package pinot
@@ -37,8 +41,12 @@ func New(baseURL string, httpClient *http.Client) *Client {
 }
 
 // Query executes a SQL query.
-// Controller (port 9000) uses /sql; broker (port 8099) uses /query/sql.
-// Default targets the controller path — set PINOT_URL to the broker if needed.
+//
+// The chart directs operators to point PINOT_URL at the Pinot *broker*
+// (port 8099), whose query path is /query/sql. The controller (port 9000)
+// serves /sql. We POST to /query/sql first (the documented setup) and fall
+// back to /sql on a 404, so both broker and controller URLs work without
+// the operator having to know the difference.
 func (c *Client) Query(ctx context.Context, sql string) (json.RawMessage, error) {
 	if sql == "" {
 		return nil, errors.New("pinot: sql query is required")
@@ -47,7 +55,21 @@ func (c *Client) Query(ctx context.Context, sql string) (json.RawMessage, error)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
-	return c.do(ctx, http.MethodPost, "/sql", body, "application/json")
+	raw, status, err := c.doRaw(ctx, http.MethodPost, "/query/sql", body, "application/json")
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		// PINOT_URL points at the controller — retry the controller path.
+		raw, status, err = c.doRaw(ctx, http.MethodPost, "/sql", body, "application/json")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("pinot query: HTTP %d: %s", status, string(raw))
+	}
+	return raw, nil
 }
 
 // Tables returns the list of available Pinot tables.
@@ -63,9 +85,25 @@ func (c *Client) Schema(ctx context.Context, table string) (json.RawMessage, err
 	return c.do(ctx, http.MethodGet, "/schemas/"+table, nil, "")
 }
 
+// do issues a request and treats any HTTP >= 400 as an error. Used by the
+// table/schema helpers where a single fixed path is expected.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, contentType string) (json.RawMessage, error) {
+	raw, status, err := c.doRaw(ctx, method, path, body, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("pinot %s: HTTP %d: %s", path, status, string(raw))
+	}
+	return raw, nil
+}
+
+// doRaw issues a request and returns the body + HTTP status without treating
+// a 4xx as an error, so callers (Query) can act on a 404 to retry an
+// alternate path. err is non-nil only for transport/read failures.
+func (c *Client) doRaw(ctx context.Context, method, path string, body []byte, contentType string) (json.RawMessage, int, error) {
 	if c.BaseURL == "" {
-		return nil, errors.New("pinot: base URL not configured")
+		return nil, 0, errors.New("pinot: base URL not configured")
 	}
 	var rd io.Reader
 	if body != nil {
@@ -73,7 +111,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, conte
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rd)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -90,15 +128,12 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, conte
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("pinot %s %s: %w", method, path, err)
+		return nil, 0, fmt.Errorf("pinot %s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("pinot %s: HTTP %d: %s", path, resp.StatusCode, string(respBody))
-	}
-	return json.RawMessage(respBody), nil
+	return json.RawMessage(respBody), resp.StatusCode, nil
 }
