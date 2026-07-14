@@ -70,6 +70,11 @@ type Config struct {
 	// Chronosphere
 	ChronosphereURL    string
 	ChronosphereAPIKey string
+	// ChronosphereTracesURL (CHRONOSPHERE_TRACES_URL) overrides the traces
+	// search endpoint. When set it is used verbatim; otherwise the client
+	// falls back to ChronosphereURL + /api/v1/data/traces. Mirrors the
+	// legacy chronosphere_client which POSTs to CHRONOSPHERE_TRACES_URL.
+	ChronosphereTracesURL string
 
 	// Pinot
 	PinotURL       string
@@ -253,18 +258,19 @@ func FromEnv() (*Config, error) {
 		// deployment that only sets JAEGER_QUERY_URL doesn't end up with the
 		// backend dispatching jaeger_query_* while the agent rejects them as
 		// "not in light-action allowlist".
-		JaegerURL:          cmp(os.Getenv("JAEGER_URL"), os.Getenv("JAEGER_QUERY_URL")),
-		JaegerToken:        os.Getenv("JAEGER_TOKEN"),
-		ChronosphereURL:    os.Getenv("CHRONOSPHERE_URL"),
-		ChronosphereAPIKey: os.Getenv("CHRONOSPHERE_API_KEY"),
-		PinotURL:           os.Getenv("PINOT_URL"),
-		PinotAuthToken:     os.Getenv("PINOT_AUTH_TOKEN"),
-		PinotUsername:      os.Getenv("PINOT_USERNAME"),
-		PinotPassword:      os.Getenv("PINOT_PASSWORD"),
-		HTTPProxyTargets:   os.Getenv("HTTP_PROXY_TARGETS"),
-		LokiRulesURL:       os.Getenv("LOKI_RULES_URL"),
-		HTTPListenAddr:     cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
-		PprofEnabled:       envBool("PPROF_ENABLED", false),
+		JaegerURL:             cmp(os.Getenv("JAEGER_URL"), os.Getenv("JAEGER_QUERY_URL")),
+		JaegerToken:           os.Getenv("JAEGER_TOKEN"),
+		ChronosphereURL:       os.Getenv("CHRONOSPHERE_URL"),
+		ChronosphereAPIKey:    os.Getenv("CHRONOSPHERE_API_KEY"),
+		ChronosphereTracesURL: os.Getenv("CHRONOSPHERE_TRACES_URL"),
+		PinotURL:              os.Getenv("PINOT_URL"),
+		PinotAuthToken:        os.Getenv("PINOT_AUTH_TOKEN"),
+		PinotUsername:         os.Getenv("PINOT_USERNAME"),
+		PinotPassword:         os.Getenv("PINOT_PASSWORD"),
+		HTTPProxyTargets:      os.Getenv("HTTP_PROXY_TARGETS"),
+		LokiRulesURL:          os.Getenv("LOKI_RULES_URL"),
+		HTTPListenAddr:        cmp(os.Getenv("HTTP_LISTEN_ADDR"), ":5000"),
+		PprofEnabled:          envBool("PPROF_ENABLED", false),
 		// K8s subsystems default-on so the agent is drop-in compatible with
 		// the legacy runner Deployment — no env additions needed for cutover.
 		// Operators can opt out per-subsystem via DISCOVERY_ENABLED=false etc.
