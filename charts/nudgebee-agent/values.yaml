@@ -120,6 +120,24 @@ runner:
   # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
   # statefulset scaling, workload creation, and rollout lifecycle management.
   enableWritePermissions: false
+  # Read-only cluster access. When true the runner's ClusterRole is strictly
+  # get/list/watch — no Secrets API access at all (not even read), no
+  # pods/exec, no pod eviction, no node patch, no write verbs on any
+  # cluster-scoped or cross-namespace resource. The writes the agent needs to
+  # function are granted by a namespaced Role in the RELEASE NAMESPACE only:
+  # scanner Jobs, script-runner pods/configmaps, in-namespace exec, and
+  # PrometheusRule CRUD (so UI-managed alert rules keep working).
+  #
+  # What stops working in this mode (denied by the API server): remediation
+  # actions on customer workloads (delete_pod, drain, cordon, rollout_restart,
+  # scale, PVC ops), rightsizing APPLY (recommendations still compute),
+  # exec/profiling/terminal into pods outside the release namespace, and
+  # private-image scan pull-secret auto-copy. Helm release inventory is
+  # unaffected (the Go runner does not read Helm secrets).
+  #
+  # Mutually exclusive with enableWritePermissions and
+  # scannerAutoCopyPullSecrets — helm template fails if both are set.
+  readOnly: false
   # Kill-switch for the runner's mutate subsystem (delete_pod, cordon,
   # rollout_restart, PrometheusRule CRUD, AlertManager silences, Loki rules).
   # Default is true so the light-action alert-rule path (driven by the UI)
