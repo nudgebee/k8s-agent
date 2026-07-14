@@ -54,8 +54,9 @@ type Config struct {
 	ElasticsearchUser      string
 	ElasticsearchPassword  string
 	ElasticsearchAPIKey    string
-	ElasticsearchEnabled   bool // ELASTICSEARCH_ENABLED; default true when URL is set
-	ElasticsearchSSLVerify bool // ELASTICSEARCH_SSL_VERIFY; default false (skip cert verify) to match legacy
+	ElasticsearchHeaders   string // ELASTICSEARCH_HEADER; ";"-separated "Header: value" pairs
+	ElasticsearchEnabled   bool   // ELASTICSEARCH_ENABLED; default true when URL is set
+	ElasticsearchSSLVerify bool   // ELASTICSEARCH_SSL_VERIFY; default false (skip cert verify) to match legacy
 
 	// Signoz
 	SignozURL      string
@@ -231,6 +232,7 @@ func FromEnv() (*Config, error) {
 		ElasticsearchUser:        os.Getenv("ELASTICSEARCH_USERNAME"),
 		ElasticsearchPassword:    os.Getenv("ELASTICSEARCH_PASSWORD"),
 		ElasticsearchAPIKey:      os.Getenv("ELASTICSEARCH_APIKEY"),
+		ElasticsearchHeaders:     os.Getenv("ELASTICSEARCH_HEADER"),
 		// ELASTICSEARCH_ENABLED is the explicit opt-in for ES as the logs
 		// provider, defaulting false to match the legacy agent
 		// (env_vars.ELASTICSEARCH_ENABLED = load_bool(..., False)) and the prod

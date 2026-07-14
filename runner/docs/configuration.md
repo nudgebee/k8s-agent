@@ -55,6 +55,7 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | `ELASTICSEARCH_URL` | optional | Enables `query_es*` actions |
 | `ELASTICSEARCH_USERNAME` / `_PASSWORD` | optional | Basic auth (one of these or `_APIKEY` is needed if ES requires auth) |
 | `ELASTICSEARCH_APIKEY` | optional | Alternative to user/pass |
+| `ELASTICSEARCH_HEADER` | optional | Semicolon-separated `Header: value` pairs sent on every ES request (same format as PROMETHEUS_HEADERS) |
 | `ELASTICSEARCH_SSL_VERIFY` | optional | Verify the ES server TLS cert (https only). Default `false` (skip verify), matching the legacy client |
 | `SIGNOZ_URL` / `SIGNOZ_API_KEY` | optional | `signoz_*` actions; API key sent as `SIGNOZ-API-KEY` header |
 | `SIGNOZ_USER` / `SIGNOZ_PASSWORD` | optional | Alternative auth: JWT minted via `/api/v1/login` (used when `SIGNOZ_API_KEY` is unset) |
