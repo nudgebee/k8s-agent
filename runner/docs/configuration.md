@@ -45,7 +45,7 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | Variable | Required | Description |
 |---|---|---|
 | `PROMETHEUS_URL` | recommended | Enables `prometheus_*` actions and `service_map` |
-| `PROMETHEUS_HEADERS` | optional | Comma-separated `Header: value` pairs (e.g. `X-Scope-OrgID: tenant-1`); use for static basic/bearer auth |
+| `PROMETHEUS_HEADERS` | optional | Semicolon-separated `Header: value` pairs (e.g. `X-Scope-OrgID: tenant-1`); use for static basic/bearer auth |
 | `AWS_ACCESS_KEY` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | optional | Managed Prometheus: sign requests with AWS SigV4. `AWS_SERVICE_NAME` defaults to `aps` |
 | `CORALOGIX_PROMETHEUS_TOKEN` | optional | Managed Prometheus: sent as `token` header |
 | `AZURE_USE_MANAGED_ID` / `AZURE_CLIENT_SECRET` (+ `AZURE_CLIENT_ID` / `AZURE_TENANT_ID`) | optional | Managed Prometheus: Azure AD Bearer token (managed identity or client-secret). Precedence: AWS → Coralogix → Azure |
@@ -68,9 +68,9 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | Variable | Description |
 |---|---|
 | `ALERTMANAGER_URL` | Enables `get_silences`, `add_silence`, `delete_silence` |
-| `ALERTMANAGER_HEADERS` | Comma-separated headers for AlertManager |
+| `ALERTMANAGER_HEADERS` | Semicolon-separated headers for AlertManager |
 | `LOKI_RULES_URL` | Loki ruler component URL — enables `create_loki_alert_rule`, etc. |
-| `LOKI_RULES_HEADERS` | Comma-separated headers for Loki rules API |
+| `LOKI_RULES_HEADERS` | Semicolon-separated headers for Loki rules API |
 
 ## Authentication
 
