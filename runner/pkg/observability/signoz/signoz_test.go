@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,66 @@ func TestEachEndpoint_RoutesCorrectly(t *testing.T) {
 				t.Errorf("method = %q; want %q", method, c.method)
 			}
 		})
+	}
+}
+
+func TestAutocompleteSuggests_InjectRequiredDefaults(t *testing.T) {
+	// Signoz's autocomplete GET endpoints reject an empty aggregateOperator
+	// ("invalid operator:"). The client must default dataSource=logs and
+	// aggregateOperator=noop when the caller omits them.
+	cases := []struct {
+		name string
+		fn   func(c *Client) error
+	}{
+		{"label_suggest", func(c *Client) error {
+			_, err := c.LabelSuggest(context.Background(), map[string]any{})
+			return err
+		}},
+		{"value_suggest", func(c *Client) error {
+			_, err := c.ValueSuggest(context.Background(), map[string]any{"attributeKey": "k8s.pod.name"})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var q url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				q = r.URL.Query()
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+			if err := tc.fn(New(srv.URL, nil)); err != nil {
+				t.Fatal(err)
+			}
+			if got := q.Get("aggregateOperator"); got != "noop" {
+				t.Errorf("aggregateOperator = %q; want noop", got)
+			}
+			if got := q.Get("dataSource"); got != "logs" {
+				t.Errorf("dataSource = %q; want logs", got)
+			}
+		})
+	}
+}
+
+func TestAutocompleteSuggests_PreserveCallerValues(t *testing.T) {
+	var q url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q = r.URL.Query()
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, nil).LabelSuggest(context.Background(), map[string]any{
+		"dataSource":        "traces",
+		"aggregateOperator": "count",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.Get("dataSource"); got != "traces" {
+		t.Errorf("dataSource = %q; want traces (caller value preserved)", got)
+	}
+	if got := q.Get("aggregateOperator"); got != "count" {
+		t.Errorf("aggregateOperator = %q; want count (caller value preserved)", got)
 	}
 }
 

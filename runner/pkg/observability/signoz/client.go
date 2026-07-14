@@ -7,7 +7,10 @@
 //
 // query_range forwards the action_params JSON as the request body. The
 // autocomplete suggests take their params as URL query string (Signoz serves
-// those endpoints via GET). All return the raw response; backend composes.
+// those endpoints via GET) and are defaulted to dataSource=logs and
+// aggregateOperator=noop when the caller omits them — Signoz (self-hosted
+// ≤ v0.51) rejects an empty aggregateOperator with "invalid operator:". All
+// return the raw response; backend composes.
 package signoz
 
 import (
@@ -53,11 +56,33 @@ func (c *Client) QueryRange(ctx context.Context, params any) (json.RawMessage, e
 }
 
 func (c *Client) LabelSuggest(ctx context.Context, params any) (json.RawMessage, error) {
-	return c.get(ctx, "/api/v3/autocomplete/attribute_keys", params)
+	return c.get(ctx, "/api/v3/autocomplete/attribute_keys", withAutocompleteDefaults(params))
 }
 
 func (c *Client) ValueSuggest(ctx context.Context, params any) (json.RawMessage, error) {
-	return c.get(ctx, "/api/v3/autocomplete/attribute_values", params)
+	return c.get(ctx, "/api/v3/autocomplete/attribute_values", withAutocompleteDefaults(params))
+}
+
+// withAutocompleteDefaults fills in the query params Signoz's autocomplete GET
+// endpoints require but that a caller may omit. Signoz (self-hosted ≤ v0.51)
+// returns HTTP 400 "invalid operator:" when aggregateOperator is empty, and
+// defaults the source to logs. Caller-supplied values are preserved. Mirrors
+// the legacy Python client, which injected aggregateOperator=noop for these
+// endpoints.
+func withAutocompleteDefaults(params any) map[string]any {
+	m := map[string]any{}
+	if params != nil {
+		if b, err := json.Marshal(params); err == nil {
+			_ = json.Unmarshal(b, &m)
+		}
+	}
+	if s, ok := m["dataSource"].(string); !ok || s == "" {
+		m["dataSource"] = "logs"
+	}
+	if s, ok := m["aggregateOperator"].(string); !ok || s == "" {
+		m["aggregateOperator"] = "noop"
+	}
+	return m
 }
 
 func (c *Client) post(ctx context.Context, path string, params any) (json.RawMessage, error) {
