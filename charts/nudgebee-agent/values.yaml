@@ -19,7 +19,7 @@ enableServiceMonitors: true
 kubewatch:
   image:
     repository: ghcr.io/nudgebee/kubewatch
-    tag: 2.14.1-nb.1
+    tag: 2.14.1-nb.2
   imagePullPolicy: IfNotPresent
   pprof: true
   resources:
@@ -65,7 +65,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-07-09T12-54-36_10e2c3944495656eea7955fa063091cfe99866eb
+    tag: 2026-07-10T10-44-31_3d1cca8c6c01a5b06c317a24a1f77e1b9f83ff14
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.

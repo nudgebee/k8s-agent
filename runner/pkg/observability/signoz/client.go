@@ -2,11 +2,12 @@
 //
 // Action surface:
 //   - signoz_query_range   : POST /api/v3/query_range
-//   - signoz_label_suggest : POST /api/v3/autocomplete/attribute_keys
-//   - signoz_value_suggest : POST /api/v3/autocomplete/attribute_values
+//   - signoz_label_suggest : GET  /api/v3/autocomplete/attribute_keys
+//   - signoz_value_suggest : GET  /api/v3/autocomplete/attribute_values
 //
-// All three forward the action_params JSON as the request body and return
-// the raw response. Signoz's body shapes are passthrough; backend composes.
+// query_range forwards the action_params JSON as the request body. The
+// autocomplete suggests take their params as URL query string (Signoz serves
+// those endpoints via GET). All return the raw response; backend composes.
 package signoz
 
 import (
@@ -17,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,11 +53,11 @@ func (c *Client) QueryRange(ctx context.Context, params any) (json.RawMessage, e
 }
 
 func (c *Client) LabelSuggest(ctx context.Context, params any) (json.RawMessage, error) {
-	return c.post(ctx, "/api/v3/autocomplete/attribute_keys", params)
+	return c.get(ctx, "/api/v3/autocomplete/attribute_keys", params)
 }
 
 func (c *Client) ValueSuggest(ctx context.Context, params any) (json.RawMessage, error) {
-	return c.post(ctx, "/api/v3/autocomplete/attribute_values", params)
+	return c.get(ctx, "/api/v3/autocomplete/attribute_values", params)
 }
 
 func (c *Client) post(ctx context.Context, path string, params any) (json.RawMessage, error) {
@@ -73,6 +76,27 @@ func (c *Client) post(ctx context.Context, path string, params any) (json.RawMes
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return c.do(ctx, req, path)
+}
+
+func (c *Client) get(ctx context.Context, path string, params any) (json.RawMessage, error) {
+	if c.BaseURL == "" {
+		return nil, errors.New("signoz: base URL not configured")
+	}
+	reqURL := c.BaseURL + path
+	if q := toQuery(params); len(q) > 0 {
+		reqURL += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.do(ctx, req, path)
+}
+
+// do applies auth + extra headers, sends the request, and returns the raw body
+// or an error for any non-2xx/3xx status. Shared by post and get.
+func (c *Client) do(ctx context.Context, req *http.Request, path string) (json.RawMessage, error) {
 	if err := c.applyAuth(ctx, req); err != nil {
 		return nil, err
 	}
@@ -94,6 +118,45 @@ func (c *Client) post(ctx context.Context, path string, params any) (json.RawMes
 		return nil, fmt.Errorf("signoz %s: HTTP %d: %s", path, resp.StatusCode, string(respBody))
 	}
 	return json.RawMessage(respBody), nil
+}
+
+// toQuery flattens a JSON-object params payload into URL query values so the
+// autocomplete GET endpoints receive dataSource/aggregateOperator/searchText/etc.
+// Nested arrays/objects are JSON-encoded; scalars are stringified.
+func toQuery(params any) url.Values {
+	if params == nil {
+		return nil
+	}
+	b, err := json.Marshal(params)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil
+	}
+	q := url.Values{}
+	for k, v := range m {
+		switch val := v.(type) {
+		case nil:
+			// skip nulls
+		case string:
+			q.Set(k, val)
+		case bool:
+			q.Set(k, strconv.FormatBool(val))
+		case float64:
+			if val == float64(int64(val)) {
+				q.Set(k, strconv.FormatInt(int64(val), 10))
+			} else {
+				q.Set(k, strconv.FormatFloat(val, 'f', -1, 64))
+			}
+		default:
+			if jb, err := json.Marshal(val); err == nil {
+				q.Set(k, string(jb))
+			}
+		}
+	}
+	return q
 }
 
 // applyAuth sets the auth header on req. Prefers the API key when set,

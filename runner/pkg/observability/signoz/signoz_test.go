@@ -104,28 +104,30 @@ func TestAPIKey_TakesPrecedenceOverPassword(t *testing.T) {
 
 func TestEachEndpoint_RoutesCorrectly(t *testing.T) {
 	cases := []struct {
-		name string
-		path string
-		fn   func(c *Client) error
+		name   string
+		path   string
+		method string
+		fn     func(c *Client) error
 	}{
-		{"query_range", "/api/v3/query_range", func(c *Client) error {
+		{"query_range", "/api/v3/query_range", http.MethodPost, func(c *Client) error {
 			_, err := c.QueryRange(context.Background(), map[string]any{})
 			return err
 		}},
-		{"label_suggest", "/api/v3/autocomplete/attribute_keys", func(c *Client) error {
+		{"label_suggest", "/api/v3/autocomplete/attribute_keys", http.MethodGet, func(c *Client) error {
 			_, err := c.LabelSuggest(context.Background(), map[string]any{})
 			return err
 		}},
-		{"value_suggest", "/api/v3/autocomplete/attribute_values", func(c *Client) error {
+		{"value_suggest", "/api/v3/autocomplete/attribute_values", http.MethodGet, func(c *Client) error {
 			_, err := c.ValueSuggest(context.Background(), map[string]any{})
 			return err
 		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var path string
+			var path, method string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				path = r.URL.Path
+				method = r.Method
 				_, _ = w.Write([]byte(`{}`))
 			}))
 			defer srv.Close()
@@ -135,6 +137,9 @@ func TestEachEndpoint_RoutesCorrectly(t *testing.T) {
 			}
 			if path != c.path {
 				t.Errorf("path = %q; want %q", path, c.path)
+			}
+			if method != c.method {
+				t.Errorf("method = %q; want %q", method, c.method)
 			}
 		})
 	}
