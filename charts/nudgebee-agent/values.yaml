@@ -8,7 +8,7 @@ globalConfig:
   # Prometheus URL the runner queries (e.g. "http://prometheus-server.prometheus.svc:80").
   # Surfaces as PROMETHEUS_URL on the runner pod. Leave empty to let the agent auto-discover.
   prometheus_url: ""
-  # Optional headers (comma-separated "Header: value" pairs). Surfaces as PROMETHEUS_HEADERS.
+  # Optional headers (semicolon-separated "Header: value" pairs, e.g. "X-Scope-OrgID: t1; Authorization: Bearer x"). Surfaces as PROMETHEUS_HEADERS.
   prometheus_headers: ""
   # Optional labels appended to every PromQL query (legacy multi-cluster parity).
   # A YAML map, e.g. {k8s_cluster: aws-prod}. Surfaces as PROMETHEUS_ADDITIONAL_LABELS
