@@ -255,7 +255,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	var promClient *prometheus.Client
 	if cfg.PrometheusURL != "" {
 		promClient = prometheus.New(cfg.PrometheusURL, nil)
-		promClient.ExtraHeaders = config.ParseHeaders(cfg.PrometheusHeaders)
+		promClient.ExtraHeaders = promHeadersWithAuth(cfg)
+		promClient.URLQueryString = cfg.PrometheusURLQueryString
 		// Managed-provider auth, same precedence as the legacy
 		// generate_prometheus_config: AWS SigV4 → Coralogix token → Azure AD.
 		// Plain header/basic auth stays in PROMETHEUS_HEADERS above.
@@ -761,7 +762,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			cfg.PrometheusURL, config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			cfg.PrometheusURL, promHeadersWithAuth(cfg), nil)
+		gp.PrometheusQueryString = cfg.PrometheusURLQueryString
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
 			logger.Info("grafana proxy enabled", "url", grafanaURL)
@@ -999,7 +1001,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogProviderConfig:          logCfg,
 					PrometheusConnected:        prometheusConnected(probeCtx, promClient, logger),
 					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
-					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
+					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, cfg.PrometheusRetentionTime, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
 					TraceTable:                 traceTable,
 					JaegerEnabled:              jaegerEnabled,
@@ -1347,6 +1349,18 @@ func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[s
 // sslVerify is false (the legacy default), it disables TLS certificate
 // verification to match the legacy client's verify_certs=False. For plain
 // http URLs the TLS config is inert.
+// promHeadersWithAuth parses PROMETHEUS_HEADERS and, when PROMETHEUS_AUTH is
+// set, overlays it as the Authorization header (legacy prometheus_auth). Set,
+// not Add, so PROMETHEUS_AUTH takes precedence over any Authorization carried
+// in PROMETHEUS_HEADERS instead of doubling it.
+func promHeadersWithAuth(cfg *config.Config) http.Header {
+	h := config.ParseHeaders(cfg.PrometheusHeaders)
+	if cfg.PrometheusAuth != "" {
+		h.Set("Authorization", cfg.PrometheusAuth)
+	}
+	return h
+}
+
 func esHTTPClient(sslVerify bool) *http.Client {
 	if sslVerify {
 		return nil // nil → elasticsearch.New builds a default verifying client

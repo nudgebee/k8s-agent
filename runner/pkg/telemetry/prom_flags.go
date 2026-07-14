@@ -17,28 +17,30 @@ type prometheusFlagsResponse struct {
 	Data   map[string]string `json:"data"`
 }
 
-// PrometheusRetention queries /api/v1/status/flags and returns the
-// `storage.tsdb.retention.time` value. Empty string on any error.
-// VictoriaMetrics' vmsingle returns 404 for this endpoint — caller must
-// tolerate the empty return.
-func PrometheusRetention(ctx context.Context, c *prometheus.Client, logger *slog.Logger) string {
+// PrometheusRetention queries /api/v1/status/flags and returns the retention
+// value. It reads Prometheus' `storage.tsdb.retention.time`, then the compat
+// `retentionTime`, then VictoriaMetrics' `-retentionPeriod` (vmsingle exposes
+// its flags under CLI-style keys). When the endpoint is unavailable (vmsingle
+// 404s it) or none of those keys are present, it falls back to the caller-
+// supplied value (PROMETHEUS_RETENTION_TIME). Empty string when nothing
+// resolves.
+func PrometheusRetention(ctx context.Context, c *prometheus.Client, fallback string, logger *slog.Logger) string {
 	if c == nil || c.BaseURL == "" {
-		return ""
+		return fallback
 	}
 	raw, err := c.Flags(ctx)
 	if err != nil {
-		logger.Debug("prometheus flags probe failed", "err", err)
-		return ""
+		logger.Debug("prometheus flags probe failed; using retention fallback", "err", err)
+		return fallback
 	}
 	var resp prometheusFlagsResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return ""
+		return fallback
 	}
-	if v := resp.Data["storage.tsdb.retention.time"]; v != "" {
-		return v
+	for _, k := range []string{"storage.tsdb.retention.time", "retentionTime", "-retentionPeriod"} {
+		if v := resp.Data[k]; v != "" {
+			return v
+		}
 	}
-	if v := resp.Data["retentionTime"]; v != "" {
-		return v
-	}
-	return ""
+	return fallback
 }

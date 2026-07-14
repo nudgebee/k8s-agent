@@ -37,7 +37,12 @@ type Client struct {
 	// ExtraHeaders are sent on every request. Used for X-Scope-OrgID
 	// (Cortex/Mimir multi-tenant) and any auth headers the operator
 	// configures via the runner secret today (LOKI_EXTRA_HEADER pattern).
+	// PROMETHEUS_AUTH is delivered here as an Authorization header.
 	ExtraHeaders http.Header
+
+	// URLQueryString (PROMETHEUS_URL_QUERY_STRING) is appended to the query
+	// string of every request. Empty is a no-op. Leading "?" is optional.
+	URLQueryString string
 
 	// Auth applies a managed-provider auth scheme (AWS SigV4 / Azure AD /
 	// Coralogix) to each request. Nil when the backend uses plain headers
@@ -171,6 +176,22 @@ func (c *Client) Flags(ctx context.Context) (json.RawMessage, error) {
 	return c.get(ctx, "/api/v1/status/flags", nil)
 }
 
+// appendQueryString appends extra (a "k=v&k2=v2" fragment, with an optional
+// leading "?") to rawurl's query, choosing "?" or "&" based on whether
+// rawurl already has a query. Empty extra is a no-op.
+func appendQueryString(rawurl, extra string) string {
+	extra = strings.TrimSpace(extra)
+	extra = strings.TrimPrefix(extra, "?")
+	if extra == "" {
+		return rawurl
+	}
+	sep := "?"
+	if strings.Contains(rawurl, "?") {
+		sep = "&"
+	}
+	return rawurl + sep + extra
+}
+
 func (c *Client) get(ctx context.Context, path string, params url.Values) (json.RawMessage, error) {
 	if c.BaseURL == "" {
 		return nil, errors.New("prometheus: base URL not configured")
@@ -179,6 +200,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) (json.
 	if len(params) > 0 {
 		u += "?" + params.Encode()
 	}
+	u = appendQueryString(u, c.URLQueryString)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
