@@ -835,6 +835,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		eng := triggers.NewEngine(triggers.Builtins(), time.Now())
 		if typedKube != nil {
 			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
+			// Service-backends lister lets service_no_endpoints resolve a
+			// Service's selector against live pods + workload templates.
+			// Without it (no K8s client) that matcher never fires.
+			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(typedKube))
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(triggers.Builtins()))
