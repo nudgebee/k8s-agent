@@ -386,16 +386,20 @@ func ParseTargets(s string) map[string]string {
 	return out
 }
 
-// ParseHeaders splits a comma-separated "Header: value" string into an
-// http.Header. Returns an empty Header for empty input. Same shape used
-// by the GRAFANA_EXTRA_HEADER / LOKI_EXTRA_HEADER pattern (a single
-// "Header: value" or comma-separated list).
+// ParseHeaders splits a semicolon-separated "Header: value" string into an
+// http.Header. Returns an empty Header for empty input. Same shape used by
+// the GRAFANA_EXTRA_HEADER / LOKI_EXTRA_HEADER / PROMETHEUS_HEADERS pattern
+// (a single "Header: value" or ";"-separated list).
+//
+// The legacy Python agent split these vars on ";", so a header *value* may
+// itself contain a comma (e.g. a multi-value Accept header) without being
+// truncated. Multi-header configs must use ";" between pairs.
 func ParseHeaders(s string) http.Header {
 	h := http.Header{}
 	if s == "" {
 		return h
 	}
-	for _, part := range strings.Split(s, ",") {
+	for _, part := range strings.Split(s, ";") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
