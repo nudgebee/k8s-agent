@@ -4,15 +4,18 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clienttesting "k8s.io/client-go/testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -141,6 +144,43 @@ func TestRolloutRestart_StatefulSetAndDaemonSet(t *testing.T) {
 	}
 	if err := m.RolloutRestart(context.Background(), "daemonset", "ns", "ds"); err != nil {
 		t.Errorf("daemonset: %v", err)
+	}
+}
+
+func TestRolloutRestart_Rollout_PatchesRestartAt(t *testing.T) {
+	existing := seedExisting("argoproj.io/v1alpha1", "Rollout", "checkout", "shop", "100")
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme(), existing)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+
+	if err := m.RolloutRestart(context.Background(), "rollout", "shop", "checkout"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := dyn.Resource(scalableWorkloadGVRs["rollout"]).Namespace("shop").
+		Get(context.Background(), "checkout", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartAt, found, err := unstructured.NestedString(got.Object, "spec", "restartAt")
+	if err != nil || !found {
+		t.Fatalf("spec.restartAt not set (found=%v err=%v): %v", found, err, got.Object)
+	}
+	if _, err := time.Parse(time.RFC3339, restartAt); err != nil {
+		t.Errorf("spec.restartAt %q is not RFC3339: %v", restartAt, err)
+	}
+	// The canonical Argo restart must NOT touch the pod template — that would
+	// trigger a full canary/blueGreen rollout instead of a restart.
+	if _, found, _ := unstructured.NestedMap(got.Object, "spec", "template"); found {
+		t.Error("spec.template was mutated; rollout restart must only set spec.restartAt")
+	}
+}
+
+func TestRolloutRestart_Rollout_RequiresDynamicClient(t *testing.T) {
+	m := New(fake.NewClientset(), "", nil)
+	err := m.RolloutRestart(context.Background(), "rollout", "shop", "checkout")
+	if err == nil || !strings.Contains(err.Error(), "dynamic client not configured") {
+		t.Errorf("expected dynamic-client error, got %v", err)
 	}
 }
 
