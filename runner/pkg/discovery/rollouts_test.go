@@ -154,7 +154,7 @@ func TestRolloutConverter_PodLookup(t *testing.T) {
 // end-to-end.
 func TestService_EmitsRolloutSnapshot(t *testing.T) {
 	cs := fake.NewClientset()
-	cs.Fake.Resources = argoServedResources()
+	cs.Resources = argoServedResources()
 	dyn := dynamicfake.NewSimpleDynamicClient(rolloutScheme(), rolloutFixture("checkout", "shop"))
 
 	var (
@@ -233,7 +233,7 @@ func TestRegisterRollouts_SkipsWhenCRDAbsent(t *testing.T) {
 
 func TestRegisterRollouts_SkipsWhenListForbidden(t *testing.T) {
 	cs := fake.NewClientset()
-	cs.Fake.Resources = argoServedResources()
+	cs.Resources = argoServedResources()
 	dyn := dynamicfake.NewSimpleDynamicClient(rolloutScheme())
 	dyn.PrependReactor("list", "rollouts", func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(

@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"time"
 
@@ -123,6 +124,19 @@ func newReplicaSetConverter(lookup podLookupFn) func(any) (any, bool) {
 	}
 }
 
+// clampInt32 narrows an unstructured int64 count to int32 without overflow
+// (gosec G115). Replica counts are non-negative and far below MaxInt32 in
+// practice; clamping just keeps a malformed object from wrapping around.
+func clampInt32(v int64) int32 {
+	if v < 0 {
+		return 0
+	}
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int32(v)
+}
+
 // newRolloutConverter converts an unstructured Argo Rollout into the standard
 // service dict (type "Rollout"). Handles both inline-template Rollouts and
 // workloadRef Rollouts (spec.template absent → empty template; the referenced
@@ -136,11 +150,11 @@ func newRolloutConverter(lookup podLookupFn) func(any) (any, bool) {
 		// spec.replicas defaults to 1 per Rollout semantics.
 		replicas := int32(1)
 		if v, found, _ := unstructured.NestedInt64(u.Object, "spec", "replicas"); found {
-			replicas = int32(v)
+			replicas = clampInt32(v)
 		}
 		ready := int32(0)
 		if v, found, _ := unstructured.NestedInt64(u.Object, "status", "readyReplicas"); found {
-			ready = int32(v)
+			ready = clampInt32(v)
 		}
 		var tpl corev1.PodTemplateSpec
 		if tmpl, found, _ := unstructured.NestedMap(u.Object, "spec", "template"); found {
