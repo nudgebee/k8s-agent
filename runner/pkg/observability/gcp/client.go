@@ -122,8 +122,11 @@ func nodePoolLogsBody(projectID, location string, limit int) map[string]any {
 // zoneToRegion strips the trailing zone suffix, e.g. "us-central1-a" ->
 // "us-central1". Returns the input unchanged when it has no suffix.
 func zoneToRegion(zone string) string {
-	if i := strings.LastIndex(zone, "-"); i > 0 {
-		return zone[:i]
+	if len(zone) > 2 && zone[len(zone)-2] == '-' {
+		lastChar := zone[len(zone)-1]
+		if lastChar >= 'a' && lastChar <= 'z' {
+			return zone[:len(zone)-2]
+		}
 	}
 	return zone
 }
