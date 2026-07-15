@@ -29,7 +29,7 @@ annotations:
 # these are set to the right value by .github/workflows/release.yaml
 # we use 0.0.1 as a placeholder for the version` because Helm wont allow `0.0.0` and we want to be able to run
 # `helm install` on development checkouts without updating this file. the version doesn't matter in that case anyway
-version: 0.1.12
+version: 0.1.13
 appVersion: 0.1.11
 dependencies:
 - name: opencost

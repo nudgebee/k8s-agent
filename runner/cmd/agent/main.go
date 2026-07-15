@@ -1072,6 +1072,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		discSvc.RegisterAll() // Pod, Deployment, StatefulSet, DaemonSet, Node, Namespace
 		// TODO(phase-4): ReplicaSet, Job, CronJob, Helm releases — each requires
 		// a converter + shadow-diff before promotion.
+		if dynamicKube != nil {
+			// Argo Rollouts inventory. No-ops (with a log) when the Rollout CRD
+			// is not served or the rollouts RBAC is absent.
+			discSvc.RegisterRollouts(gctx, dynamicKube)
+		}
 		g.Go(func() error {
 			logger.Info("starting discovery", "resync", cfg.DiscoveryResync)
 			if err := discSvc.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
