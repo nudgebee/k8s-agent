@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"sort"
+	"sync/atomic"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,14 @@ var rolloutGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1a
 type serviceBackendsLister struct {
 	cs  kubernetes.Interface
 	dyn dynamic.Interface // optional; enables the Rollouts template check
+
+	// rolloutsUnsupported latches true after the first NotFound/Forbidden
+	// from the rollouts API, so CRD-less clusters don't take a guaranteed
+	// 403/404 round-trip (and audit-log entry) on every subsequent check.
+	// Installing the CRD later needs an agent restart to be picked up —
+	// same trade-off the chart makes by gating rollouts RBAC on the CRD
+	// existing at install time.
+	rolloutsUnsupported atomic.Bool
 }
 
 func newServiceBackendsLister(cs kubernetes.Interface, dyn dynamic.Interface) triggers.ServiceBackendsLister {
@@ -106,7 +115,7 @@ func (l *serviceBackendsLister) AnyWorkloadTemplateMatching(ctx context.Context,
 // Deployment, which the typed sweep above already covers. A cluster
 // without the CRD (404) counts as "no rollouts", not an error.
 func (l *serviceBackendsLister) anyRolloutTemplateMatching(ctx context.Context, namespace string, sel labels.Selector) (bool, error) {
-	if l.dyn == nil {
+	if l.dyn == nil || l.rolloutsUnsupported.Load() {
 		return false, nil
 	}
 	list, err := l.dyn.Resource(rolloutGVR).Namespace(namespace).List(ctx, metav1.ListOptions{ResourceVersion: "0"})
@@ -117,8 +126,10 @@ func (l *serviceBackendsLister) anyRolloutTemplateMatching(ctx context.Context, 
 		// the request before checking resource existence. Either way this
 		// sweep is best-effort — treat as "no rollouts" rather than
 		// failing the whole workload probe (which would suppress the
-		// finding entirely via the predicate's fail-open).
+		// finding entirely via the predicate's fail-open), and latch the
+		// state so we don't re-probe a known-unsupported API every check.
 		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+			l.rolloutsUnsupported.Store(true)
 			return false, nil
 		}
 		return false, err
