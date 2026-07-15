@@ -85,6 +85,33 @@ func (e *Engine) fetchNamespaceEvents(namespace string) []EvidenceBlock {
 		namespace, "", "", "Recent events in namespace "+namespace, supplementaryEventsLimit)
 }
 
+// Labels stamped by the agent's own job scheduler (pkg/scanners) on the
+// Jobs it creates and their pods. Duplicated here rather than imported —
+// scanners and triggers are independent packages and the label contract
+// is stable.
+const (
+	agentManagedByLabel = "app.kubernetes.io/managed-by"
+	agentManagedByValue = "nudgebee-agent"
+)
+
+// isAgentManaged reports whether the object is one of the agent's own
+// scheduled workloads (scan Jobs and their pods). These are internal
+// plumbing: their failures are tracked by the scan orchestrator's own
+// run accounting, and surfacing them as customer-facing Findings only
+// produces noise (e.g. an ImagePullBackOff on a trivy scan Job).
+func isAgentManaged(obj map[string]any) bool {
+	meta, _ := obj["metadata"].(map[string]any)
+	if meta == nil {
+		return false
+	}
+	labels, _ := meta["labels"].(map[string]any)
+	if labels == nil {
+		return false
+	}
+	v, _ := labels[agentManagedByLabel].(string)
+	return v == agentManagedByValue
+}
+
 // Match runs every matcher against the event and returns one Match per
 // fired trigger. A single event can fire several matchers (a Pod can be
 // both ImagePullBackOff and CrashLoopBackOff).
@@ -102,6 +129,10 @@ func (e *Engine) fetchNamespaceEvents(namespace string) []EvidenceBlock {
 // keys from non-matching events.
 func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 	if ev.Obj == nil {
+		return nil
+	}
+	// The agent's own scheduled workloads never produce Findings.
+	if isAgentManaged(ev.Obj) {
 		return nil
 	}
 	matches := make([]Match, 0, 1)
