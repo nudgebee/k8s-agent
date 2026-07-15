@@ -137,6 +137,8 @@ runner:
   #
   # Mutually exclusive with enableWritePermissions and
   # scannerAutoCopyPullSecrets — helm template fails if both are set.
+  # The full read-only RBAC lives in a single reviewable file:
+  # templates/runner-service-account-readonly.yaml.
   readOnly: false
   # Kill-switch for the runner's mutate subsystem (delete_pod, cordon,
   # rollout_restart, PrometheusRule CRUD, AlertManager silences, Loki rules).
