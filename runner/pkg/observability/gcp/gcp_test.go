@@ -24,7 +24,8 @@ func TestFetchNodePoolLogs_PostsExpectedFilter(t *testing.T) {
 		path = r.URL.Path
 		b, _ := io.ReadAll(r.Body)
 		body = string(b)
-		_, _ = w.Write([]byte(`{"entries":[]}`))
+		// Return an entry so the zone→region fallback does not fire.
+		_, _ = w.Write([]byte(`{"entries":[{"textPayload":"x"}]}`))
 	}))
 	defer srv.Close()
 
@@ -39,11 +40,51 @@ func TestFetchNodePoolLogs_PostsExpectedFilter(t *testing.T) {
 	if !strings.Contains(body, `"projects/my-proj"`) {
 		t.Errorf("missing resourceNames: %s", body)
 	}
-	if !strings.Contains(body, `resource.labels.zone=\"us-central1-a\"`) {
-		t.Errorf("missing zone filter: %s", body)
+	if !strings.Contains(body, `resource.type=\"k8s_cluster\"`) {
+		t.Errorf("missing k8s_cluster resource filter: %s", body)
+	}
+	if !strings.Contains(body, `resource.labels.location=\"us-central1-a\"`) {
+		t.Errorf("missing location filter: %s", body)
+	}
+	if !strings.Contains(body, `cluster-autoscaler-visibility`) {
+		t.Errorf("missing autoscaler-visibility logName: %s", body)
+	}
+	// The severity clause uses `>=` which JSON-escapes the `>`; match the
+	// stable parts to avoid depending on the escaping.
+	if !strings.Contains(body, `severity`) || !strings.Contains(body, `=DEFAULT`) {
+		t.Errorf("missing severity>=DEFAULT filter: %s", body)
 	}
 	if !strings.Contains(body, `"pageSize":50`) {
 		t.Errorf("missing pageSize: %s", body)
+	}
+}
+
+// TestFetchNodePoolLogs_ZoneRegionFallback: when the zone-scoped query
+// returns no entries, the client retries with the derived region.
+func TestFetchNodePoolLogs_ZoneRegionFallback(t *testing.T) {
+	var locations []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		s := string(b)
+		if strings.Contains(s, `location=\"us-central1-a\"`) {
+			locations = append(locations, "zone")
+			_, _ = w.Write([]byte(`{"entries":[]}`)) // empty → triggers fallback
+			return
+		}
+		if strings.Contains(s, `location=\"us-central1\"`) {
+			locations = append(locations, "region")
+		}
+		_, _ = w.Write([]byte(`{"entries":[{"textPayload":"x"}]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient()
+	c.LoggingBaseURL = srv.URL
+	if _, err := c.FetchNodePoolLogs(context.Background(), "p", "us-central1-a", 10); err != nil {
+		t.Fatal(err)
+	}
+	if len(locations) != 2 || locations[0] != "zone" || locations[1] != "region" {
+		t.Errorf("fallback order = %v; want [zone region]", locations)
 	}
 }
 
@@ -86,7 +127,7 @@ func TestQueryBigQuery_PostsToProjectQueriesEndpoint(t *testing.T) {
 	defer srv.Close()
 	c := newTestClient()
 	c.BigQueryBaseURL = srv.URL
-	if _, err := c.QueryBigQuery(context.Background(), "my-proj", "SELECT 1"); err != nil {
+	if _, err := c.QueryBigQuery(context.Background(), "my-proj", "SELECT 1", "US"); err != nil {
 		t.Fatal(err)
 	}
 	if path != "/bigquery/v2/projects/my-proj/queries" {
@@ -95,14 +136,52 @@ func TestQueryBigQuery_PostsToProjectQueriesEndpoint(t *testing.T) {
 	if !strings.Contains(body, `"query":"SELECT 1"`) || !strings.Contains(body, `"useLegacySql":false`) {
 		t.Errorf("body = %s", body)
 	}
+	if !strings.Contains(body, `"location":"US"`) {
+		t.Errorf("location not passed in job body: %s", body)
+	}
+}
+
+// TestQueryBigQuery_ReshapesResponse verifies the BQ REST response is
+// transformed into the {data, columns, column_types} envelope.
+func TestQueryBigQuery_ReshapesResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"schema":{"fields":[{"name":"svc","type":"STRING"},{"name":"cnt","type":"INTEGER"}]},
+			"rows":[{"f":[{"v":"frontend"},{"v":"42"}]},{"f":[{"v":"cart"},{"v":"7"}]}]
+		}`))
+	}))
+	defer srv.Close()
+	c := newTestClient()
+	c.BigQueryBaseURL = srv.URL
+	raw, err := c.QueryBigQuery(context.Background(), "p", "SELECT svc, cnt FROM t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Data        [][]any  `json:"data"`
+		Columns     []string `json:"columns"`
+		ColumnTypes []string `json:"column_types"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("reshaped result not the expected envelope: %v", err)
+	}
+	if len(out.Columns) != 2 || out.Columns[0] != "svc" || out.Columns[1] != "cnt" {
+		t.Errorf("columns = %v", out.Columns)
+	}
+	if len(out.ColumnTypes) != 2 || out.ColumnTypes[0] != "STRING" || out.ColumnTypes[1] != "INTEGER" {
+		t.Errorf("column_types = %v", out.ColumnTypes)
+	}
+	if len(out.Data) != 2 || out.Data[0][0] != "frontend" || out.Data[1][1] != "7" {
+		t.Errorf("data = %v", out.Data)
+	}
 }
 
 func TestQueryBigQuery_RequiresProjectAndQuery(t *testing.T) {
 	c := newTestClient()
-	if _, err := c.QueryBigQuery(context.Background(), "", "SELECT 1"); err == nil {
+	if _, err := c.QueryBigQuery(context.Background(), "", "SELECT 1", ""); err == nil {
 		t.Error("missing project should error")
 	}
-	if _, err := c.QueryBigQuery(context.Background(), "p", ""); err == nil {
+	if _, err := c.QueryBigQuery(context.Background(), "p", "", ""); err == nil {
 		t.Error("missing query should error")
 	}
 }

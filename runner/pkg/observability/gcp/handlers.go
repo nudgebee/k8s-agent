@@ -25,7 +25,14 @@ func Handlers(c *Client, defaultProjectID string) map[string]dispatch.Handler {
 		},
 		"gke_traces": func(ctx context.Context, p map[string]any) (any, error) {
 			project := strOrDefault(p, "project_id", defaultProjectID)
-			raw, err := c.QueryBigQuery(ctx, project, str(p, "query"))
+			// Dataset location: explicit `location`, else derive from `zone`.
+			location := str(p, "location")
+			if location == "" {
+				if z := str(p, "zone"); z != "" {
+					location = zoneToRegion(z)
+				}
+			}
+			raw, err := c.QueryBigQuery(ctx, project, str(p, "query"), location)
 			if err != nil {
 				return nil, err
 			}
