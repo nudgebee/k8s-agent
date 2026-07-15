@@ -111,8 +111,15 @@ func (l *serviceBackendsLister) anyRolloutTemplateMatching(ctx context.Context, 
 	}
 	list, err := l.dyn.Resource(rolloutGVR).Namespace(namespace).List(ctx, metav1.ListOptions{ResourceVersion: "0"})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil // CRD not installed
+		// Clusters without Argo return NotFound — or, more commonly,
+		// Forbidden: the chart only grants rollouts RBAC when the CRD
+		// exists at install time, and the apiserver's authorizer rejects
+		// the request before checking resource existence. Either way this
+		// sweep is best-effort — treat as "no rollouts" rather than
+		// failing the whole workload probe (which would suppress the
+		// finding entirely via the predicate's fail-open).
+		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+			return false, nil
 		}
 		return false, err
 	}
