@@ -50,6 +50,16 @@ type MatcherSpec struct {
 	// no clock reads (the engine handles rate-limiting + grace window).
 	Predicate func(obj, oldObj map[string]any) bool
 
+	// PredicateCtx (optional) replaces Predicate for matchers whose firing
+	// decision needs cluster reads. It receives the same EnrichContext
+	// EnrichBlocks gets, so the matcher can consult the wired listers
+	// (service_no_endpoints resolves spec.selector against live pods —
+	// not derivable from the watched Service object alone). When set,
+	// Predicate is ignored. Implementations must treat nil context
+	// helpers as "cannot decide" and return false — never fire on
+	// missing data.
+	PredicateCtx func(obj, oldObj map[string]any, ec EnrichContext) bool
+
 	// AggregationKey is set on the emitted Finding. Determines how the
 	// UI groups + dedupes. We use the legacy strings (so the UI's
 	// per-aggregation_key handling stays unchanged).
@@ -109,6 +119,12 @@ type EnrichContext struct {
 	// client at startup; nil in unit tests, in which case event-table
 	// blocks degrade to "events unavailable".
 	EventsLister K8sEventsLister
+
+	// ServiceBackends resolves a Service selector against live pods and
+	// workload pod templates. Set when the engine was wired with a K8s
+	// client at startup; nil in unit tests, in which case the
+	// service_no_endpoints matcher never fires.
+	ServiceBackends ServiceBackendsLister
 }
 
 // K8sEventsLister fetches recent K8s events for an object. The engine
@@ -128,6 +144,42 @@ type EnrichContext struct {
 // K8s client) — matchers handle it by emitting a placeholder event-table block.
 type K8sEventsLister interface {
 	ListEvents(ctx context.Context, namespace, kind, name string, limit int) ([]K8sEvent, error)
+}
+
+// ServiceBackendsLister resolves Service selectors against cluster state.
+// Used by the service_no_endpoints matcher: whether any pod (or any
+// workload pod template) matches the Service's spec.selector is cluster
+// state, not derivable from the watched Service object alone.
+//
+// Implementation lives in cmd/agent/service_backends_lister.go and wraps
+// the typed clientset. A nil lister is valid (tests, environments without
+// a K8s client) — the matcher then never fires.
+type ServiceBackendsLister interface {
+	// AnyPodMatching reports whether any pod in the namespace carries
+	// every label pair in selector. Pod phase is ignored — a crashing pod
+	// still backs the Service's endpoints (its brokenness is another
+	// matcher's concern).
+	AnyPodMatching(ctx context.Context, namespace string, selector map[string]string) (bool, error)
+
+	// AnyWorkloadTemplateMatching reports whether any workload
+	// (Deployment / StatefulSet / DaemonSet) in the namespace has a pod
+	// template whose labels carry every pair in selector. True means the
+	// selector is wired to a real workload that currently has no pods
+	// (scaled to zero, mid-rollout) — a scale state, not a
+	// misconfiguration.
+	AnyWorkloadTemplateMatching(ctx context.Context, namespace string, selector map[string]string) (bool, error)
+
+	// ListPodLabels returns up to limit (name, labels) samples of pods in
+	// the namespace, used as selector-vs-labels comparison evidence on
+	// the emitted Finding.
+	ListPodLabels(ctx context.Context, namespace string, limit int) ([]PodLabelSample, error)
+}
+
+// PodLabelSample is one pod's name + labels, for the "compare the
+// configured selector against actual pod labels" evidence table.
+type PodLabelSample struct {
+	Name   string
+	Labels map[string]string
 }
 
 // K8sEvent is the subset of corev1.Event the agent surfaces in
