@@ -9,6 +9,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -118,6 +120,45 @@ func newReplicaSetConverter(lookup podLookupFn) func(any) (any, bool) {
 		return serviceDict("ReplicaSet", r.Name, r.Namespace, r.ObjectMeta,
 			replicas, r.Status.ReadyReplicas, r.Spec.Template, r.OwnerReferences,
 			lookup), true
+	}
+}
+
+// newRolloutConverter converts an unstructured Argo Rollout into the standard
+// service dict (type "Rollout"). Handles both inline-template Rollouts and
+// workloadRef Rollouts (spec.template absent → empty template; the referenced
+// Deployment is discovered separately by its own informer).
+func newRolloutConverter(lookup podLookupFn) func(any) (any, bool) {
+	return func(obj any) (any, bool) {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok || u.Object == nil {
+			return nil, false
+		}
+		// spec.replicas defaults to 1 per Rollout semantics.
+		replicas := int32(1)
+		if v, found, _ := unstructured.NestedInt64(u.Object, "spec", "replicas"); found {
+			replicas = int32(v)
+		}
+		ready := int32(0)
+		if v, found, _ := unstructured.NestedInt64(u.Object, "status", "readyReplicas"); found {
+			ready = int32(v)
+		}
+		var tpl corev1.PodTemplateSpec
+		if tmpl, found, _ := unstructured.NestedMap(u.Object, "spec", "template"); found {
+			// Best-effort: on conversion error emit the record with an empty
+			// template rather than dropping the Rollout from inventory.
+			_ = runtime.DefaultUnstructuredConverter.FromUnstructured(tmpl, &tpl)
+		}
+		meta := metav1.ObjectMeta{
+			Name:              u.GetName(),
+			Namespace:         u.GetNamespace(),
+			UID:               u.GetUID(), // drives the podLookup owner index
+			ResourceVersion:   u.GetResourceVersion(),
+			CreationTimestamp: u.GetCreationTimestamp(),
+			Labels:            u.GetLabels(),
+			Annotations:       u.GetAnnotations(),
+		}
+		return serviceDict("Rollout", u.GetName(), u.GetNamespace(), meta,
+			replicas, ready, tpl, u.GetOwnerReferences(), lookup), true
 	}
 }
 
