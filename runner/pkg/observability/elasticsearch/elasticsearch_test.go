@@ -58,6 +58,59 @@ func TestSearch_PPL_PostsToPlugins(t *testing.T) {
 	}
 }
 
+// TestSearch_PPL_PrependsSource: a PPL query without a source= clause is
+// scoped to the requested index, matching the legacy client.
+func TestSearch_PPL_PrependsSource(t *testing.T) {
+	var gotBody string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	defer srv.Close()
+	if _, err := c.Search(context.Background(), "logs-1", "ppl", "head 5"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotBody, `"query":"source=logs-1 | head 5"`) {
+		t.Errorf("source clause not prepended: %s", gotBody)
+	}
+}
+
+// TestSearch_PPL_KeepsExistingSource: a query that already has a source=
+// clause is left untouched (no double source=).
+func TestSearch_PPL_KeepsExistingSource(t *testing.T) {
+	var gotBody string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	defer srv.Close()
+	if _, err := c.Search(context.Background(), "logs-1", "ppl", "source=other | head 5"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(gotBody, "source=") != 1 {
+		t.Errorf("expected exactly one source= clause: %s", gotBody)
+	}
+}
+
+// TestExtraHeaders_Sent verifies ELASTICSEARCH_HEADER values reach upstream.
+func TestExtraHeaders_Sent(t *testing.T) {
+	var got string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Tenant")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	defer srv.Close()
+	c.ExtraHeaders = http.Header{"X-Tenant": []string{"team-a"}}
+	if _, err := c.Indices(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got != "team-a" {
+		t.Errorf("X-Tenant = %q; want team-a", got)
+	}
+}
+
 func TestSearch_RequiresIndex(t *testing.T) {
 	c := New("http://x", nil)
 	if _, err := c.Search(context.Background(), "", "dsl", map[string]any{}); err == nil {
@@ -72,31 +125,33 @@ func TestSearch_RejectsUnknownQueryType(t *testing.T) {
 	}
 }
 
-func TestIndices_GetsCatEndpoint(t *testing.T) {
+func TestIndices_GetsAliasEndpoint(t *testing.T) {
 	var path string
 	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.RequestURI()
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{}`))
 	})
 	defer srv.Close()
 	if _, err := c.Indices(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if path != "/_cat/indices?format=json" {
-		t.Errorf("path = %q", path)
+	if path != "/_alias" {
+		t.Errorf("path = %q; want /_alias", path)
 	}
 }
 
-func TestIndexFields_GetsMapping(t *testing.T) {
+func TestIndexFields_GetsFieldCaps(t *testing.T) {
+	var path string
 	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/logs-1/_mapping" {
-			t.Errorf("path = %q", r.URL.Path)
-		}
-		_, _ = w.Write([]byte(`{}`))
+		path = r.URL.RequestURI()
+		_, _ = w.Write([]byte(`{"fields":{}}`))
 	})
 	defer srv.Close()
 	if _, err := c.IndexFields(context.Background(), "logs-1"); err != nil {
 		t.Fatal(err)
+	}
+	if path != "/logs-1/_field_caps?fields=*" {
+		t.Errorf("path = %q; want /logs-1/_field_caps?fields=*", path)
 	}
 }
 
