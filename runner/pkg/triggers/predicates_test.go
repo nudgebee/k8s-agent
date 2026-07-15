@@ -1007,6 +1007,23 @@ func TestResolveOwner_ReplicaSetStripsHash(t *testing.T) {
 	}
 }
 
+func TestResolveOwner_RolloutPodViaLabel(t *testing.T) {
+	// Argo Rollout pods carry rollouts-pod-template-hash instead of
+	// pod-template-hash; the RS owner must resolve to the Rollout, not
+	// to a (nonexistent) Deployment.
+	pod := asObj(t, `{
+		"metadata":{
+			"labels":{"rollouts-pod-template-hash":"7f9d8c5b6"},
+			"ownerReferences":[
+				{"kind":"ReplicaSet","name":"web-7f9d8c5b6","controller":true}
+			]}
+	}`)
+	o := ResolveOwner(pod)
+	if o.Name != "web" || o.Kind != "rollout" {
+		t.Errorf("owner = %+v; want {web rollout}", o)
+	}
+}
+
 func TestResolveOwner_DaemonSetPassesThrough(t *testing.T) {
 	pod := asObj(t, `{
 		"metadata":{"ownerReferences":[
