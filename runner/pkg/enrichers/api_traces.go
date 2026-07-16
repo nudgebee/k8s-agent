@@ -55,10 +55,11 @@ func buildTracesPayload(ctx context.Context, ch *clickhouse.Client, params map[s
 		"data": []map[string]any{},
 	}
 	if ch == nil {
-		// The legacy get_application_traces would raise on the run_query call
-		// if CH were down; we surface the same `error` field so the caller
-		// can show it in the UI.
-		out["error"] = "clickhouse: not configured"
+		// ClickHouse isn't configured on this agent. Return an empty—but
+		// successful—traces payload (no `error` key) so the backend traces
+		// parser renders "no traces" instead of surfacing a hard error to
+		// the user. Matches the legacy nudgebee_actions.get_application_traces,
+		// which returns an empty result when the trace store is absent.
 		return out
 	}
 
