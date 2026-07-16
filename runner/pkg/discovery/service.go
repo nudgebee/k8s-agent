@@ -326,8 +326,9 @@ var rolloutGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1a
 
 // RegisterRollouts wires an Argo Rollout dynamic informer so Rollouts reach
 // the backend inventory like Deployments do. Returns false (with a log) when
-// the Rollout CRD is not served or the agent lacks list RBAC — the chart only
-// grants rollouts RBAC when the CRD existed at install time, and registering
+// the Rollout CRD is not served or the agent lacks list RBAC — the chart now
+// grants rollouts RBAC unconditionally, but releases rendered before that
+// change (or with a trimmed clusterrole) may still lack it, and registering
 // an informer that can't list would block WaitForCacheSync forever and stall
 // all discovery. Call before Run().
 //
@@ -346,7 +347,7 @@ func (s *Service) RegisterRollouts(ctx context.Context, dyn dynamic.Interface) b
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if _, err := dyn.Resource(rolloutGVR).Namespace(metav1.NamespaceAll).List(probeCtx, metav1.ListOptions{Limit: 1}); err != nil {
-		s.logger.Warn("rollout discovery disabled: list probe failed (rollouts RBAC missing? chart gates it on the CRD existing at install time)", "err", err)
+		s.logger.Warn("rollout discovery disabled: list probe failed (rollouts RBAC missing? upgrade the chart — older releases gated it on the CRD existing at render time)", "err", err)
 		return false
 	}
 	if s.dynFactory == nil {
