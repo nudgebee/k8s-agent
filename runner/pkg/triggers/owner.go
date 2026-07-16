@@ -12,9 +12,10 @@ import (
 // We only have the current obj from kubewatch — we don't fetch parent
 // objects from the API server because the matcher path is hot and we
 // want zero K8s API calls. That limits us to one walk step. The
-// ReplicaSet → Deployment derivation is heuristic (strip the
-// pod-template-hash suffix from the ReplicaSet name); same heuristic
-// the legacy implementation uses.
+// ReplicaSet → Deployment/Rollout derivation is heuristic (strip the
+// pod-template-hash suffix from the ReplicaSet name, with the
+// rollouts-pod-template-hash label distinguishing Argo Rollout pods);
+// same heuristic the legacy implementation uses.
 //
 // Returns zero OwnerRef when no controlling owner is set (bare Pod,
 // no-controller resource).
@@ -46,19 +47,30 @@ func ResolveOwner(obj map[string]any) OwnerRef {
 		if name == "" || kind == "" {
 			continue
 		}
-		return canonicalOwner(kind, name)
+		labels, _ := meta["labels"].(map[string]any)
+		return canonicalOwner(kind, name, labels)
 	}
 	return OwnerRef{}
 }
 
 // canonicalOwner normalizes the (kind, name) pair to the top-level
 // workload. ReplicaSet names are derived from their owning Deployment
-// by appending a `-<10-char-hash>` suffix, so we strip that to get the
-// Deployment name. Other kinds pass through unchanged.
-func canonicalOwner(kind, name string) OwnerRef {
+// (or Argo Rollout) by appending a `-<10-char-hash>` suffix, so we
+// strip that to get the controller name. Other kinds pass through
+// unchanged. labels are the owned object's labels, used to tell a
+// Rollout-owned ReplicaSet from a Deployment-owned one without an API
+// call.
+func canonicalOwner(kind, name string, labels map[string]any) OwnerRef {
 	lk := strings.ToLower(kind)
 	switch lk {
 	case "replicaset":
+		// Argo Rollouts stamps its pods with `rollouts-pod-template-hash`
+		// (the Deployment controller uses `pod-template-hash`), so the
+		// label identifies the ReplicaSet's controller from the pod alone.
+		// The label value is the exact suffix on the ReplicaSet name.
+		if hash, _ := labels["rollouts-pod-template-hash"].(string); hash != "" {
+			return OwnerRef{Name: strings.TrimSuffix(name, "-"+hash), Kind: "rollout"}
+		}
 		// "web-7f9d8c5b6" → "web".
 		return OwnerRef{Name: stripPodTemplateHash(name), Kind: "deployment"}
 	case "deployment", "daemonset", "statefulset", "job", "cronjob",
