@@ -40,7 +40,7 @@ spec:
       containers:
         - name: node-agent
           image: "{{ .Values.nodeAgent.image.repository }}:{{ .Values.nodeAgent.image.tag }}"
-          command: ["coroot-node-agent", "--cgroupfs-root", "/host/sys/fs/cgroup"]
+          args: ["--cgroupfs-root", "/host/sys/fs/cgroup"]
           imagePullPolicy: {{ .Values.nodeAgent.image.pullPolicy }}
           resources:
             {{- toYaml .Values.nodeAgent.resources | nindent 12 }}

@@ -139,9 +139,13 @@ func (m *Mutator) setUnschedulable(ctx context.Context, nodeName string, unsched
 	return err
 }
 
-// RolloutRestart triggers a rolling restart by patching the pod-template
-// `kubectl.kubernetes.io/restartedAt` annotation. Same mechanism kubectl uses.
-// kind is one of: deployment, statefulset, daemonset.
+// RolloutRestart triggers a rolling restart. For deployment/statefulset/
+// daemonset it patches the pod-template `kubectl.kubernetes.io/restartedAt`
+// annotation (same mechanism kubectl uses). For Argo Rollouts it merge-patches
+// `spec.restartAt` — the canonical restart, same as `kubectl argo rollouts
+// restart`; patching the pod template instead would trigger a full
+// canary/blueGreen rollout, not a restart.
+// kind is one of: deployment, statefulset, daemonset, rollout.
 func (m *Mutator) RolloutRestart(ctx context.Context, kind, namespace, name string) error {
 	if m.Client == nil {
 		return errors.New("mutate: client not configured")
@@ -163,8 +167,16 @@ func (m *Mutator) RolloutRestart(ctx context.Context, kind, namespace, name stri
 	case "daemonset":
 		_, err := m.Client.AppsV1().DaemonSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 		return err
+	case "rollout":
+		if m.dynamic == nil {
+			return errors.New("mutate: dynamic client not configured (required for rollout restart)")
+		}
+		rolloutPatch := fmt.Sprintf(`{"spec":{"restartAt":%q}}`, time.Now().UTC().Format(time.RFC3339))
+		_, err := m.dynamic.Resource(scalableWorkloadGVRs["rollout"]).Namespace(namespace).
+			Patch(ctx, name, types.MergePatchType, []byte(rolloutPatch), metav1.PatchOptions{})
+		return err
 	default:
-		return fmt.Errorf("mutate: unsupported kind %q (deployment|statefulset|daemonset)", kind)
+		return fmt.Errorf("mutate: unsupported kind %q (deployment|statefulset|daemonset|rollout)", kind)
 	}
 }
 

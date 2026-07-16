@@ -15,12 +15,13 @@ const DefaultGraceWindow = 2 * time.Minute
 // dispatch loop. One Engine per agent process; concurrent-safe (the
 // rate-limiter has its own mutex; spec list is read-only after build).
 type Engine struct {
-	specs        []MatcherSpec
-	rl           *RateLimiter
-	startTime    time.Time
-	graceWindow  time.Duration
-	now          func() time.Time // injectable for tests
-	eventsLister K8sEventsLister  // optional; threaded into EnrichBlocks
+	specs           []MatcherSpec
+	rl              *RateLimiter
+	startTime       time.Time
+	graceWindow     time.Duration
+	now             func() time.Time      // injectable for tests
+	eventsLister    K8sEventsLister       // optional; threaded into EnrichBlocks
+	serviceBackends ServiceBackendsLister // optional; threaded into PredicateCtx + EnrichBlocks
 }
 
 // NewEngine builds an Engine with the given specs. agentStartTime should
@@ -44,6 +45,25 @@ func NewEngine(specs []MatcherSpec, agentStartTime time.Time) *Engine {
 func (e *Engine) WithEventsLister(l K8sEventsLister) *Engine {
 	e.eventsLister = l
 	return e
+}
+
+// WithServiceBackendsLister returns the engine wired with a Service-
+// backends lister. Call once at boot from main.go after building the
+// typed clientset. PredicateCtx matchers (service_no_endpoints) receive
+// it via EnrichContext; without it they never fire.
+func (e *Engine) WithServiceBackendsLister(l ServiceBackendsLister) *Engine {
+	e.serviceBackends = l
+	return e
+}
+
+// enrichContext builds the per-event context threaded into PredicateCtx
+// and EnrichBlocks. Fields are nil when the corresponding lister wasn't
+// wired at boot (unit tests / no K8s client).
+func (e *Engine) enrichContext() EnrichContext {
+	return EnrichContext{
+		EventsLister:    e.eventsLister,
+		ServiceBackends: e.serviceBackends,
+	}
 }
 
 // fetchSubjectEvents builds a "Recent <Kind> events" table for the
@@ -105,6 +125,7 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		return nil
 	}
 	matches := make([]Match, 0, 1)
+	ec := e.enrichContext()
 	for i := range e.specs {
 		spec := &e.specs[i]
 		if !kindMatches(spec.Kind, ev.Kind) {
@@ -113,7 +134,13 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		if !operationMatches(spec.Operations, ev.Operation) {
 			continue
 		}
-		if spec.Predicate == nil || !spec.Predicate(ev.Obj, ev.OldObj) {
+		// PredicateCtx (cluster-read matchers) takes precedence over the
+		// pure Predicate. A spec with neither never fires.
+		if spec.PredicateCtx != nil {
+			if !spec.PredicateCtx(ev.Obj, ev.OldObj, ec) {
+				continue
+			}
+		} else if spec.Predicate == nil || !spec.Predicate(ev.Obj, ev.OldObj) {
 			continue
 		}
 		if spec.SuppressOnResync && e.suppressedByResync(ev.Obj) {
@@ -130,9 +157,7 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		name, namespace, lowerKind, node := SubjectFromObj(ev.Kind, ev.Obj)
 		var extra []EvidenceBlock
 		if spec.EnrichBlocks != nil {
-			extra = spec.EnrichBlocks(ev.Obj, ev.OldObj, EnrichContext{
-				EventsLister: e.eventsLister,
-			})
+			extra = spec.EnrichBlocks(ev.Obj, ev.OldObj, ec)
 		}
 		// Default evidence: three K8s events tables per match —
 		//   1. subject events (Pod / Deployment / Job / ...)

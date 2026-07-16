@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -835,6 +836,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		eng := triggers.NewEngine(triggers.Builtins(), time.Now())
 		if typedKube != nil {
 			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
+			// Service-backends lister lets service_no_endpoints resolve a
+			// Service's selector against live pods + workload templates.
+			// Without it (no K8s client) that matcher never fires. The
+			// dynamic client (nilable) adds the Argo Rollouts template sweep.
+			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(typedKube, dynamicKube))
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(triggers.Builtins()))
@@ -987,7 +993,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				probeClient := &http.Client{Timeout: 5 * time.Second}
 				logsProvider, logsURL, logsOK, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
-				clickhouseStatus := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
 				return telemetry.Datasources{
 					PrometheusURL:              cfg.PrometheusURL,
 					AlertManagerURL:            cfg.AlertManagerURL,
@@ -1008,6 +1014,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ChronosphereTracesURL:      chronosphereURL,
 					ChronosphereURL:            cfg.ChronosphereURL,
 					ClickHouseStatus:           clickhouseStatus,
+					ClickHouseURL:              clickhouseHost,
+					ClickHouseError:            clickhouseErr,
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
 					AutoScalerEnabled:          as.Enabled,
@@ -1067,6 +1075,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		discSvc.RegisterAll() // Pod, Deployment, StatefulSet, DaemonSet, Node, Namespace
 		// TODO(phase-4): ReplicaSet, Job, CronJob, Helm releases — each requires
 		// a converter + shadow-diff before promotion.
+		if dynamicKube != nil {
+			// Argo Rollouts inventory. No-ops (with a log) when the Rollout CRD
+			// is not served or the rollouts RBAC is absent.
+			discSvc.RegisterRollouts(gctx, dynamicKube)
+		}
 		g.Go(func() error {
 			logger.Info("starting discovery", "resync", cfg.DiscoveryResync)
 			if err := discSvc.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -1283,16 +1296,50 @@ func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url s
 // the host is set, hit `/ping` on the HTTP port and reflect the result.
 // TRACES_ENABLED=true|false acts as an explicit override (some users run
 // an external clickhouse the agent can't reach).
-func probeClickhouse(ctx context.Context, c *http.Client, host, port string) bool {
+//
+// The second return is the reason traces are down, shipped as
+// tracesConnectionError and rendered verbatim by the UI. It is empty whenever
+// ClickHouse is healthy, and also when traces are off deliberately — an
+// operator disabling a backend isn't a failure to explain.
+func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bool, string) {
 	if v := os.Getenv("TRACES_ENABLED"); v == "true" {
-		return true
+		return true, ""
 	} else if v == "false" {
-		return false
+		return false, ""
 	}
 	if host == "" {
-		return false
+		return false, "CLICKHOUSE_HOST is not set: no traces backend is configured"
 	}
-	return httpProbe(ctx, c, fmt.Sprintf("http://%s:%s/ping", host, port))
+	if err := httpProbeErr(ctx, c, fmt.Sprintf("http://%s:%s/ping", host, port)); err != nil {
+		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
+	}
+	return true, ""
+}
+
+// probeCause unwraps the *url.Error net/http wraps around transport failures.
+// The wrapper stringifies the whole request URL; the inner cause ("connection
+// refused", "i/o timeout") is the half worth showing and carries no address.
+func probeCause(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Err
+	}
+	return err
+}
+
+// redactUserinfo strips a `user:pass@` prefix from a host. CLICKHOUSE_HOST may
+// be a full URL rather than a bare host (pkg/clickhouse normalizes both forms),
+// and the reason string built above lands in the agent's connection_status
+// JSON, which the UI renders as-is — credentials must not ride along.
+func redactUserinfo(host string) string {
+	at := strings.LastIndex(host, "@")
+	if at < 0 {
+		return host
+	}
+	if scheme := strings.Index(host, "://"); scheme >= 0 && scheme+3 <= at {
+		return host[:scheme+3] + host[at+1:]
+	}
+	return host[at+1:]
 }
 
 // fetchSignozVersion GETs Signoz's /api/v1/version and returns the reported
@@ -1326,9 +1373,15 @@ func fetchSignozVersion(ctx context.Context, c *http.Client, baseURL string) str
 // URL is sourced from operator-provided config (PROMETHEUS_URL, LOKI_URL,
 // etc.), not request-derived — taint flow is operator → probe by design.
 func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[string]string) bool {
+	return httpProbeErr(ctx, c, url, headers...) == nil
+}
+
+// httpProbeErr is httpProbe with the failure preserved, for the callers that
+// report *why* a datasource is unreachable rather than just that it is.
+func httpProbeErr(ctx context.Context, c *http.Client, url string, headers ...map[string]string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // operator-provided URL
 	if err != nil {
-		return false
+		return err
 	}
 	for _, h := range headers {
 		for k, v := range h {
@@ -1337,10 +1390,13 @@ func httpProbe(ctx context.Context, c *http.Client, url string, headers ...map[s
 	}
 	resp, err := c.Do(req) //nolint:gosec // operator-provided URL
 	if err != nil {
-		return false
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // esHTTPClient returns the HTTP client the ES query client uses. When

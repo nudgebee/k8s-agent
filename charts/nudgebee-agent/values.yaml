@@ -65,7 +65,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-07-14T09-20-14_17a3cbad58bd80c14dee85a158cc4ec2de19e09f
+    tag: 2026-07-16T09-02-10_585a6253271b189078eb2edbcad9ee65cf82e685
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -120,6 +120,26 @@ runner:
   # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
   # statefulset scaling, workload creation, and rollout lifecycle management.
   enableWritePermissions: false
+  # Read-only cluster access. When true the runner's ClusterRole is strictly
+  # get/list/watch — no Secrets API access at all (not even read), no
+  # pods/exec, no pod eviction, no node patch, no write verbs on any
+  # cluster-scoped or cross-namespace resource. The writes the agent needs to
+  # function are granted by a namespaced Role in the RELEASE NAMESPACE only:
+  # scanner Jobs, script-runner pods/configmaps, in-namespace exec, and
+  # PrometheusRule CRUD (so UI-managed alert rules keep working).
+  #
+  # What stops working in this mode (denied by the API server): remediation
+  # actions on customer workloads (delete_pod, drain, cordon, rollout_restart,
+  # scale, PVC ops), rightsizing APPLY (recommendations still compute),
+  # exec/profiling/terminal into pods outside the release namespace, and
+  # private-image scan pull-secret auto-copy. Helm release inventory is
+  # unaffected (the Go runner does not read Helm secrets).
+  #
+  # Mutually exclusive with enableWritePermissions and
+  # scannerAutoCopyPullSecrets — helm template fails if both are set.
+  # The full read-only RBAC lives in a single reviewable file:
+  # templates/runner-service-account-readonly.yaml.
+  readOnly: false
   # Kill-switch for the runner's mutate subsystem (delete_pod, cordon,
   # rollout_restart, PrometheusRule CRUD, AlertManager silences, Loki rules).
   # Default is true so the light-action alert-rule path (driven by the UI)
@@ -253,7 +273,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.1
+    tag: 0.1.3
   resources:
     requests:
       cpu: "100m"

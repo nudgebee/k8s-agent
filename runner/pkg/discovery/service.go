@@ -12,7 +12,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -40,6 +43,10 @@ type Service struct {
 	factory informers.SharedInformerFactory
 	resync  time.Duration
 	logger  *slog.Logger
+
+	// dynFactory drives CRD informers (Argo Rollouts). Nil unless
+	// RegisterRollouts succeeded; Run() starts/syncs it only when set.
+	dynFactory dynamicinformer.DynamicSharedInformerFactory
 
 	handlers []*resourceHandler
 
@@ -313,8 +320,52 @@ func (s *Service) RegisterHelmReleases() {
 	s.register(s.factory.Core().V1().Secrets().Informer(), TypeHelmRelease, convertHelmReleaseSecret)
 }
 
+// rolloutGVR is the Argo Rollouts CRD resource (matches mutate's
+// scalableWorkloadGVRs entry and the chart's argoproj.io RBAC block).
+var rolloutGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
+
+// RegisterRollouts wires an Argo Rollout dynamic informer so Rollouts reach
+// the backend inventory like Deployments do. Returns false (with a log) when
+// the Rollout CRD is not served or the agent lacks list RBAC — the chart now
+// grants rollouts RBAC unconditionally, but releases rendered before that
+// change (or with a trimmed clusterrole) may still lack it, and registering
+// an informer that can't list would block WaitForCacheSync forever and stall
+// all discovery. Call before Run().
+//
+// NOTE: no WithTransform equivalent is applied — Rollouts are low-cardinality
+// (typically <100s per cluster), so the per-object trim that matters at 100k
+// pods isn't worth an unstructured-map walker here.
+func (s *Service) RegisterRollouts(ctx context.Context, dyn dynamic.Interface) bool {
+	if dyn == nil {
+		s.logger.Info("rollout discovery disabled: no dynamic client")
+		return false
+	}
+	if _, err := s.cs.Discovery().ServerResourcesForGroupVersion(rolloutGVR.GroupVersion().String()); err != nil {
+		s.logger.Info("rollout discovery disabled: argoproj.io/v1alpha1 not served", "err", err)
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := dyn.Resource(rolloutGVR).Namespace(metav1.NamespaceAll).List(probeCtx, metav1.ListOptions{Limit: 1}); err != nil {
+		s.logger.Warn("rollout discovery disabled: list probe failed (rollouts RBAC missing? upgrade the chart — older releases gated it on the CRD existing at render time)", "err", err)
+		return false
+	}
+	if s.dynFactory == nil {
+		s.dynFactory = dynamicinformer.NewDynamicSharedInformerFactory(dyn, s.resync)
+	}
+	inf := s.dynFactory.ForResource(rolloutGVR).Informer()
+	// RBAC revoked after start: replace client-go's default retry logging with
+	// our own throttled warn instead of crash/spam. Must be set before Run().
+	_ = inf.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
+		s.logger.Warn("rollout informer list/watch error", "err", err)
+	})
+	s.register(inf, TypeService, newRolloutConverter(s.podLookup()))
+	return true
+}
+
 // RegisterAll wires every supported resource (excluding Helm — see
-// RegisterHelmReleases for why that needs separate setup). Convenience for
+// RegisterHelmReleases for why that needs separate setup — and Rollouts,
+// which need a dynamic client: see RegisterRollouts). Convenience for
 // production deployments where the operator wants the full snapshot.
 func (s *Service) RegisterAll() {
 	s.RegisterPods()
@@ -380,6 +431,9 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() { <-ctx.Done(); close(stopCh) }()
 
 	s.factory.Start(stopCh)
+	if s.dynFactory != nil {
+		s.dynFactory.Start(stopCh)
+	}
 
 	// Wait at the factory level (not just on handler-bound informers) so
 	// auxiliary informers instantiated via lookup closures — replicaSetLookup,
@@ -391,6 +445,13 @@ func (s *Service) Run(ctx context.Context) error {
 	for typ, ok := range s.factory.WaitForCacheSync(stopCh) {
 		if !ok {
 			return fmt.Errorf("discovery: cache sync timed out for %v", typ)
+		}
+	}
+	if s.dynFactory != nil {
+		for gvr, ok := range s.dynFactory.WaitForCacheSync(stopCh) {
+			if !ok {
+				return fmt.Errorf("discovery: cache sync timed out for %v", gvr)
+			}
 		}
 	}
 	s.logger.Info("discovery caches synced", "handlers", len(s.handlers))
