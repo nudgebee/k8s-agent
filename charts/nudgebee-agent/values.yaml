@@ -336,7 +336,7 @@ opentelemetry-collector:
   enabled: true
   image:
     repository: ghcr.io/nudgebee/opentelemetry-collector-contrib
-    tag: 0.75.0
+    tag: 0.156.0
   # Inherit name overrides from parent chart
   nameOverride: ""
   fullnameOverride: ""
@@ -397,12 +397,11 @@ opentelemetry-collector:
       clickhouse:
         endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
         database: default
-        ttl_days: 7
+        ttl: 168h
         username: default
         password: ${env:CLICKHOUSE_PASSWORD}
         logs_table_name: otel_logs
         traces_table_name: otel_traces
-        metrics_table_name: otel_metrics
         timeout: 5s
         retry_on_failure:
           enabled: true
@@ -428,7 +427,7 @@ clickhouse:
   image:
     registry: ghcr.io
     repository: nudgebee/clickhouse
-    tag: 24.12.4-debian-12-r0-nb-2
+    tag: 24.12.4-debian-12-r0-nb-3
   nameOverride: ""
   fullnameOverride: ""
   persistence:
