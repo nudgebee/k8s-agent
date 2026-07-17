@@ -11,7 +11,15 @@ harmless when the columns (or the table itself) don't exist yet, and it keeps
 existing telemetry data (7d TTL) instead of requiring a table drop.
 */}}
 {{- if and .Values.clickhouse.enabled (index .Values "opentelemetry-collector" "enabled") }}
-{{- $chFullname := default (printf "%s-clickhouse" .Release.Name) .Values.clickhouse.fullnameOverride }}
+{{- /* Mirror the bitnami subchart's fullname logic: fullnameOverride wins,
+       else <release>-<nameOverride|"clickhouse">. */}}
+{{- $chFullname := coalesce .Values.clickhouse.fullnameOverride (printf "%s-%s" .Release.Name (default "clickhouse" .Values.clickhouse.nameOverride)) }}
+{{- $chSecretName := default $chFullname (dig "auth" "existingSecret" "" .Values.clickhouse) }}
+{{- $chSecretKey := default "admin-password" (dig "auth" "existingSecretKey" "" .Values.clickhouse) }}
+{{- /* Keep the target database/table in lockstep with the exporter config. */}}
+{{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
+{{- $chDatabase := default "default" (get $chExporter "database") }}
+{{- $chTracesTable := default "otel_traces" (get $chExporter "traces_table_name") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,19 +40,31 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       restartPolicy: Never
+      # The job only talks to clickhouse, never the K8s API.
+      automountServiceAccountToken: false
       containers:
         - name: schema-upgrade
           image: "{{ .Values.clickhouse.image.registry }}/{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
           env:
             - name: CH_HOST
               value: {{ $chFullname | quote }}
             - name: CH_USER
               value: {{ .Values.clickhouse.auth.username | default "default" | quote }}
+            - name: CH_DATABASE
+              value: {{ $chDatabase | quote }}
+            - name: CH_TRACES_TABLE
+              value: {{ $chTracesTable | quote }}
             - name: CH_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ $chFullname | quote }}
-                  key: admin-password
+                  name: {{ $chSecretName | quote }}
+                  key: {{ $chSecretKey | quote }}
           command:
             - /bin/bash
             - -ec
@@ -55,12 +75,12 @@ spec:
                 cc "SELECT 1" >/dev/null 2>&1 && break
                 echo "waiting for clickhouse ($i/30)..."; sleep 5
               done
-              if [ "$(cc 'EXISTS TABLE default.otel_traces')" != "1" ]; then
-                echo "otel_traces does not exist yet; the exporter will create it with the current schema. Nothing to do."
+              if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}")" != "1" ]; then
+                echo "${CH_DATABASE}.${CH_TRACES_TABLE} does not exist yet; the exporter will create it with the current schema. Nothing to do."
                 exit 0
               fi
-              echo "adding ScopeName/ScopeVersion to default.otel_traces if missing..."
-              cc "ALTER TABLE default.otel_traces
+              echo "adding ScopeName/ScopeVersion to ${CH_DATABASE}.${CH_TRACES_TABLE} if missing..."
+              cc "ALTER TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}
                     ADD COLUMN IF NOT EXISTS ScopeName String CODEC(ZSTD(1)) AFTER ResourceAttributes,
                     ADD COLUMN IF NOT EXISTS ScopeVersion String CODEC(ZSTD(1)) AFTER ScopeName"
               echo "schema upgrade complete."
