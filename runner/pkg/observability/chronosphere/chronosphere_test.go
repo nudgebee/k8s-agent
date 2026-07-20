@@ -37,6 +37,41 @@ func TestQueryTraces_PostsBodyAndAuth(t *testing.T) {
 	}
 }
 
+// TestQueryTraces_UsesTracesURLOverride: when CHRONOSPHERE_TRACES_URL is
+// set, the client posts to it verbatim (path included) instead of
+// composing BaseURL + /api/v1/data/traces.
+func TestQueryTraces_UsesTracesURLOverride(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_, _ = w.Write([]byte(`{"traces":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New("http://ignored-base", &http.Client{Timeout: 5 * time.Second})
+	c.TracesURL = srv.URL + "/api/unstable/data/traces/searches"
+	if _, err := c.QueryTraces(context.Background(), map[string]any{"service": "frontend"}); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/api/unstable/data/traces/searches" {
+		t.Errorf("path = %q; want the TracesURL override path", path)
+	}
+}
+
+// TestQueryTraces_TracesURLOnly: a deployment that sets only
+// CHRONOSPHERE_TRACES_URL (no base URL) still works.
+func TestQueryTraces_TracesURLOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"traces":[]}`))
+	}))
+	defer srv.Close()
+	c := New("", &http.Client{Timeout: 5 * time.Second})
+	c.TracesURL = srv.URL + "/traces"
+	if _, err := c.QueryTraces(context.Background(), map[string]any{"x": 1}); err != nil {
+		t.Fatalf("expected success with TracesURL-only config: %v", err)
+	}
+}
+
 func TestQueryTraces_RequiresParams(t *testing.T) {
 	c := New("http://x", nil)
 	if _, err := c.QueryTraces(context.Background(), nil); err == nil {
