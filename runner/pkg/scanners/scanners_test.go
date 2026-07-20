@@ -67,6 +67,19 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("RestartPolicy = %v; want Never", job.Spec.Template.Spec.RestartPolicy)
 	}
+	// The pod template must carry the managed-by/orchestrator labels too —
+	// the trigger engine identifies (and skips) the agent's own scan pods
+	// by them; Job-level labels are invisible to a pod-scoped matcher.
+	podLabels := job.Spec.Template.Labels
+	if podLabels[jobNameSelectorLabel] != "popeye-scan-abcd1234" {
+		t.Errorf("pod template missing job-name label: %v", podLabels)
+	}
+	if podLabels[managedByLabel] != managedByValue {
+		t.Errorf("pod template missing managed-by label: %v", podLabels)
+	}
+	if podLabels[orchestratorLabel] != orchestratorValue {
+		t.Errorf("pod template missing orchestrator label: %v", podLabels)
+	}
 }
 
 func TestBuildJob_HonorsServerSecurityContext(t *testing.T) {

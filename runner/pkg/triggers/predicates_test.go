@@ -977,6 +977,56 @@ func TestEngine_KindFilter(t *testing.T) {
 	}
 }
 
+func TestEngine_SkipsAgentManagedObjects(t *testing.T) {
+	// A pod stamped with the agent's own managed-by label (a scan Job pod)
+	// must produce zero matches even in a firing state — its failures are
+	// the scan orchestrator's run accounting, not a customer Finding.
+	pod := asObj(t, `{
+		"metadata":{"name":"trivy-image-scan-b0690686-z95th","namespace":"prod",
+			"labels":{"app.kubernetes.io/managed-by":"nudgebee-agent","job-name":"trivy-image-scan-b0690686"},
+			"ownerReferences":[{"kind":"Job","name":"trivy-image-scan-b0690686","controller":true}]},
+		"status":{"containerStatuses":[
+			{"name":"app","image":"registry.example.com/big:1.0",
+			 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+		]}
+	}`)
+	eng := NewEngine(Builtins(), time.Now().Add(-time.Hour))
+	matches := eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: pod})
+	if len(matches) != 0 {
+		t.Errorf("agent-managed pod must be skipped; got %v", matchNames(matches))
+	}
+
+	// Same for the Job object itself transitioning to Failed.
+	oldJob := asObj(t, `{
+		"metadata":{"name":"trivy-image-scan-b0690686","namespace":"prod",
+			"labels":{"app.kubernetes.io/managed-by":"nudgebee-agent"}},
+		"status":{}
+	}`)
+	failedJob := asObj(t, `{
+		"metadata":{"name":"trivy-image-scan-b0690686","namespace":"prod",
+			"labels":{"app.kubernetes.io/managed-by":"nudgebee-agent"}},
+		"status":{"conditions":[{"type":"Failed","status":"True"}]}
+	}`)
+	matches = eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Job", Obj: failedJob, OldObj: oldJob})
+	if len(matches) != 0 {
+		t.Errorf("agent-managed Job must be skipped; got %v", matchNames(matches))
+	}
+
+	// A foreign managed-by value must NOT be skipped (helm-managed pods etc.).
+	helmPod := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod",
+			"labels":{"app.kubernetes.io/managed-by":"Helm"}},
+		"status":{"containerStatuses":[
+			{"name":"app","image":"registry.example.com/web:1.0",
+			 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+		]}
+	}`)
+	matches = eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: helmPod})
+	if !contains(matchNames(matches), "image_pull_backoff") {
+		t.Errorf("helm-managed pod must still match; got %v", matchNames(matches))
+	}
+}
+
 func TestEngine_ReturnsEmptyForNoMatch(t *testing.T) {
 	// Healthy Pod → no matchers fire → no Findings emitted (the whole point).
 	pod := asObj(t, `{
@@ -1055,6 +1105,53 @@ func TestResolveOwner_PrefersControllerRef(t *testing.T) {
 	o := ResolveOwner(pod)
 	if o.Name != "web" || o.Kind != "deployment" {
 		t.Errorf("expected controller ref to win; got %+v", o)
+	}
+}
+
+func TestResolveOwner_JobStripsCronJobTimestamp(t *testing.T) {
+	// CronJob-created Job: pod's one-level owner is the Job with the
+	// scheduled-time suffix. Every run must resolve to the same owner.
+	pod := asObj(t, `{
+		"metadata":{"ownerReferences":[
+			{"kind":"Job","name":"nightly-backup-29123456","controller":true}
+		]}
+	}`)
+	o := ResolveOwner(pod)
+	if o.Name != "nightly-backup" || o.Kind != "job" {
+		t.Errorf("owner = %+v; want {nightly-backup job}", o)
+	}
+}
+
+func TestResolveOwner_JobKeepsNonCronName(t *testing.T) {
+	// Only the CronJob controller's scheduled-time suffix is stripped.
+	// Other generated-name shapes (e.g. a random hex tail) are naming
+	// conventions, not contracts — they pass through unchanged. The
+	// agent's own scan Jobs don't rely on this: they are skipped
+	// wholesale via their managed-by label.
+	pod := asObj(t, `{
+		"metadata":{"ownerReferences":[
+			{"kind":"Job","name":"trivy-image-scan-b0690686","controller":true}
+		]}
+	}`)
+	o := ResolveOwner(pod)
+	if o.Name != "trivy-image-scan-b0690686" || o.Kind != "job" {
+		t.Errorf("owner = %+v; want {trivy-image-scan-b0690686 job}", o)
+	}
+}
+
+func TestStripJobGeneratedSuffix(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"nightly-backup-29123456", "nightly-backup"},   // CronJob unix-minutes
+		{"nightly-backup-1751964000", "nightly-backup"}, // unix-seconds variant
+		{"manual-migration", "manual-migration"},        // hand-named: unchanged
+		{"load-test-2024", "load-test-2024"},            // short numeric tail: not a schedule suffix
+		{"db-seed-abcdef12", "db-seed-abcdef12"},        // hex tail: convention, not stripped
+		{"-29123456", "-29123456"},                      // strip would leave nothing: keep original
+	}
+	for _, c := range cases {
+		if got := stripJobGeneratedSuffix(c.in); got != c.want {
+			t.Errorf("stripJobGeneratedSuffix(%q) = %q; want %q", c.in, got, c.want)
+		}
 	}
 }
 
