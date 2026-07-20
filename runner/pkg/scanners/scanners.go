@@ -253,6 +253,47 @@ func jobStatusSnapshot(j *batchv1.Job) (string, string) {
 	return "Running", ""
 }
 
+// imagePullFailure reports whether the Job's pod is wedged on an image pull it
+// will never recover from — the container is Waiting with reason ImagePullBackOff
+// or ErrImagePull. This is terminal in practice (a missing tag or a private
+// registry the scanner can't authenticate to won't fix itself) but the kubelet
+// never starts the container, so the Job earns no Failed condition and would
+// otherwise poll as "Running" until the orchestrator's overall deadline — never
+// getting deleted, never reaped (TTL and the reaper only touch finished Jobs).
+// Surfacing it as Failed lets the orchestrator stop early, delete the Job, and
+// record a precise reason. Best-effort: a list error yields ("", false) so the
+// caller falls back to the condition-based snapshot.
+//
+// Both init and main container statuses are checked — the scanner container is
+// the target image being pulled, but a broken TrivyImage would wedge the init
+// container the same way.
+func (r *Runner) imagePullFailure(ctx context.Context, jobName string) (string, bool) {
+	pods, err := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: jobNameSelectorLabel + "=" + jobName,
+	})
+	if err != nil {
+		return "", false
+	}
+	check := func(statuses []corev1.ContainerStatus) (string, bool) {
+		for _, cs := range statuses {
+			if w := cs.State.Waiting; w != nil && (w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull") {
+				return fmt.Sprintf("image pull failed for container %q: %s", cs.Name, w.Message), true
+			}
+		}
+		return "", false
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if msg, stuck := check(p.Status.InitContainerStatuses); stuck {
+			return msg, true
+		}
+		if msg, stuck := check(p.Status.ContainerStatuses); stuck {
+			return msg, true
+		}
+	}
+	return "", false
+}
+
 // fetchPodLogs reads at most LogCapBytes from the (single) pod the Job
 // spawned. Returns (stdout, truncated, droppedBytes, error).
 func (r *Runner) fetchPodLogs(ctx context.Context, jobName string) (string, bool, int, error) {

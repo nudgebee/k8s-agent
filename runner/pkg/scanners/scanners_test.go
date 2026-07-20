@@ -371,6 +371,46 @@ func TestWaitForJob_Failed(t *testing.T) {
 	}
 }
 
+// A Job whose pod is wedged in ImagePullBackOff earns no Failed condition (the
+// container never starts), so it must be surfaced as Failed via the pod check —
+// otherwise it polls "Running" forever and never gets deleted/reaped.
+func TestWaitForJob_ImagePullBackOff(t *testing.T) {
+	cs := fake.NewClientset()
+	_, _ = cs.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "j-pull", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}, metav1.CreateOptions{})
+	_, _ = cs.CoreV1().Pods("default").Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "j-pull-abc",
+			Namespace: "default",
+			Labels:    map[string]string{jobNameSelectorLabel: "j-pull"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "scanner",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ImagePullBackOff",
+					Message: `Back-off pulling image "registry.example.com/app:tag"`,
+				}},
+			}},
+		},
+	}, metav1.CreateOptions{})
+	r := NewRunner(cs, "default", "")
+	out, err := r.handleWaitForJob(context.Background(), map[string]any{"job_name": "j-pull"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(map[string]any)
+	if resp["status"] != "Failed" {
+		t.Errorf("status = %v; want Failed", resp["status"])
+	}
+	reason := resp["failure_reason"].(string)
+	if !strings.Contains(reason, "image pull failed") || !strings.Contains(reason, "scanner") {
+		t.Errorf("failure_reason = %q; want image-pull detail naming the container", reason)
+	}
+}
+
 func TestWaitForJob_NotFound(t *testing.T) {
 	cs := fake.NewClientset()
 	r := NewRunner(cs, "default", "")
