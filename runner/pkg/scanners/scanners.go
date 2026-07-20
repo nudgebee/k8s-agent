@@ -274,17 +274,21 @@ func (r *Runner) imagePullFailure(ctx context.Context, jobName string) (string, 
 	if err != nil {
 		return "", false
 	}
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		statuses := append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...)
+	check := func(statuses []corev1.ContainerStatus) (string, bool) {
 		for _, cs := range statuses {
-			w := cs.State.Waiting
-			if w == nil {
-				continue
-			}
-			if w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull" {
+			if w := cs.State.Waiting; w != nil && (w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull") {
 				return fmt.Sprintf("image pull failed for container %q: %s", cs.Name, w.Message), true
 			}
+		}
+		return "", false
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if msg, stuck := check(p.Status.InitContainerStatuses); stuck {
+			return msg, true
+		}
+		if msg, stuck := check(p.Status.ContainerStatuses); stuck {
+			return msg, true
 		}
 	}
 	return "", false
