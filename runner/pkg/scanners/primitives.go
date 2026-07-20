@@ -167,6 +167,16 @@ func (r *Runner) handleWaitForJob(ctx context.Context, params map[string]any) (a
 		return nil, fmt.Errorf("wait_for_k8s_job: get: %w", err)
 	}
 	status, reason := jobStatusSnapshot(job)
+	// A pod wedged on an image pull (ImagePullBackOff/ErrImagePull) never starts
+	// its container, so the Job earns no Failed condition and jobStatusSnapshot
+	// reports "Running" indefinitely. Surface it as Failed so the orchestrator
+	// stops polling, deletes the Job, and records the pull error — otherwise the
+	// Job lingers unreaped until it accumulates.
+	if status == "Running" {
+		if msg, stuck := r.imagePullFailure(ctx, jobName); stuck {
+			status, reason = "Failed", msg
+		}
+	}
 	out := map[string]any{
 		"status":         status,
 		"failure_reason": reason,
