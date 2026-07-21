@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,6 +125,38 @@ func TestQueryTraces_DoesNotRetryClientError(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("400 must not be retried; expected 1 attempt, got %d", got)
+	}
+}
+
+func TestQueryTraces_LimitsConcurrency(t *testing.T) {
+	var inFlight, maxSeen int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&inFlight, 1)
+		for {
+			m := atomic.LoadInt32(&maxSeen)
+			if n <= m || atomic.CompareAndSwapInt32(&maxSeen, m, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		atomic.AddInt32(&inFlight, -1)
+		_, _ = w.Write([]byte(`{"traces":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, nil)
+	c.MaxConcurrent = 2
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.QueryTraces(context.Background(), map[string]any{})
+		}()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt32(&maxSeen); got > 2 {
+		t.Errorf("max concurrent requests = %d, want <= 2", got)
 	}
 }
 

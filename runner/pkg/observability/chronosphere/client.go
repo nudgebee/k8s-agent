@@ -27,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,7 @@ const (
 	defaultMaxRetries    = 2
 	defaultRetryBackoff  = 500 * time.Millisecond
 	defaultMaxConcurrent = 4
+	maxRetryBackoff      = 30 * time.Second
 )
 
 type Client struct {
@@ -46,8 +48,13 @@ type Client struct {
 	MaxRetries int
 	// RetryBackoff is the base delay for exponential backoff between retries.
 	RetryBackoff time.Duration
+	// MaxConcurrent bounds concurrent in-flight requests; <= 0 disables the
+	// limit. Set before the first QueryTraces call — the semaphore is built
+	// once, lazily, on first use.
+	MaxConcurrent int
 
-	sem chan struct{} // bounds concurrent in-flight requests; nil disables
+	semOnce sync.Once
+	sem     chan struct{}
 }
 
 func New(baseURL string, httpClient *http.Client) *Client {
@@ -55,11 +62,31 @@ func New(baseURL string, httpClient *http.Client) *Client {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &Client{
-		BaseURL:      strings.TrimRight(baseURL, "/"),
-		HTTP:         httpClient,
-		MaxRetries:   defaultMaxRetries,
-		RetryBackoff: defaultRetryBackoff,
-		sem:          make(chan struct{}, defaultMaxConcurrent),
+		BaseURL:       strings.TrimRight(baseURL, "/"),
+		HTTP:          httpClient,
+		MaxRetries:    defaultMaxRetries,
+		RetryBackoff:  defaultRetryBackoff,
+		MaxConcurrent: defaultMaxConcurrent,
+	}
+}
+
+// acquire takes a concurrency slot, returning a release func. When the limit is
+// disabled (MaxConcurrent <= 0) it is a no-op. Slots are held only for the
+// duration of an active HTTP request, not across backoff sleeps.
+func (c *Client) acquire(ctx context.Context) (func(), error) {
+	c.semOnce.Do(func() {
+		if c.MaxConcurrent > 0 {
+			c.sem = make(chan struct{}, c.MaxConcurrent)
+		}
+	})
+	if c.sem == nil {
+		return func() {}, nil
+	}
+	select {
+	case c.sem <- struct{}{}:
+		return func() { <-c.sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -75,17 +102,6 @@ func (c *Client) QueryTraces(ctx context.Context, params any) (json.RawMessage, 
 	body, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
-	}
-
-	// Bound concurrent requests so a burst of trace queries doesn't pile onto
-	// an already-struggling Chronosphere backend (which sheds load with 503).
-	if c.sem != nil {
-		select {
-		case c.sem <- struct{}{}:
-			defer func() { <-c.sem }()
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
 	}
 
 	var lastErr error
@@ -109,6 +125,15 @@ func (c *Client) QueryTraces(ctx context.Context, params any) (json.RawMessage, 
 // doQuery performs a single request. retryable is true when the failure is a
 // transient Chronosphere condition worth another attempt.
 func (c *Client) doQuery(ctx context.Context, body []byte) (raw json.RawMessage, retryable bool, err error) {
+	// Bound concurrent requests so a burst of trace queries doesn't pile onto
+	// an already-struggling Chronosphere backend (which sheds load with 503).
+	// Held only for the active request, not across backoff sleeps.
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.BaseURL+"/api/v1/data/traces", bytes.NewReader(body))
 	if err != nil {
@@ -143,16 +168,24 @@ func isRetryable(status int, body []byte) bool {
 	if status == http.StatusServiceUnavailable {
 		return true
 	}
-	b := string(body)
-	return strings.Contains(b, "Something went wrong and the request could not complete") ||
-		strings.Contains(b, "In many cases the issue can be resolved by trying again") ||
-		strings.Contains(b, "Service Unavailable") ||
-		strings.Contains(b, `"code":14`)
+	return bytes.Contains(body, []byte("Something went wrong and the request could not complete")) ||
+		bytes.Contains(body, []byte("In many cases the issue can be resolved by trying again")) ||
+		bytes.Contains(body, []byte("Service Unavailable")) ||
+		bytes.Contains(body, []byte(`"code":14`))
 }
 
-// sleepBackoff waits base*2^(attempt-1), or returns early if ctx is done.
+// sleepBackoff waits base*2^(attempt-1), capped at maxRetryBackoff (and guarded
+// against shift overflow), or returns early if ctx is done.
 func sleepBackoff(ctx context.Context, base time.Duration, attempt int) error {
-	t := time.NewTimer(base * time.Duration(1<<(attempt-1)))
+	shift := attempt - 1
+	if shift > 30 {
+		shift = 30
+	}
+	delay := base * time.Duration(1<<shift)
+	if delay > maxRetryBackoff || delay <= 0 {
+		delay = maxRetryBackoff
+	}
+	t := time.NewTimer(delay)
 	defer t.Stop()
 	select {
 	case <-t.C:
