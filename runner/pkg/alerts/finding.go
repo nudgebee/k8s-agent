@@ -199,13 +199,40 @@ func (m MatchedTrigger) Title() string {
 	}
 }
 
-// Description is a 1-line context blurb. Keeps Finding rows informative
-// even before stage 2.2 ships the enricher chain that adds rich evidence.
+// Description is a 1-line context blurb per aggregation key. It is stored on
+// the event and rendered verbatim in the UI and in AI-investigation evidence,
+// so it must describe what happened on the cluster in operator terms — never
+// internal matcher/trigger names (the old "Trigger 'babysitter_deployment'
+// matched on agent" read as noise, and misleadingly so, in evidence).
 func (m MatchedTrigger) Description() string {
-	if m.MatcherName == "" {
-		return "Trigger matched on agent (raw event in evidence)"
+	switch m.AggregationKey {
+	case "ConfigurationChange/KubernetesResource/Change":
+		kind := m.SubjectKind
+		if kind == "" {
+			kind = "resource"
+		}
+		return fmt.Sprintf("The %s's configuration was changed (deploy or spec update); the spec diff is attached in evidence.", kind)
+	case "report_crash_loop":
+		return "A container in the pod is restarting repeatedly (CrashLoopBackOff); recent state is attached in evidence."
+	case "pod_oom_killer_enricher":
+		return "A container in the pod was killed for exceeding its memory limit (OOMKilled)."
+	case "image_pull_backoff_reporter":
+		return "The pod cannot pull its container image; the image reference and pull error are attached in evidence."
+	case "job_failure":
+		return "The job exceeded its failure policy and was marked failed; pod status is attached in evidence."
+	case "node_not_ready":
+		return "The node stopped reporting Ready; node conditions are attached in evidence."
+	case "node_unschedulable":
+		return "The node was marked unschedulable (cordoned)."
+	case "node_pressure":
+		return "The node reported resource pressure; node conditions are attached in evidence."
+	case "pod_unschedulable":
+		return "The pod cannot be scheduled onto any node; the scheduler's reason is attached in evidence."
+	case "service_no_endpoints":
+		return "The service has no ready endpoints; traffic to it will fail."
+	default:
+		return "Detected on the cluster; the raw event is attached in evidence."
 	}
-	return "Trigger '" + m.MatcherName + "' matched on agent (raw event in evidence)"
 }
 
 // FromAlertManager wraps a raw AlertManager webhook into a Finding
