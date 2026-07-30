@@ -5,9 +5,32 @@ Container-ID exclusions for the log-error and HTTP-failure rules.
 The log-error regex additionally excludes log-collection infrastructure
 (fluent-bit, loki, opensearch, etc.), which emits steady error-level
 log streams that are transport/ingest failures — not app-level signal.
+
+alertmanager.extra_rule_exclusions appends install-specific terms to BOTH
+regexes (matched as substrings of container_id) without forking the defaults —
+e.g. environments running synthetic load or demo apps that fail on purpose.
 */ -}}
-{{- $excludeLog := ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1|fluent-bit|fluentd|loki|opensearch|elasticsearch|logstash|datadog|newrelic|otel|promtail).*" -}}
-{{- $excludeApi := ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*" -}}
+{{- /*
+keep_firing_for holds an alert firing through brief dips below threshold, so an
+intermittently failing endpoint produces one steady alert instead of resolve/
+re-fire churn (observed ~8 re-fires/hour on a single flaky endpoint without it).
+OPT-IN via alertmanager.rule_keep_firing_for (default "": field omitted) —
+Prometheus < 2.42 rejects rule files containing the field, so it must never be
+emitted unless the install explicitly declares support. See values.yaml.
+*/ -}}
+{{- $keepFiringFor := .Values.alertmanager.rule_keep_firing_for -}}
+{{- $extra := "" -}}
+{{- with .Values.alertmanager.extra_rule_exclusions -}}
+{{- /*
+compact drops empty strings: an empty alternation ("||" or a trailing "|")
+matches EVERYTHING, which would silently disable both rules cluster-wide.
+*/ -}}
+{{- with compact . -}}
+{{- $extra = printf "|%s" (join "|" .) -}}
+{{- end -}}
+{{- end -}}
+{{- $excludeLog := printf ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1|fluent-bit|fluentd|loki|opensearch|elasticsearch|logstash|datadog|newrelic|otel|promtail%s).*" $extra -}}
+{{- $excludeApi := printf ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1%s).*" $extra -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -49,6 +72,9 @@ spec:
             and
             rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[1h] offset 1h) > 0
           for: 10m
+{{- with $keepFiringFor }}
+          keep_firing_for: {{ . }}
+{{- end }}
           annotations:
             summary: "High error/critical logs - Sample: {{`{{ printf \"%.80s\" $labels.sample }}`}}"
             description: "Container log error rate is more than 3x its 1h baseline. Container ID: {{`{{ $labels.container_id }}`}} Log Sample: {{`{{ $labels.sample }}`}} Current rate (err/s): {{`{{ printf \"%.2f\" $value }}`}}"
@@ -68,6 +94,9 @@ spec:
             and on (container_id, method, path)
             sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m])) > 0.1
           for: 10m
+{{- with $keepFiringFor }}
+          keep_firing_for: {{ . }}
+{{- end }}
           annotations:
             summary: "High 5xx rate - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}}"
             description: "Aggregate 5xx rate across status codes exceeds 5% of total traffic. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} 5xx Ratio: {{`{{ printf \"%.2f\" $value }}`}}"
