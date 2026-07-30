@@ -21,7 +21,13 @@ emitted unless the install explicitly declares support. See values.yaml.
 {{- $keepFiringFor := .Values.alertmanager.rule_keep_firing_for -}}
 {{- $extra := "" -}}
 {{- with .Values.alertmanager.extra_rule_exclusions -}}
+{{- /*
+compact drops empty strings: an empty alternation ("||" or a trailing "|")
+matches EVERYTHING, which would silently disable both rules cluster-wide.
+*/ -}}
+{{- with compact . -}}
 {{- $extra = printf "|%s" (join "|" .) -}}
+{{- end -}}
 {{- end -}}
 {{- $excludeLog := printf ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1|fluent-bit|fluentd|loki|opensearch|elasticsearch|logstash|datadog|newrelic|otel|promtail%s).*" $extra -}}
 {{- $excludeApi := printf ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1%s).*" $extra -}}
