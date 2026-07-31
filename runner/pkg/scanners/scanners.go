@@ -159,7 +159,15 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{jobNameSelectorLabel: jobName},
+					// managed-by/orchestrator are propagated to the pod so the
+					// trigger engine can recognize (and skip) the agent's own
+					// scan pods — the Job-level labels are invisible to a
+					// pod-scoped matcher, which walks owners by name only.
+					Labels: map[string]string{
+						jobNameSelectorLabel: jobName,
+						managedByLabel:       managedByValue,
+						orchestratorLabel:    orchestratorValue,
+					},
 				},
 				Spec: podSpec,
 			},

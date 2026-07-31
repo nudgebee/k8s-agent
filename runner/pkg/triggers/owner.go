@@ -73,7 +73,14 @@ func canonicalOwner(kind, name string, labels map[string]any) OwnerRef {
 		}
 		// "web-7f9d8c5b6" → "web".
 		return OwnerRef{Name: stripPodTemplateHash(name), Kind: "deployment"}
-	case "deployment", "daemonset", "statefulset", "job", "cronjob",
+	case "job":
+		// "mycron-29123456" → "mycron". Same rationale as the ReplicaSet
+		// strip: every run of a CronJob gets a Job named with the scheduled
+		// time appended, and without normalization each run is a distinct
+		// owner → distinct fingerprint → a new Finding that never dedupes
+		// against the previous run's.
+		return OwnerRef{Name: stripJobGeneratedSuffix(name), Kind: lk}
+	case "deployment", "daemonset", "statefulset", "cronjob",
 		"rollout", "horizontalpodautoscaler", "node":
 		return OwnerRef{Name: name, Kind: lk}
 	default:
@@ -93,6 +100,30 @@ var podTemplateHashSuffix = regexp.MustCompile(`-[bcdfghjklmnpqrstvwxz2456789]{8
 
 func stripPodTemplateHash(name string) string {
 	return podTemplateHashSuffix.ReplaceAllString(name, "")
+}
+
+// cronJobScheduleSuffix matches the scheduled-time suffix the CronJob
+// controller appends to the Jobs it creates — getJobName is
+// `fmt.Sprintf("%s-%d", cronJob.Name, scheduledTime.Unix()/60)`, i.e.
+// `-<unix-minutes>` (currently 8 digits; 10 tolerates unix-seconds
+// variants in older/forked controllers). This is a controller-defined
+// format, not a naming-convention guess — the same trust level as the
+// ReplicaSet pod-template-hash strip above. We deliberately do NOT try
+// to recognize other generated-name shapes (random hex tails etc.):
+// those are conventions, not contracts, and stripping them risks
+// merging genuinely distinct hand-named Jobs. The agent's own scan Jobs
+// don't need it — they are skipped wholesale via their managed-by label
+// (see Engine.Match).
+var cronJobScheduleSuffix = regexp.MustCompile(`-\d{8,10}$`)
+
+// stripJobGeneratedSuffix normalizes a CronJob-created Job name to the
+// CronJob's own name, so every scheduled run resolves to the same owner.
+// Names without the scheduled-time suffix pass through unchanged.
+func stripJobGeneratedSuffix(name string) string {
+	if stripped := cronJobScheduleSuffix.ReplaceAllString(name, ""); stripped != name && stripped != "" {
+		return stripped
+	}
+	return name
 }
 
 // SubjectFromObj extracts the (name, namespace, lowercased-kind, node)
