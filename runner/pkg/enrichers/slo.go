@@ -100,11 +100,18 @@ func (s *SLOEnricher) compute(ctx context.Context, params map[string]any) ([]map
 	results := a.runQueries(ctx, queries, startTime, endTime, step, "", "", "")
 	apps := extractMetricStats(results)
 
+	// Multi-window burn rates (coroot parity, see slo_burnrate.go). Best-effort:
+	// when this yields nothing the report keeps its legacy single-window
+	// `alert`/`alert_message`, so a Prometheus hiccup degrades rather than
+	// blanks the SLO.
+	burnRatesByApp := s.burnRatesByApp(ctx, cfg, endTime)
+
 	minValidEvents := envIntDefault("MIN_VALID_EVENTS", 1)
 	reports := make([]map[string]any, 0, len(apps))
 	for _, app := range apps {
 		stats := app.toResponse()
 		report := buildSLOReport(cfg, stats, startTime, endTime, minValidEvents)
+		attachBurnRates(report, burnRatesByApp[app.Name+"/"+app.Namespace])
 		reports = append(reports, report)
 	}
 	return reports, nil
@@ -260,7 +267,9 @@ func buildSLOReport(cfg sloConfig, stats map[string]any, startTime, endTime time
 		ebRatio = ebValue * 100 / ebTarget
 		ebBurnRate = math.Round(ebValue/ebTarget*10) / 10 // round(x, 1)
 	}
-	hours := int(ebBurnRate / (60 * 60))
+	// The window is what the burn rate was measured over — dividing the RATE by
+	// 3600 (as an earlier port of coroot's FormatSLOStatus did) is always 0.
+	hours := cfg.Window / (60 * 60)
 	hourLabel := "hours"
 	if hours == 1 {
 		hourLabel = "hour"
