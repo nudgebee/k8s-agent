@@ -477,10 +477,46 @@ clickhouse:
             description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
-  # Extra alternation terms appended to the container-id exclusion regex of the
-  # default alert rules (both the log-error and HTTP-failure rules). Terms match
-  # as substrings of container_id (/k8s/<namespace>/<pod>/<container>), so a
-  # namespace name excludes that whole namespace.
+  # Exclusions applied to the default PrometheusRule set above. Both lists are
+  # compiled into PromQL regexes by templates/prometheus-alert-rule.yaml.
+  defaultRuleExclusions:
+    # Namespaces excluded from every default rule. Matched against
+    # destination_workload_namespace on the HTTP rule and against the
+    # /k8s/<namespace>/ segment of container_id on the log rule. A "-<suffix>"
+    # variant is excluded too, so "prometheus" also covers "prometheus-dev".
+    # Set to [] to alert on every namespace.
+    namespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - gmp-system
+      - nudgebee-agent
+      - prometheus
+      - grafana
+      - victoria
+      - keda
+      - karpenter
+      - cert-manager
+    # Extra components excluded from the log-error rule only, matched as a
+    # component name anywhere in container_id. These emit steady error-level
+    # log streams that are transport/ingest failures of the observability
+    # plumbing itself, not application signal.
+    containers:
+      - containerd
+      - kubelet
+      - system.slice
+      - fluent-bit
+      - fluentd
+      - promtail
+      - loki
+      - opensearch
+      - elasticsearch
+      - logstash
+      - otel
+      - datadog
+      - newrelic
+  # Install-specific terms appended to BOTH lists above, so a single entry
+  # covers a namespace on the HTTP rule and a component name on the log rule.
   # e.g. for clusters running demo/synthetic-load apps that fail on purpose:
   # extra_rule_exclusions: ["demo", "nb-bench"]
   extra_rule_exclusions: []
