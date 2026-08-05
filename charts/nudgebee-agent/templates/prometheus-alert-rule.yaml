@@ -86,18 +86,25 @@ spec:
         # Fires when the 5m error/critical count is >3x the workload's own 6h
         # average per 5m window (6h total / 72 windows), with a floor of 10 errors
         # in the 5m window so low-traffic containers can't blow the ratio up.
+        #
+        # The baseline is offset 5m so an ongoing spike can't inflate its own
+        # baseline and silence a sustained incident. The baseline > 0 guard costs
+        # a blind spot on brand-new workloads (no history yet) but is what stops
+        # every cold-start error burst from firing on a +Inf ratio.
         - alert: HighErrorCriticalLogs
           expr: |
             (
               sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[5m]))
               /
               (
-                sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[6h])) / 72
+                sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[6h] offset 5m)) / 72
               )
               > 3
             )
             and
             sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[5m])) > 10
+            and
+            sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[6h] offset 5m)) > 0
           for: 10m
 {{- with $keepFiringFor }}
           keep_firing_for: {{ . }}
