@@ -69,6 +69,73 @@ func TestBuilder_Alert_SubjectFallbackOrder(t *testing.T) {
 	}
 }
 
+func TestBuilder_Alert_SecondChanceLabelWalk(t *testing.T) {
+	b := &Builder{AccountID: "acc", Cluster: "c"}
+	cases := []struct {
+		name      string
+		labels    map[string]string
+		subject   string
+		stype     string
+		namespace string
+	}{
+		// Real ApplicationAPIFailures labels (test env, 2026-08-07): the only
+		// workload hint is the mesh-style destination_workload_name pair.
+		{"destination_workload_name resolves subject and namespace",
+			map[string]string{"alertname": "ApplicationAPIFailures", "alertgroup": "custom-alerts", "severity": "critical",
+				"destination_workload_name": "relay-server", "destination_workload_namespace": "nudgebee-test"},
+			"relay-server", "", "nudgebee-test"},
+		// Real NBLLMLatencyP95High labels: static `service` rule label plus
+		// query output labels only.
+		{"service label resolves subject",
+			map[string]string{"alertname": "NBLLMLatencyP95High", "severity": "warning", "service": "llm-server",
+				"namespace": "nudgebee", "provider": "googleai", "model": "gemini-3.1-pro-preview"},
+			"llm-server", "", "nudgebee"},
+		{"container_id path resolves workload and namespace",
+			map[string]string{"alertname": "X", "container_id": "/k8s/nudgebee-oss/services-server-574d6c9d65-l1/services-server"},
+			"services-server", "", "nudgebee-oss"},
+		{"scrape exporter service is not a subject",
+			map[string]string{"alertname": "KubeletDown", "service": "kubelet"},
+			"KubeletDown", "", ""},
+		// src_workload_name takes its namespace from the source side, not the
+		// destination side.
+		{"src workload uses src namespace",
+			map[string]string{"alertname": "X", "src_workload_name": "frontend",
+				"src_workload_namespace": "web", "destination_workload_namespace": "backend"},
+			"frontend", "", "web"},
+		// The primary walk still wins — the fallback only runs when it found nothing.
+		{"deployment label wins over mesh label",
+			map[string]string{"alertname": "X", "deployment": "checkout", "destination_workload_name": "frontend"},
+			"checkout", "deployment", ""},
+		// An explicit namespace label wins over the fallback's namespace.
+		{"namespace label wins over destination namespace",
+			map[string]string{"alertname": "X", "namespace": "prod", "destination_workload_name": "frontend",
+				"destination_workload_namespace": "mesh-ns"},
+			"frontend", "", "prod"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			webhook := map[string]any{"alerts": []map[string]any{{"labels": tc.labels}}}
+			raw, _ := json.Marshal(webhook)
+			out, _, err := b.FromAlertManager(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out) != 1 {
+				t.Fatalf("got %d envelopes; want 1", len(out))
+			}
+			if out[0].Finding.SubjectName != tc.subject {
+				t.Errorf("subject_name = %q; want %q", out[0].Finding.SubjectName, tc.subject)
+			}
+			if out[0].Finding.SubjectType != tc.stype {
+				t.Errorf("subject_type = %q; want %q", out[0].Finding.SubjectType, tc.stype)
+			}
+			if out[0].Finding.SubjectNamespace != tc.namespace {
+				t.Errorf("subject_namespace = %q; want %q", out[0].Finding.SubjectNamespace, tc.namespace)
+			}
+		})
+	}
+}
+
 func TestBuilder_Alert_MissingSubjectGetsPlaceholder(t *testing.T) {
 	b := &Builder{AccountID: "acc", Cluster: "c"}
 	// 3 alerts: first has pod, second has no subject label, third has node.
