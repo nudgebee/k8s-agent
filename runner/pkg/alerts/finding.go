@@ -501,7 +501,11 @@ func alertSubjectFallback(labels map[string]string) (string, string, string) {
 		if key == "k8s_deployment_name" {
 			kind = "deployment"
 		}
-		return v, kind, labels["destination_workload_namespace"]
+		ns := labels["destination_workload_namespace"]
+		if key == "src_workload_name" {
+			ns = pickLabel(labels, "src_workload_namespace", "source_workload_namespace")
+		}
+		return v, kind, ns
 	}
 	// container_id: /k8s/{namespace}/{pod}/{container} — the container segment
 	// names the workload (matches k8s_workloads); the pod segment carries a

@@ -96,6 +96,12 @@ func TestBuilder_Alert_SecondChanceLabelWalk(t *testing.T) {
 		{"scrape exporter service is not a subject",
 			map[string]string{"alertname": "KubeletDown", "service": "kubelet"},
 			"KubeletDown", "", ""},
+		// src_workload_name takes its namespace from the source side, not the
+		// destination side.
+		{"src workload uses src namespace",
+			map[string]string{"alertname": "X", "src_workload_name": "frontend",
+				"src_workload_namespace": "web", "destination_workload_namespace": "backend"},
+			"frontend", "", "web"},
 		// The primary walk still wins — the fallback only runs when it found nothing.
 		{"deployment label wins over mesh label",
 			map[string]string{"alertname": "X", "deployment": "checkout", "destination_workload_name": "frontend"},
