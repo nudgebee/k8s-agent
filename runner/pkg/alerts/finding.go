@@ -344,6 +344,18 @@ func (b *Builder) FromKubewatchEvent(rawData []byte) (*FindingEnvelope, error) {
 // alertToFinding converts one PrometheusAlert to a Finding envelope.
 func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 	subjectName, subjectType := alertSubject(a.Labels)
+	subjectNamespace := pickLabel(a.Labels, "namespace", "exported_namespace")
+	if subjectName == "" {
+		// No k8s workload label present — try the lower-confidence labels the
+		// backend webhook mapper also understands (mesh workload labels,
+		// container_id path, service) so both ingest paths resolve the same
+		// subject.
+		var fallbackNamespace string
+		subjectName, subjectType, fallbackNamespace = alertSubjectFallback(a.Labels)
+		if subjectNamespace == "" {
+			subjectNamespace = fallbackNamespace
+		}
+	}
 	if subjectName == "" {
 		// No kubernetes object resolvable from the alert labels (cluster-
 		// level / control-plane / custom application alerts like Watchdog,
@@ -356,7 +368,6 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 			subjectName = "UnnamedAlert"
 		}
 	}
-	subjectNamespace := pickLabel(a.Labels, "namespace", "exported_namespace")
 	subjectNode := pickLabel(a.Labels, "node", "instance")
 	alertname := pickLabel(a.Labels, "alertname")
 	if alertname == "" {
@@ -466,6 +477,47 @@ func alertSubject(labels map[string]string) (string, string) {
 		return "", strings.ToLower(v)
 	}
 	return "", ""
+}
+
+// alertSubjectFallback runs only when alertSubject found no kubernetes object,
+// walking the lower-confidence labels the backend webhook mapper
+// (resolveSubjectFromLabels) also understands, so an alert delivered through
+// Alertmanager resolves the same subject it would via PagerDuty/Zenduty:
+// mesh-style workload labels (ApplicationAPIFailures carries
+// destination_workload_name), the /k8s/{namespace}/{pod}/{container} path in
+// container_id, and application `service` labels (NBLLMLatencyP95High).
+// Returns (name, kind, namespace); kind stays empty when the label doesn't
+// imply one — the collector types the workload from inventory downstream —
+// and namespace is set only when the label itself carries one.
+func alertSubjectFallback(labels map[string]string) (string, string, string) {
+	for _, key := range []string{"destination_workload_name", "src_workload_name", "k8s_deployment_name"} {
+		v := labels[key]
+		// Exact-match guard: the bare kube-state-metrics exporter never names
+		// a real workload (helm-prefixed variants do).
+		if v == "" || v == "kube-state-metrics" {
+			continue
+		}
+		kind := ""
+		if key == "k8s_deployment_name" {
+			kind = "deployment"
+		}
+		return v, kind, labels["destination_workload_namespace"]
+	}
+	// container_id: /k8s/{namespace}/{pod}/{container} — the container segment
+	// names the workload (matches k8s_workloads); the pod segment carries a
+	// ReplicaSet hash that never does.
+	if cid := labels["container_id"]; strings.HasPrefix(cid, "/k8s/") {
+		parts := strings.Split(strings.TrimPrefix(cid, "/"), "/")
+		if len(parts) == 4 && parts[1] != "" && parts[3] != "" {
+			return parts[3], "", parts[1]
+		}
+	}
+	for _, key := range []string{"service", "service_name"} {
+		if v := labels[key]; v != "" && !isScrapeExporter(v) {
+			return v, "", ""
+		}
+	}
+	return "", "", ""
 }
 
 // isScrapeExporter reports whether a prometheus `job` label value names an
