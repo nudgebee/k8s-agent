@@ -409,9 +409,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	cc := chronosphere.New(cfg.ChronosphereURL, nil)
 	cc.APIKey = cfg.ChronosphereAPIKey
-	registerProxy("chronosphere", cfg.ChronosphereURL != "", chronosphere.Handlers(cc))
-	if cfg.ChronosphereURL != "" {
-		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL)
+	cc.TracesURL = cfg.ChronosphereTracesURL
+	// Enable when either the base URL or an explicit traces-URL override is
+	// set, so a deployment configured only via CHRONOSPHERE_TRACES_URL still
+	// gets the chronosphere_query_traces handler (legacy parity).
+	chronosphereEnabled := cfg.ChronosphereURL != "" || cfg.ChronosphereTracesURL != ""
+	registerProxy("chronosphere", chronosphereEnabled, chronosphere.Handlers(cc))
+	if chronosphereEnabled {
+		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL, "traces_url", cfg.ChronosphereTracesURL)
 	}
 
 	pc := pinot.New(cfg.PinotURL, nil)
