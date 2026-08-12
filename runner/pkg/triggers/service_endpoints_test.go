@@ -149,6 +149,26 @@ func TestServiceNoEndpoints_EnrichBlocks(t *testing.T) {
 		t.Error("evidence must include the pod-labels comparison table")
 	}
 
+	// One block must carry additional_info.insights with severity Critical
+	// — the collector passes it through to the Finding's insight list,
+	// which is what the investigate page renders.
+	haveInsight := false
+	for _, b := range blocks {
+		ai, _ := b["additional_info"].(map[string]any)
+		if ai == nil {
+			continue
+		}
+		ins, _ := ai["insights"].([]map[string]any)
+		for _, i := range ins {
+			if i["severity"] == "Critical" {
+				haveInsight = true
+			}
+		}
+	}
+	if !haveInsight {
+		t.Error("evidence must carry a Critical insight via additional_info.insights")
+	}
+
 	// Empty namespace → the table degrades to a "no pods at all" note.
 	ec = EnrichContext{ServiceBackends: &fakeServiceBackends{}}
 	blocks = serviceNoEndpointsEnrichBlocks(brokenService(t), nil, ec)

@@ -1,0 +1,87 @@
+{{- /*
+Pre-upgrade schema migration for the OTel clickhouse exporter tables.
+
+The opentelemetry-collector clickhouse exporter only creates its tables when
+they are absent — it never ALTERs an existing one. The 0.75 -> 0.156 collector
+upgrade added ScopeName/ScopeVersion columns to the traces insert, so installs
+upgraded across that boundary fail every traces batch with
+"No such column ScopeName in table default.otel_traces" until the columns are
+added. This hook runs the additive, idempotent ALTER before each upgrade:
+harmless when the columns (or the table itself) don't exist yet, and it keeps
+existing telemetry data (7d TTL) instead of requiring a table drop.
+*/}}
+{{- if and .Values.clickhouse.enabled (index .Values "opentelemetry-collector" "enabled") }}
+{{- /* Mirror the bitnami subchart's fullname logic: fullnameOverride wins,
+       else <release>-<nameOverride|"clickhouse">. */}}
+{{- $chFullname := coalesce .Values.clickhouse.fullnameOverride (printf "%s-%s" .Release.Name (default "clickhouse" .Values.clickhouse.nameOverride)) }}
+{{- $chSecretName := default $chFullname (dig "auth" "existingSecret" "" .Values.clickhouse) }}
+{{- $chSecretKey := default "admin-password" (dig "auth" "existingSecretKey" "" .Values.clickhouse) }}
+{{- /* Keep the target database/table in lockstep with the exporter config. */}}
+{{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
+{{- $chDatabase := default "default" (get $chExporter "database") }}
+{{- $chTracesTable := default "otel_traces" (get $chExporter "traces_table_name") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-ch-schema-upgrade
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      # The job only talks to clickhouse, never the K8s API.
+      automountServiceAccountToken: false
+      containers:
+        - name: schema-upgrade
+          image: "{{ .Values.clickhouse.image.registry }}/{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          env:
+            - name: CH_HOST
+              value: {{ $chFullname | quote }}
+            - name: CH_USER
+              value: {{ .Values.clickhouse.auth.username | default "default" | quote }}
+            - name: CH_DATABASE
+              value: {{ $chDatabase | quote }}
+            - name: CH_TRACES_TABLE
+              value: {{ $chTracesTable | quote }}
+            - name: CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $chSecretName | quote }}
+                  key: {{ $chSecretKey | quote }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              cc() { clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASSWORD" --query "$1"; }
+              # Wait for the (pre-upgrade, still-running) clickhouse to answer.
+              for i in $(seq 1 30); do
+                cc "SELECT 1" >/dev/null 2>&1 && break
+                echo "waiting for clickhouse ($i/30)..."; sleep 5
+              done
+              if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}")" != "1" ]; then
+                echo "${CH_DATABASE}.${CH_TRACES_TABLE} does not exist yet; the exporter will create it with the current schema. Nothing to do."
+                exit 0
+              fi
+              echo "adding ScopeName/ScopeVersion to ${CH_DATABASE}.${CH_TRACES_TABLE} if missing..."
+              cc "ALTER TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}
+                    ADD COLUMN IF NOT EXISTS ScopeName String CODEC(ZSTD(1)) AFTER ResourceAttributes,
+                    ADD COLUMN IF NOT EXISTS ScopeVersion String CODEC(ZSTD(1)) AFTER ScopeName"
+              echo "schema upgrade complete."
+{{- end }}

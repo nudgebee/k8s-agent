@@ -107,13 +107,31 @@ func serviceNoEndpointsEnrichBlocks(obj, _ map[string]any, ec EnrichContext) []E
 	}
 	sel := serviceSelector(obj)
 	ns := metaNS(obj)
+	condition := fmt.Sprintf(
+		"No pods and no workload pod templates in namespace `%s` match this selector. "+
+			"The Service has no endpoints and cannot route traffic — requests to it fail "+
+			"even though the Service object itself looks healthy.", ns)
 	blocks := []EvidenceBlock{
 		headerBlock(fmt.Sprintf("Service %s has no matching endpoints", metaName(obj))),
 		markdownBlock(fmt.Sprintf("*Configured selector:* `%s`", formatSelector(sel))),
-		markdownBlock(fmt.Sprintf(
-			"No pods and no workload pod templates in namespace `%s` match this selector. "+
-				"The Service has no endpoints and cannot route traffic — requests to it fail "+
-				"even though the Service object itself looks healthy.", ns)),
+		// The collector passes additional_info.insights through to the
+		// Finding's per-block insight list, which is what the investigate
+		// page renders as Insights. Without this the page shows nothing:
+		// its other insight sources are Warning rows in event tables (a
+		// zero-endpoint Service emits no K8s events) and pod-status
+		// extraction from the raw-event json (subject is a Service).
+		{
+			"type": "markdown",
+			"data": condition,
+			"additional_info": map[string]any{
+				"insights": []map[string]any{{
+					"message": fmt.Sprintf(
+						"Service %s/%s selector (%s) matches no pods and no workload pod templates — traffic to the Service is failing",
+						ns, metaName(obj), formatSelector(sel)),
+					"severity": "Critical",
+				}},
+			},
+		},
 	}
 	return append(blocks, podLabelComparisonTable(ec, ns)...)
 }
