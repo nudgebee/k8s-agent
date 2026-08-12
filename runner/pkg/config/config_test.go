@@ -176,16 +176,20 @@ func TestParseHeaders(t *testing.T) {
 		{"one", "X-Scope-OrgID: tenant-1", http.Header{"X-Scope-Orgid": []string{"tenant-1"}}},
 		{
 			"multi",
-			"X-Scope-OrgID: tenant-1, Authorization: Bearer abc",
+			"X-Scope-OrgID: tenant-1; Authorization: Bearer abc",
 			http.Header{
 				"X-Scope-Orgid": []string{"tenant-1"},
 				"Authorization": []string{"Bearer abc"},
 			},
 		},
 		{"trims_whitespace", "  X-A : v ", http.Header{"X-A": []string{"v"}}},
-		{"skips_invalid", "no-colon-here, X-Y: ok", http.Header{"X-Y": []string{"ok"}}},
+		{"skips_invalid", "no-colon-here; X-Y: ok", http.Header{"X-Y": []string{"ok"}}},
 		{"value_can_contain_colons", "Authorization: Bearer x:y:z",
 			http.Header{"Authorization": []string{"Bearer x:y:z"}}},
+		// A comma inside a value must survive — we split on ";" only, so a
+		// multi-value header (e.g. Accept) is not truncated at the comma.
+		{"value_can_contain_comma", "Accept: text/html, application/json",
+			http.Header{"Accept": []string{"text/html, application/json"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
