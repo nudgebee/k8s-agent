@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/config"
 	"github.com/nudgebee/nudgebee-agent/pkg/observability/prometheus"
@@ -183,5 +186,85 @@ func TestSelectedLogsProvider_Precedence(t *testing.T) {
 				t.Errorf("selectedLogsProvider = %q; want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A ClickHouse that answers /ping is healthy and has no reason to report.
+func TestProbeClickhouse_HealthyReportsNoReason(t *testing.T) {
+	t.Setenv("TRACES_ENABLED", "")
+	ch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ch.Close()
+
+	host, port, _ := net.SplitHostPort(strings.TrimPrefix(ch.URL, "http://"))
+	ok, reason := probeClickhouse(context.Background(), ch.Client(), host, port)
+	if !ok {
+		t.Errorf("probeClickhouse ok = false; want true")
+	}
+	if reason != "" {
+		t.Errorf("reason = %q; want empty for a healthy ClickHouse", reason)
+	}
+}
+
+// An unreachable ClickHouse must explain itself — this is the string the UI
+// renders under the Traces "Disconnected" pill.
+func TestProbeClickhouse_UnreachableReportsReason(t *testing.T) {
+	t.Setenv("TRACES_ENABLED", "")
+	// Bind and immediately close, so the port is dead but well-formed.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	host, port, _ := net.SplitHostPort(strings.TrimPrefix(dead.URL, "http://"))
+	dead.Close()
+
+	ok, reason := probeClickhouse(context.Background(), &http.Client{Timeout: 2 * time.Second}, host, port)
+	if ok {
+		t.Errorf("probeClickhouse ok = true; want false for a dead ClickHouse")
+	}
+	if reason == "" {
+		t.Fatal("reason = empty; want a failure explanation")
+	}
+	if !strings.Contains(reason, "ClickHouse ping failed") {
+		t.Errorf("reason = %q; want it to name the failing probe", reason)
+	}
+}
+
+// Traces off by operator choice is not a failure, so there's nothing to explain.
+func TestProbeClickhouse_ExplicitlyDisabledReportsNoReason(t *testing.T) {
+	t.Setenv("TRACES_ENABLED", "false")
+	ok, reason := probeClickhouse(context.Background(), http.DefaultClient, "ch.example", "8123")
+	if ok {
+		t.Errorf("probeClickhouse ok = true; want false under TRACES_ENABLED=false")
+	}
+	if reason != "" {
+		t.Errorf("reason = %q; want empty — disabled on purpose isn't a failure", reason)
+	}
+}
+
+// No host means traces were never wired up; say so rather than going silent.
+func TestProbeClickhouse_UnconfiguredExplainsItself(t *testing.T) {
+	t.Setenv("TRACES_ENABLED", "")
+	ok, reason := probeClickhouse(context.Background(), http.DefaultClient, "", "8123")
+	if ok {
+		t.Errorf("probeClickhouse ok = true; want false with no CLICKHOUSE_HOST")
+	}
+	if !strings.Contains(reason, "CLICKHOUSE_HOST") {
+		t.Errorf("reason = %q; want it to name the missing env var", reason)
+	}
+}
+
+// The reason string ships to the backend and renders in the UI, so a URL-form
+// CLICKHOUSE_HOST must not leak its credentials into it.
+func TestRedactUserinfo(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"clickhouse.svc:8123", "clickhouse.svc:8123"},
+		{"https://otel.last9.io:443", "https://otel.last9.io:443"},
+		{"https://admin:hunter2@otel.last9.io:443", "https://otel.last9.io:443"},
+		{"admin:hunter2@clickhouse.svc:8123", "clickhouse.svc:8123"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := redactUserinfo(tc.in); got != tc.want {
+			t.Errorf("redactUserinfo(%q) = %q; want %q", tc.in, got, tc.want)
+		}
 	}
 }

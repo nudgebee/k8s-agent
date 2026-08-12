@@ -36,6 +36,7 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	// Every Job the agent creates MUST have:
 	//   - TTLSecondsAfterFinished = 600
 	//   - BackoffLimit = 0
+	//   - ActiveDeadlineSeconds >= 1800
 	//   - managed-by + orchestrator labels
 	//   - per-Job UUID label
 	// regardless of what the JobSpec asked for.
@@ -51,6 +52,9 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	}
 	if got := *job.Spec.BackoffLimit; got != jobBackoffLimit {
 		t.Errorf("BackoffLimit = %d; want hard-clamped %d", got, jobBackoffLimit)
+	}
+	if got := *job.Spec.ActiveDeadlineSeconds; got != minJobActiveDeadlineSeconds {
+		t.Errorf("ActiveDeadlineSeconds = %d; want floor %d", got, minJobActiveDeadlineSeconds)
 	}
 	if job.Labels[managedByLabel] != managedByValue {
 		t.Errorf("missing managed-by label: %v", job.Labels)
@@ -79,6 +83,32 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	}
 	if podLabels[orchestratorLabel] != orchestratorValue {
 		t.Errorf("pod template missing orchestrator label: %v", podLabels)
+	}
+}
+
+// A scanner that declares a budget longer than the hygiene floor keeps it — the
+// deadline is a backstop against wedged Jobs, not a scan timeout. nova's
+// helm-chart-upgrade is the real case (3000s).
+func TestBuildJob_ActiveDeadlineHonorsLongerTimeoutHint(t *testing.T) {
+	r := NewRunner(fake.NewClientset(), "ns", "agent-sa")
+
+	long := r.BuildJob(JobSpec{
+		NamePrefix:         "helm-chart-upgrade",
+		Image:              "nova:latest",
+		TimeoutHintSeconds: 3000,
+	}, "helm-chart-upgrade-abcd1234", "uuid-2")
+	if got := *long.Spec.ActiveDeadlineSeconds; got != 3000 {
+		t.Errorf("ActiveDeadlineSeconds = %d; want the spec's 3000s hint", got)
+	}
+
+	// A hint below the floor must not shorten the backstop.
+	short := r.BuildJob(JobSpec{
+		NamePrefix:         "trivy-image-scan",
+		Image:              "target:latest",
+		TimeoutHintSeconds: 60,
+	}, "trivy-image-scan-abcd1234", "uuid-3")
+	if got := *short.Spec.ActiveDeadlineSeconds; got != minJobActiveDeadlineSeconds {
+		t.Errorf("ActiveDeadlineSeconds = %d; want floor %d", got, minJobActiveDeadlineSeconds)
 	}
 }
 
@@ -381,6 +411,46 @@ func TestWaitForJob_Failed(t *testing.T) {
 	}
 	if !strings.Contains(resp["failure_reason"].(string), "container exited 1") {
 		t.Errorf("failure_reason = %v", resp["failure_reason"])
+	}
+}
+
+// A Job whose pod is wedged in ImagePullBackOff earns no Failed condition (the
+// container never starts), so it must be surfaced as Failed via the pod check —
+// otherwise it polls "Running" forever and never gets deleted/reaped.
+func TestWaitForJob_ImagePullBackOff(t *testing.T) {
+	cs := fake.NewClientset()
+	_, _ = cs.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "j-pull", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}, metav1.CreateOptions{})
+	_, _ = cs.CoreV1().Pods("default").Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "j-pull-abc",
+			Namespace: "default",
+			Labels:    map[string]string{jobNameSelectorLabel: "j-pull"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "scanner",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ImagePullBackOff",
+					Message: `Back-off pulling image "registry.example.com/app:tag"`,
+				}},
+			}},
+		},
+	}, metav1.CreateOptions{})
+	r := NewRunner(cs, "default", "")
+	out, err := r.handleWaitForJob(context.Background(), map[string]any{"job_name": "j-pull"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := out.(map[string]any)
+	if resp["status"] != "Failed" {
+		t.Errorf("status = %v; want Failed", resp["status"])
+	}
+	reason := resp["failure_reason"].(string)
+	if !strings.Contains(reason, "image pull failed") || !strings.Contains(reason, "scanner") {
+		t.Errorf("failure_reason = %q; want image-pull detail naming the container", reason)
 	}
 }
 

@@ -199,13 +199,40 @@ func (m MatchedTrigger) Title() string {
 	}
 }
 
-// Description is a 1-line context blurb. Keeps Finding rows informative
-// even before stage 2.2 ships the enricher chain that adds rich evidence.
+// Description is a 1-line context blurb per aggregation key. It is stored on
+// the event and rendered verbatim in the UI and in AI-investigation evidence,
+// so it must describe what happened on the cluster in operator terms — never
+// internal matcher/trigger names (the old "Trigger 'babysitter_deployment'
+// matched on agent" read as noise, and misleadingly so, in evidence).
 func (m MatchedTrigger) Description() string {
-	if m.MatcherName == "" {
-		return "Trigger matched on agent (raw event in evidence)"
+	switch m.AggregationKey {
+	case "ConfigurationChange/KubernetesResource/Change":
+		kind := m.SubjectKind
+		if kind == "" {
+			kind = "resource"
+		}
+		return fmt.Sprintf("The %s's configuration was changed (deploy or spec update); the spec diff is attached in evidence.", kind)
+	case "report_crash_loop":
+		return "A container in the pod is restarting repeatedly (CrashLoopBackOff); recent state is attached in evidence."
+	case "pod_oom_killer_enricher":
+		return "A container in the pod was killed for exceeding its memory limit (OOMKilled)."
+	case "image_pull_backoff_reporter":
+		return "The pod cannot pull its container image; the image reference and pull error are attached in evidence."
+	case "job_failure":
+		return "The job exceeded its failure policy and was marked failed; pod status is attached in evidence."
+	case "node_not_ready":
+		return "The node stopped reporting Ready; node conditions are attached in evidence."
+	case "node_unschedulable":
+		return "The node was marked unschedulable (cordoned)."
+	case "node_pressure":
+		return "The node reported resource pressure; node conditions are attached in evidence."
+	case "pod_unschedulable":
+		return "The pod cannot be scheduled onto any node; the scheduler's reason is attached in evidence."
+	case "service_no_endpoints":
+		return "The service has no ready endpoints; traffic to it will fail."
+	default:
+		return "Detected on the cluster; the raw event is attached in evidence."
 	}
-	return "Trigger '" + m.MatcherName + "' matched on agent (raw event in evidence)"
 }
 
 // FromAlertManager wraps a raw AlertManager webhook into a Finding
@@ -317,6 +344,18 @@ func (b *Builder) FromKubewatchEvent(rawData []byte) (*FindingEnvelope, error) {
 // alertToFinding converts one PrometheusAlert to a Finding envelope.
 func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 	subjectName, subjectType := alertSubject(a.Labels)
+	subjectNamespace := pickLabel(a.Labels, "namespace", "exported_namespace")
+	if subjectName == "" {
+		// No k8s workload label present — try the lower-confidence labels the
+		// backend webhook mapper also understands (mesh workload labels,
+		// container_id path, service) so both ingest paths resolve the same
+		// subject.
+		var fallbackNamespace string
+		subjectName, subjectType, fallbackNamespace = alertSubjectFallback(a.Labels)
+		if subjectNamespace == "" {
+			subjectNamespace = fallbackNamespace
+		}
+	}
 	if subjectName == "" {
 		// No kubernetes object resolvable from the alert labels (cluster-
 		// level / control-plane / custom application alerts like Watchdog,
@@ -329,7 +368,6 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 			subjectName = "UnnamedAlert"
 		}
 	}
-	subjectNamespace := pickLabel(a.Labels, "namespace", "exported_namespace")
 	subjectNode := pickLabel(a.Labels, "node", "instance")
 	alertname := pickLabel(a.Labels, "alertname")
 	if alertname == "" {
@@ -439,6 +477,51 @@ func alertSubject(labels map[string]string) (string, string) {
 		return "", strings.ToLower(v)
 	}
 	return "", ""
+}
+
+// alertSubjectFallback runs only when alertSubject found no kubernetes object,
+// walking the lower-confidence labels the backend webhook mapper
+// (resolveSubjectFromLabels) also understands, so an alert delivered through
+// Alertmanager resolves the same subject it would via PagerDuty/Zenduty:
+// mesh-style workload labels (ApplicationAPIFailures carries
+// destination_workload_name), the /k8s/{namespace}/{pod}/{container} path in
+// container_id, and application `service` labels (NBLLMLatencyP95High).
+// Returns (name, kind, namespace); kind stays empty when the label doesn't
+// imply one — the collector types the workload from inventory downstream —
+// and namespace is set only when the label itself carries one.
+func alertSubjectFallback(labels map[string]string) (string, string, string) {
+	for _, key := range []string{"destination_workload_name", "src_workload_name", "k8s_deployment_name"} {
+		v := labels[key]
+		// Exact-match guard: the bare kube-state-metrics exporter never names
+		// a real workload (helm-prefixed variants do).
+		if v == "" || v == "kube-state-metrics" {
+			continue
+		}
+		kind := ""
+		if key == "k8s_deployment_name" {
+			kind = "deployment"
+		}
+		ns := labels["destination_workload_namespace"]
+		if key == "src_workload_name" {
+			ns = pickLabel(labels, "src_workload_namespace", "source_workload_namespace")
+		}
+		return v, kind, ns
+	}
+	// container_id: /k8s/{namespace}/{pod}/{container} — the container segment
+	// names the workload (matches k8s_workloads); the pod segment carries a
+	// ReplicaSet hash that never does.
+	if cid := labels["container_id"]; strings.HasPrefix(cid, "/k8s/") {
+		parts := strings.Split(strings.TrimPrefix(cid, "/"), "/")
+		if len(parts) == 4 && parts[1] != "" && parts[3] != "" {
+			return parts[3], "", parts[1]
+		}
+	}
+	for _, key := range []string{"service", "service_name"} {
+		if v := labels[key]; v != "" && !isScrapeExporter(v) {
+			return v, "", ""
+		}
+	}
+	return "", "", ""
 }
 
 // isScrapeExporter reports whether a prometheus `job` label value names an

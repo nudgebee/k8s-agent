@@ -236,15 +236,44 @@ func TestProbe_TraceProviderSelection(t *testing.T) {
 		},
 		{
 			name:     "default otel_clickhouse with clickhouse down",
-			ds:       Datasources{ClickHouseStatus: false},
+			ds:       Datasources{ClickHouseStatus: false, ClickHouseURL: "nudgebee-agent-clickhouse"},
 			provider: "otel_clickhouse",
 			enabled:  false,
 		},
 		{
 			name:     "default otel_clickhouse with clickhouse up",
+			ds:       Datasources{ClickHouseStatus: true, ClickHouseURL: "nudgebee-agent-clickhouse"},
+			provider: "otel_clickhouse",
+			enabled:  true,
+			url:      "nudgebee-agent-clickhouse",
+		},
+		{
+			// TRACES_ENABLED=true forces the status flag on without a probe;
+			// with no CLICKHOUSE_HOST there's no URL to report, but traces
+			// must still read as enabled.
+			name:     "clickhouse up without a host reports no URL",
 			ds:       Datasources{ClickHouseStatus: true},
 			provider: "otel_clickhouse",
 			enabled:  true,
+		},
+		{
+			// The backend substring-matches tracesUrl to pick `otel.traces`
+			// over `otel_traces`; an empty URL silently gets the wrong table.
+			name:     "last9 clickhouse host is reported verbatim",
+			ds:       Datasources{ClickHouseStatus: true, ClickHouseURL: "otel.last9.io:443"},
+			provider: "otel_clickhouse",
+			enabled:  true,
+			url:      "otel.last9.io:443",
+		},
+		{
+			// Legacy get_trace_url checked clickhouse_url first and would
+			// return the CH host here, which the backend then quotes as a
+			// BigQuery table name.
+			name:     "TRACE_TABLE wins over a live clickhouse",
+			ds:       Datasources{TraceTable: "bq.dataset.traces", ClickHouseStatus: true, ClickHouseURL: "nudgebee-agent-clickhouse"},
+			provider: "bigquery",
+			enabled:  true,
+			url:      "bq.dataset.traces",
 		},
 	}
 	for _, tc := range cases {
@@ -334,4 +363,60 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The reason slot is meaningful only while traces are down. Because the
+// collector merges activity_stats into connection_status with jsonb `||`, a
+// recovered ClickHouse must post an explicit "" — omitting the key would strand
+// the stale reason in the DB and the UI would keep rendering it.
+func TestProbe_TracesConnectionError(t *testing.T) {
+	cases := []struct {
+		name string
+		ds   Datasources
+		want string
+	}{
+		{
+			name: "down clickhouse reports its reason",
+			ds:   Datasources{ClickHouseStatus: false, ClickHouseError: "ClickHouse ping failed at ch.svc:8123: connection refused"},
+			want: "ClickHouse ping failed at ch.svc:8123: connection refused",
+		},
+		{
+			name: "recovered clickhouse clears the reason",
+			ds:   Datasources{ClickHouseStatus: true, ClickHouseURL: "ch.svc", ClickHouseError: ""},
+			want: "",
+		},
+		{
+			// A stale error alongside a healthy backend must never render.
+			name: "healthy traces suppress a leftover reason",
+			ds:   Datasources{ClickHouseStatus: true, ClickHouseURL: "ch.svc", ClickHouseError: "connection refused"},
+			want: "",
+		},
+		{
+			// Jaeger forces TracesEnabled true without a probe; a ClickHouse
+			// reason is irrelevant and would contradict the reported provider.
+			name: "jaeger traces ignore the clickhouse reason",
+			ds:   Datasources{JaegerEnabled: true, JaegerQueryURL: "http://jaeger", ClickHouseError: "connection refused"},
+			want: "",
+		},
+	}
+	s := &Service{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := s.probe(context.Background(), tc.ds).TracesConnectionError; got != tc.want {
+				t.Errorf("TracesConnectionError = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// tracesConnectionError must survive JSON marshalling as an explicit "" rather
+// than vanishing — see the jsonb-merge note on the field.
+func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
+	buf, err := json.Marshal(ActivityStats{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(buf), `"tracesConnectionError":""`) {
+		t.Errorf("marshalled ActivityStats omits an empty tracesConnectionError, so the\ncollector's jsonb merge would keep a stale reason forever: %s", buf)
+	}
 }

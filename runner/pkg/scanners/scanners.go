@@ -33,9 +33,18 @@ import (
 
 // Hygiene constants — agent-enforced, server cannot override.
 const (
-	jobTTLSeconds        int32 = 600 // 10 min after-finish cleanup
-	jobBackoffLimit      int32 = 0   // fail-fast; orchestrator decides retries
-	defaultMaxConcurrent int   = 5
+	jobTTLSeconds   int32 = 600 // 10 min after-finish cleanup
+	jobBackoffLimit int32 = 0   // fail-fast; orchestrator decides retries
+	// minJobActiveDeadlineSeconds is the floor for every Job's
+	// ActiveDeadlineSeconds. Without a deadline a Job whose pod never starts its
+	// container — wedged in ImagePullBackOff, or unschedulable because the pinned
+	// NodeName went away — stays Active with no terminal condition forever, which
+	// makes it invisible to both cleanup paths (the TTLAfterFinished controller
+	// and our own reaper are finished-only). 30 min is a pure hygiene backstop,
+	// comfortably above the api-server orchestrator's 15-min poll budget, so it
+	// never cuts short a scan the orchestrator would still accept.
+	minJobActiveDeadlineSeconds int64 = 1800
+	defaultMaxConcurrent        int   = 5
 	// 64 MiB raw stdout cap — large enough to absorb trivy_cis (~17 MiB) and
 	// kube_bench full reports without truncation. Agent gzips before sending,
 	// so the wire payload is typically ~5-10x smaller than the raw cap.
@@ -89,6 +98,9 @@ func NewRunner(cs kubernetes.Interface, namespace, serviceAccount string) *Runne
 // Hygiene the agent enforces (server cannot override):
 //   - Job runs in r.Namespace.
 //   - TTLSecondsAfterFinished = 600 (10 min cleanup).
+//   - ActiveDeadlineSeconds = max(spec.TimeoutHintSeconds, 1800), so a Job that
+//     can never make progress becomes terminal on its own and the normal
+//     finished-Job cleanup applies.
 //   - BackoffLimit = 0 (fail-fast).
 //   - app.kubernetes.io/managed-by + nudgebee.com/orchestrator labels are stamped.
 //   - A per-Job UUID label is added for audit.
@@ -143,6 +155,14 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 
 	ttl := jobTTLSeconds
 	backoff := jobBackoffLimit
+	// Give the Job a wall-clock deadline so Kubernetes terminates it if it never
+	// reaches a terminal state on its own. A scanner that declares a longer budget
+	// (nova's helm-chart-upgrade sends 3000s) keeps it — the floor only applies to
+	// specs that declare nothing.
+	deadline := minJobActiveDeadlineSeconds
+	if hint := int64(spec.TimeoutHintSeconds); hint > deadline {
+		deadline = hint
+	}
 	labels := map[string]string{
 		managedByLabel:    managedByValue,
 		orchestratorLabel: orchestratorValue,
@@ -157,6 +177,7 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
+			ActiveDeadlineSeconds:   &deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					// managed-by/orchestrator are propagated to the pod so the
@@ -259,6 +280,49 @@ func jobStatusSnapshot(j *batchv1.Job) (string, string) {
 		}
 	}
 	return "Running", ""
+}
+
+// imagePullFailure reports whether the Job's pod is wedged on an image it will
+// never get — the container is Waiting with reason ImagePullBackOff, ErrImagePull
+// or ErrImageNeverPull. This is terminal in practice (a missing tag, a private
+// registry the scanner can't authenticate to, or — for image_scanner, which runs
+// pull-policy Never by design — a node-local image that has since been evicted
+// won't fix itself) but the kubelet
+// never starts the container, so the Job earns no Failed condition and would
+// otherwise poll as "Running" until the orchestrator's overall deadline — never
+// getting deleted, never reaped (TTL and the reaper only touch finished Jobs).
+// Surfacing it as Failed lets the orchestrator stop early, delete the Job, and
+// record a precise reason. Best-effort: a list error yields ("", false) so the
+// caller falls back to the condition-based snapshot.
+//
+// Both init and main container statuses are checked — the scanner container is
+// the target image being pulled, but a broken TrivyImage would wedge the init
+// container the same way.
+func (r *Runner) imagePullFailure(ctx context.Context, jobName string) (string, bool) {
+	pods, err := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: jobNameSelectorLabel + "=" + jobName,
+	})
+	if err != nil {
+		return "", false
+	}
+	check := func(statuses []corev1.ContainerStatus) (string, bool) {
+		for _, cs := range statuses {
+			if w := cs.State.Waiting; w != nil && (w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull" || w.Reason == "ErrImageNeverPull") {
+				return fmt.Sprintf("image pull failed for container %q: %s", cs.Name, w.Message), true
+			}
+		}
+		return "", false
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if msg, stuck := check(p.Status.InitContainerStatuses); stuck {
+			return msg, true
+		}
+		if msg, stuck := check(p.Status.ContainerStatuses); stuck {
+			return msg, true
+		}
+	}
+	return "", false
 }
 
 // fetchPodLogs reads at most LogCapBytes from the (single) pod the Job

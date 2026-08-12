@@ -26,6 +26,7 @@ func Builtins() []MatcherSpec {
 		nodeUnschedulableMatcher(),
 		nodePressureMatcher(),
 		podUnschedulableMatcher(),
+		serviceNoEndpointsMatcher(),
 	}
 	// One matcher per babysitter-watched kind. We register them as
 	// separate specs (rather than `Kind: "Any"` with an in-predicate

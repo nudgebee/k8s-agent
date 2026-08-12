@@ -66,6 +66,15 @@ type ActivityStats struct {
 	HealthCheckDuration        float64           `json:"healthCheckDuration,omitempty"`
 	TraceProvider              string            `json:"traceProvider,omitempty"`
 	TraceProviderConfig        map[string]any    `json:"traceProviderConfig,omitempty"`
+	// TracesConnectionError is the reason traces are disconnected, rendered by
+	// the UI's Agent Health card under the Traces pill ("Reason - ...").
+	//
+	// Deliberately no `omitempty`: the collector merges activity_stats into
+	// `agent.connection_status` with the jsonb `||` operator, so an omitted key
+	// leaves the previous value in place. Once ClickHouse recovers we must post
+	// an explicit "" to clear the stale reason — dropping the key would strand
+	// it in the DB forever.
+	TracesConnectionError string `json:"tracesConnectionError"`
 }
 
 // ClusterStatus is the wire payload posted to /v1/k8s/telemetry.
@@ -142,6 +151,15 @@ type Datasources struct {
 	// ClickHouseStatus is the `clickhouse_status` flag — used only as the
 	// fallback for tracesEnabled when no other provider matches.
 	ClickHouseStatus bool
+	// ClickHouseURL is CLICKHOUSE_HOST verbatim (bare host, no scheme/port) —
+	// same value the legacy checker put on `clickhouse_url`. Reported as
+	// tracesUrl for the otel_clickhouse provider; the backend substring-matches
+	// it to pick the trace table (`otel.traces` for Last9, else `otel_traces`).
+	ClickHouseURL string
+	// ClickHouseError is why the probe failed, already stripped of credentials
+	// by the caller. Empty when ClickHouse is healthy or was never probed
+	// (unconfigured / disabled). Surfaced as tracesConnectionError.
+	ClickHouseError string
 
 	// Node-agent: count of `up{job=~"...nudgebee(-.*)?-node-agent"}` from
 	// Prometheus, computed by the caller.
@@ -359,6 +377,13 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	out.TracesEnabled = traceStatus(ds)
 	out.TraceProvider = traceProvider(ds)
 	out.TracesURL = traceURL(ds)
+	// The reason slot only makes sense while traces are down, and ClickHouse is
+	// the only trace backend the agent actually probes — the others (bigquery,
+	// chronosphere, jaeger) are env-configured and force TracesEnabled true
+	// without a health check, so they never have a failure to report.
+	if !out.TracesEnabled {
+		out.TracesConnectionError = ds.ClickHouseError
+	}
 	// traceProviderConfig: the legacy code queries ClickHouse for the
 	// otel_traces materialized-column flag. The agent doesn't run a
 	// local ClickHouse anymore; the backend computes this. Emit an
@@ -398,9 +423,12 @@ func traceProvider(ds Datasources) string {
 	return "otel_clickhouse"
 }
 
-// traceURL mirrors get_trace_url. Note the first
-// argument `url_from_prometheus` is what the legacy passes as
-// `clickhouse_url` — we don't run a local ClickHouse, so it's always "".
+// traceURL mirrors get_trace_url. The legacy's first argument
+// `url_from_prometheus` is what it passes as `clickhouse_url` (CLICKHOUSE_HOST)
+// — reported here via isClickHouseEnabled, but checked last rather than first:
+// the legacy order returns the ClickHouse host even when TRACE_TABLE makes the
+// provider `bigquery`, and the backend then quotes that host as a BigQuery
+// table. Checking it last keeps the URL consistent with the reported provider.
 func traceURL(ds Datasources) string {
 	if ds.TraceTable != "" {
 		return ds.TraceTable
@@ -416,6 +444,9 @@ func traceURL(ds Datasources) string {
 			return ds.ChronosphereTracesURL
 		}
 		return ds.ChronosphereURL
+	}
+	if isClickHouseEnabled(ds) {
+		return ds.ClickHouseURL
 	}
 	return ""
 }
@@ -434,6 +465,18 @@ func isChronosphereEnabled(ds Datasources) bool {
 // isJaegerEnabled mirrors _is_jaeger_enabled.
 func isJaegerEnabled(ds Datasources) bool {
 	return ds.JaegerEnabled && ds.JaegerQueryURL != ""
+}
+
+// isClickHouseEnabled is the otel_clickhouse counterpart of isJaegerEnabled:
+// a reachable ClickHouse we have an address for. The status flag alone isn't
+// enough to report a URL — TRACES_ENABLED=true forces the flag on without
+// probing, so it can be true with CLICKHOUSE_HOST unset.
+//
+// Deliberately not used by traceStatus: gating tracesEnabled on the URL would
+// turn traces off for exactly that TRACES_ENABLED=true-without-host config,
+// which the agent supports for external ClickHouse it can't probe.
+func isClickHouseEnabled(ds Datasources) bool {
+	return ds.ClickHouseStatus && ds.ClickHouseURL != ""
 }
 
 // httpHealth returns true iff GET <url> returns 2xx within 5s.

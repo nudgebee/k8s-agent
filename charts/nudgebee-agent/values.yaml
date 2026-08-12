@@ -65,11 +65,11 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-07-14T09-20-14_17a3cbad58bd80c14dee85a158cc4ec2de19e09f
+    tag: 2026-08-12T06-01-54_7ec58f7701909a3ce172ad2a9235f8b15255e363
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
-  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:e50de43"
+  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:4f4b455"
   imagePullPolicy: IfNotPresent
   # Expose net/http/pprof on the runner HTTP listener (surfaces as
   # PPROF_ENABLED). Off by default — the endpoints are unauthenticated;
@@ -120,6 +120,26 @@ runner:
   # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
   # statefulset scaling, workload creation, and rollout lifecycle management.
   enableWritePermissions: false
+  # Read-only cluster access. When true the runner's ClusterRole is strictly
+  # get/list/watch — no Secrets API access at all (not even read), no
+  # pods/exec, no pod eviction, no node patch, no write verbs on any
+  # cluster-scoped or cross-namespace resource. The writes the agent needs to
+  # function are granted by a namespaced Role in the RELEASE NAMESPACE only:
+  # scanner Jobs, script-runner pods/configmaps, in-namespace exec, and
+  # PrometheusRule CRUD (so UI-managed alert rules keep working).
+  #
+  # What stops working in this mode (denied by the API server): remediation
+  # actions on customer workloads (delete_pod, drain, cordon, rollout_restart,
+  # scale, PVC ops), rightsizing APPLY (recommendations still compute),
+  # exec/profiling/terminal into pods outside the release namespace, and
+  # private-image scan pull-secret auto-copy. Helm release inventory is
+  # unaffected (the Go runner does not read Helm secrets).
+  #
+  # Mutually exclusive with enableWritePermissions and
+  # scannerAutoCopyPullSecrets — helm template fails if both are set.
+  # The full read-only RBAC lives in a single reviewable file:
+  # templates/runner-service-account-readonly.yaml.
+  readOnly: false
   # Kill-switch for the runner's mutate subsystem (delete_pod, cordon,
   # rollout_restart, PrometheusRule CRUD, AlertManager silences, Loki rules).
   # Default is true so the light-action alert-rule path (driven by the UI)
@@ -253,7 +273,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.2
+    tag: 0.1.5
   resources:
     requests:
       cpu: "100m"
@@ -316,7 +336,7 @@ opentelemetry-collector:
   enabled: true
   image:
     repository: ghcr.io/nudgebee/opentelemetry-collector-contrib
-    tag: 0.75.0
+    tag: 0.157.0
   # Inherit name overrides from parent chart
   nameOverride: ""
   fullnameOverride: ""
@@ -377,12 +397,11 @@ opentelemetry-collector:
       clickhouse:
         endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
         database: default
-        ttl_days: 7
+        ttl: 168h
         username: default
         password: ${env:CLICKHOUSE_PASSWORD}
         logs_table_name: otel_logs
         traces_table_name: otel_traces
-        metrics_table_name: otel_metrics
         timeout: 5s
         retry_on_failure:
           enabled: true
@@ -408,7 +427,7 @@ clickhouse:
   image:
     registry: ghcr.io
     repository: nudgebee/clickhouse
-    tag: 24.12.4-debian-12-r0-nb-2
+    tag: 24.12.4-debian-12-r0-nb-3
   nameOverride: ""
   fullnameOverride: ""
   persistence:
@@ -458,3 +477,19 @@ clickhouse:
             description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
+  # Extra alternation terms appended to the container-id exclusion regex of the
+  # default alert rules (both the log-error and HTTP-failure rules). Terms match
+  # as substrings of container_id (/k8s/<namespace>/<pod>/<container>), so a
+  # namespace name excludes that whole namespace.
+  # e.g. for clusters running demo/synthetic-load apps that fail on purpose:
+  # extra_rule_exclusions: ["demo", "nb-bench"]
+  extra_rule_exclusions: []
+  # OPT-IN: keep_firing_for for the flap-prone rules (HighErrorCriticalLogs,
+  # ApplicationAPIFailures): an intermittently failing target stays one steady
+  # alert instead of resolving and re-firing on every dip below threshold.
+  # Off by default for provider compatibility — Prometheus < 2.42 REJECTS rule
+  # files containing this field (taking down every rule in the group), and
+  # other PrometheusRule consumers (VictoriaMetrics operator < v0.46, older
+  # rulers) silently drop or reject it. Only set this (e.g. "10m") when every
+  # rule evaluator in the target cluster is known to support keep_firing_for.
+  rule_keep_firing_for: ""

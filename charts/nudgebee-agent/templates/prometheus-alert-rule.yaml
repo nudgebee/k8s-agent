@@ -1,13 +1,56 @@
-{{- if (default false .Values.alertmanager.create_nb_default_rules) }}
 {{- /*
-Container-ID exclusions for the log-error and HTTP-failure rules.
-
-The log-error regex additionally excludes log-collection infrastructure
-(fluent-bit, loki, opensearch, etc.), which emits steady error-level
-log streams that are transport/ingest failures — not app-level signal.
+Gated on enablePrometheusStack as well as the rule toggle: without a Prometheus
+operator in the cluster the monitoring.coreos.com/v1 PrometheusRule CRD is not
+registered, so applying this manifest fails the install outright.
 */ -}}
-{{- $excludeLog := ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|actions-runner-system-1|fluent-bit|fluentd|loki|opensearch|elasticsearch|logstash|datadog|newrelic|otel|promtail).*" -}}
-{{- $excludeApi := ".*(prometheus|grafana|kube-system|nudgebee-agent|containerd|kubelet|keda|karpenter|actions-runner-system-1).*" -}}
+{{- if and (default false .Values.alertmanager.create_nb_default_rules) .Values.enablePrometheusStack }}
+{{- /*
+Exclusion lists come from .Values.alertmanager.defaultRuleExclusions and are
+compiled into PromQL regexes here.
+
+  namespaces  applies to every rule. On the HTTP rule it matches
+              destination_workload_namespace; on the log rule it matches the
+              /k8s/<namespace>/ segment of container_id. A "-<suffix>" variant
+              is matched too, because PromQL !~ is fully anchored — a bare
+              "nudgebee-agent" would NOT exclude "nudgebee-agent-dev".
+  containers  applies to the log rule only, matched as a component name inside
+              container_id. Bounded by [^a-z0-9] on both sides so "otel" does
+              not also exclude "hotel-service".
+
+alertmanager.extra_rule_exclusions appends install-specific terms to BOTH lists
+without forking the defaults — e.g. environments running synthetic load or demo
+apps that fail on purpose.
+
+compact drops empty strings throughout: an empty alternation ("||" or a
+trailing "|") matches EVERYTHING, which would silently disable the rules
+cluster-wide.
+*/ -}}
+{{- $excl := (.Values.alertmanager.defaultRuleExclusions | default dict) -}}
+{{- $extra := compact (.Values.alertmanager.extra_rule_exclusions | default list) -}}
+{{- $nsAlt := join "|" (concat (compact ($excl.namespaces | default list)) $extra) -}}
+{{- $ctrAlt := join "|" (concat (compact ($excl.containers | default list)) $extra) -}}
+{{- $logMatchers := list `level=~"error|critical"` -}}
+{{- if $nsAlt -}}
+{{- $logMatchers = append $logMatchers (printf `container_id!~"/k8s(-cronjob)?/(%s)(-[^/]*)?/.*"` $nsAlt) -}}
+{{- end -}}
+{{- if $ctrAlt -}}
+{{- $logMatchers = append $logMatchers (printf `container_id!~".*[^a-z0-9](%s)([^a-z0-9].*)?"` $ctrAlt) -}}
+{{- end -}}
+{{- $logSel := join ", " $logMatchers -}}
+{{- $httpMatchers := list `destination_workload_name!="kubernetes"` -}}
+{{- if $nsAlt -}}
+{{- $httpMatchers = append $httpMatchers (printf `destination_workload_namespace!~"(%s)(-.*)?"` $nsAlt) -}}
+{{- end -}}
+{{- $httpSel := join ", " $httpMatchers -}}
+{{- /*
+keep_firing_for holds an alert firing through brief dips below threshold, so an
+intermittently failing endpoint produces one steady alert instead of resolve/
+re-fire churn (observed ~8 re-fires/hour on a single flaky endpoint without it).
+OPT-IN via alertmanager.rule_keep_firing_for (default "": field omitted) —
+Prometheus < 2.42 rejects rule files containing the field, so it must never be
+emitted unless the install explicitly declares support. See values.yaml.
+*/ -}}
+{{- $keepFiringFor := .Values.alertmanager.rule_keep_firing_for -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -34,43 +77,80 @@ spec:
               HPA {{`{{ $labels.namespace }}`}}/{{`{{ $labels.horizontalpodautoscaler }}`}}
               has been running at max replicas for longer than 15 minutes.
             summary: HPA is running at max replicas
-        # Fires when a container's error/critical log rate is >3x its historical
-        # baseline (1h window offset 1h — the offset keeps an ongoing spike from
-        # polluting the baseline and silencing sustained incidents). The 0.1/s
-        # floor is an activity floor (≥6 err/min) that avoids ratio blowups on
-        # idle containers. The baseline>0 guard prevents cold-start containers
-        # (no historical data) from firing on their first error burst.
+        # Aggregated per workload, NOT per raw series. container_log_messages_total
+        # carries container_id, pattern_hash and sample, so an unaggregated rule
+        # mints a separate alert for every replica AND every distinct log pattern.
+        # app_id is the node-agent's workload identity (/k8s/<ns>/<workload>), so
+        # summing by it collapses replicas and patterns into one alert per workload.
+        #
+        # Fires when the 5m error/critical count is >3x the workload's own 6h
+        # average per 5m window (6h total / 72 windows), with a floor of 10 errors
+        # in the 5m window so low-traffic containers can't blow the ratio up.
+        #
+        # The baseline is offset 5m so an ongoing spike can't inflate its own
+        # baseline and silence a sustained incident. The baseline > 0 guard costs
+        # a blind spot on brand-new workloads (no history yet) but is what stops
+        # every cold-start error burst from firing on a +Inf ratio.
         - alert: HighErrorCriticalLogs
           expr: |
-            rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[5m])
-              > 3 * rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[1h] offset 1h)
+            (
+              sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[5m]))
+              /
+              (
+                sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[6h] offset 5m)) / 72
+              )
+              > 3
+            )
             and
-            rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[5m]) > 0.1
+            sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[5m])) > 10
             and
-            rate(container_log_messages_total{level=~"error|critical", container_id!~"{{ $excludeLog }}"}[1h] offset 1h) > 0
+            sum by (app_id) (increase(container_log_messages_total{ {{ $logSel }} }[6h] offset 5m)) > 0
           for: 10m
+{{- with $keepFiringFor }}
+          keep_firing_for: {{ . }}
+{{- end }}
           annotations:
-            summary: "High error/critical logs - Sample: {{`{{ printf \"%.80s\" $labels.sample }}`}}"
-            description: "Container log error rate is more than 3x its 1h baseline. Container ID: {{`{{ $labels.container_id }}`}} Log Sample: {{`{{ $labels.sample }}`}} Current rate (err/s): {{`{{ printf \"%.2f\" $value }}`}}"
+            summary: "Error log spike for {{`{{ $labels.app_id }}`}}"
+            description: >-
+              Error/critical log rate is {{`{{ printf "%.1f" $value }}`}}x higher
+              than the 6h average. App: {{`{{ $labels.app_id }}`}}
           labels:
             severity: warning
-        # Fires when >5% of a container's HTTP traffic is 5xx for 10m, with an
-        # activity floor of 0.1 req/s so ratios don't blow up on low-volume
-        # containers. 4xx is excluded — those are client errors (bad request,
-        # unauthorised, etc.) and don't indicate the application failing.
+        # Aggregated per destination workload, NOT per (container_id, method,
+        # path) — request path is unbounded cardinality, so the per-path form
+        # produced a separate alert per endpoint per replica.
+        #
+        # Fires when >20% of a workload's HTTP traffic is 4xx or 5xx for 10m,
+        # with an activity floor of 0.1 req/s so ratios don't blow up on
+        # low-volume workloads.
         - alert: ApplicationAPIFailures
           expr: |
             (
-              sum by (container_id, method, path) (rate(container_http_requests_total{status=~"5..", container_id!~"{{ $excludeApi }}"}[5m]))
+              sum by (destination_workload_namespace, destination_workload_name) (
+                rate(container_http_requests_total{ {{ $httpSel }}, status=~"5..|4.." }[5m])
+              )
               /
-              sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m]))
-            ) > 0.05
-            and on (container_id, method, path)
-            sum by (container_id, method, path) (rate(container_http_requests_total{container_id!~"{{ $excludeApi }}"}[5m])) > 0.1
+              sum by (destination_workload_namespace, destination_workload_name) (
+                rate(container_http_requests_total{ {{ $httpSel }} }[5m])
+              )
+            ) > 0.2
+            and
+            sum by (destination_workload_namespace, destination_workload_name) (
+              rate(container_http_requests_total{ {{ $httpSel }} }[5m])
+            ) > 0.1
           for: 10m
+{{- with $keepFiringFor }}
+          keep_firing_for: {{ . }}
+{{- end }}
           annotations:
-            summary: "High 5xx rate - {{`{{ $labels.method }}`}} {{`{{ printf \"%.50s\" $labels.path }}`}}"
-            description: "Aggregate 5xx rate across status codes exceeds 5% of total traffic. Container ID: {{`{{ $labels.container_id }}`}} Request Path: {{`{{ $labels.path }}`}} Request Method: {{`{{ $labels.method }}`}} 5xx Ratio: {{`{{ printf \"%.2f\" $value }}`}}"
+            summary: >-
+              High error rate for {{`{{ $labels.destination_workload_name }}`}}
+              in {{`{{ $labels.destination_workload_namespace }}`}}
+            description: >-
+              HTTP error rate exceeded 20% of total traffic.
+              Namespace: {{`{{ $labels.destination_workload_namespace }}`}}
+              Workload: {{`{{ $labels.destination_workload_name }}`}}
+              Error rate: {{`{{ $value | humanizePercentage }}`}}
           labels:
             severity: critical
         # Fires when a pod has been in Terminating state for >30 minutes — that
