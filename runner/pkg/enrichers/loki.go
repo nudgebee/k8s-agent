@@ -117,6 +117,12 @@ func (l *LokiCompat) rawGet(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// LOKI_USERNAME/LOKI_PASSWORD → Basic-Auth, mirroring the primitive
+	// loki.Client.get (client.go). The compat path was dropping these,
+	// causing 401s on any basic-auth Loki.
+	if l.c.Username != "" && l.c.Password != "" {
+		req.SetBasicAuth(l.c.Username, l.c.Password)
+	}
 	for k, vv := range l.c.ExtraHeaders {
 		for _, v := range vv {
 			req.Header.Add(k, v)
