@@ -62,10 +62,15 @@ type Proxy struct {
 	PrometheusURL string
 
 	// PrometheusHeaders is the parsed PROMETHEUS_HEADERS env (raw
-	// "Header: value, Header: value" string) — applied to every
+	// "Header: value; Header: value" string) — applied to every
 	// Prometheus proxy request so X-Scope-OrgID / tenant headers reach
-	// the upstream. Same shape ExtraHeaders uses for Grafana.
+	// the upstream. Same shape ExtraHeaders uses for Grafana. When
+	// PROMETHEUS_AUTH is set the caller overlays it here as Authorization.
 	PrometheusHeaders http.Header
+
+	// PrometheusQueryString (PROMETHEUS_URL_QUERY_STRING) is appended to the
+	// query string of every proxied Prometheus request. Empty is a no-op.
+	PrometheusQueryString string
 
 	// Username/Password for Grafana basic auth (GRAFANA_USERNAME /
 	// GRAFANA_PASSWORD env). Empty disables.
@@ -134,7 +139,23 @@ func (p *Proxy) HandlePrometheus(ctx context.Context, req *Request) *Response {
 	}
 	enriched := *req
 	enriched.Header = mergeHeaders(req.Header, p.PrometheusHeaders)
-	return p.do(ctx, p.PrometheusURL+req.URL, &enriched)
+	return p.do(ctx, appendQueryString(p.PrometheusURL+req.URL, p.PrometheusQueryString), &enriched)
+}
+
+// appendQueryString appends extra (a "k=v&k2=v2" fragment, optional leading
+// "?") to rawurl's query, using "?" or "&" depending on whether rawurl already
+// has a query. Empty extra is a no-op.
+func appendQueryString(rawurl, extra string) string {
+	extra = strings.TrimSpace(extra)
+	extra = strings.TrimPrefix(extra, "?")
+	if extra == "" {
+		return rawurl
+	}
+	sep := "?"
+	if strings.Contains(rawurl, "?") {
+		sep = "&"
+	}
+	return rawurl + sep + extra
 }
 
 // mergeHeaders returns a new header map containing every entry from
