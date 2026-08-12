@@ -2,9 +2,9 @@
 // Same shape as pkg/observability/prometheus.
 //
 // Action surface:
-//   - query_es                    : POST {index}/_search with DSL, or {index}/_plugins/_ppl with PPL
-//   - query_es_indices            : GET _cat/indices?format=json
-//   - query_es_index_field        : GET {index}/_mapping
+//   - query_es                    : POST {index}/_search with DSL, or /_plugins/_ppl with PPL
+//   - query_es_indices            : GET _alias (object keyed by index name)
+//   - query_es_index_field        : GET {index}/_field_caps?fields=*
 //   - query_es_field_index_values : terms aggregation on {field}
 package elasticsearch
 
@@ -56,6 +56,18 @@ func (c *Client) Search(ctx context.Context, index, queryType string, query any)
 		return c.do(ctx, http.MethodPost, "/"+index+"/_search", body, "application/json")
 	case "ppl":
 		s, _ := query.(string)
+		// PPL statements are `source=<index> | <commands>`. The legacy client
+		// scoped every PPL query to the requested index; callers pass just the
+		// command tail (or a full statement). Prepend the source clause when
+		// the query doesn't already carry one.
+		s = strings.TrimSpace(s)
+		if !strings.Contains(s, "source=") {
+			if s == "" {
+				s = "source=" + index
+			} else {
+				s = "source=" + index + " | " + s
+			}
+		}
 		body, _ := json.Marshal(map[string]any{"query": s})
 		return c.do(ctx, http.MethodPost, "/_plugins/_ppl", body, "application/json")
 	default:
@@ -63,17 +75,24 @@ func (c *Client) Search(ctx context.Context, index, queryType string, query any)
 	}
 }
 
-// Indices returns _cat/indices in JSON form.
+// Indices returns the cluster's index→alias map via GET /_alias. The
+// response is an object keyed by index name (matching the legacy get_alias),
+// which the backend composer iterates as map keys. (The old /_cat/indices
+// endpoint returned an array, which the composer could not index by key.)
 func (c *Client) Indices(ctx context.Context) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodGet, "/_cat/indices?format=json", nil, "")
+	return c.do(ctx, http.MethodGet, "/_alias", nil, "")
 }
 
-// IndexFields returns mapping for an index.
+// IndexFields returns the field capabilities for an index via
+// GET /{index}/_field_caps?fields=*. The response carries a `fields` map
+// keyed by field name (matching the legacy field_caps), which is the shape
+// the backend composer expects. (The old /_mapping shape nested fields under
+// mappings.properties and did not match.)
 func (c *Client) IndexFields(ctx context.Context, index string) (json.RawMessage, error) {
 	if index == "" {
 		return nil, errors.New("elasticsearch: index is required")
 	}
-	return c.do(ctx, http.MethodGet, "/"+index+"/_mapping", nil, "")
+	return c.do(ctx, http.MethodGet, "/"+index+"/_field_caps?fields=*", nil, "")
 }
 
 // FieldValues returns distinct values for one field via a terms aggregation.
