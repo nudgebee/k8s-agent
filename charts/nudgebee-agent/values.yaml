@@ -88,6 +88,21 @@ runner:
       #   ~500 nodes / ~50k workloads   : 4000Mi
       #   ~1000 nodes / ~100k workloads : 6000Mi+  (and enable runner.scaling below)
       memory: 2000Mi
+  # GOMEMLIMIT is derived from resources.limits.memory above and injected into
+  # the runner container, so the Go GC knows about the cgroup ceiling instead of
+  # discovering it via SIGKILL. Without it a transient allocation burst (large
+  # Prometheus/Loki/ClickHouse responses are read whole before being decoded) can
+  # outrun the collector and OOM the pod while the live heap is still small —
+  # which is why OOMKills show up even on tiny clusters where the sizing table
+  # above says there is plenty of headroom.
+  #
+  # goMemLimitRatio is the fraction of the memory limit handed to the Go heap;
+  # the remainder covers non-heap RSS. Lower it if the pod still OOMs, raise it
+  # to trade OOM-safety margin for less GC CPU.
+  goMemLimitRatio: 0.8
+  # Explicit GOMEMLIMIT override; skips the derivation when non-empty. Accepts
+  # the Go form (e.g. "1600MiB" or a plain byte count). Leave empty to derive.
+  goMemLimit: ""
   # Liveness/readiness probes hit the always-on /healthz endpoint on :5000 so a
   # hung or restarting runner is detected and kept out of the Service.
   probes:
