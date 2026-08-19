@@ -65,7 +65,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-08-12T06-01-54_7ec58f7701909a3ce172ad2a9235f8b15255e363
+    tag: 2026-08-12T08-30-26_13e26b9dce6e3419f5e1ac52836c773a95098fde
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -88,6 +88,21 @@ runner:
       #   ~500 nodes / ~50k workloads   : 4000Mi
       #   ~1000 nodes / ~100k workloads : 6000Mi+  (and enable runner.scaling below)
       memory: 2000Mi
+  # GOMEMLIMIT is derived from resources.limits.memory above and injected into
+  # the runner container, so the Go GC knows about the cgroup ceiling instead of
+  # discovering it via SIGKILL. Without it a transient allocation burst (large
+  # Prometheus/Loki/ClickHouse responses are read whole before being decoded) can
+  # outrun the collector and OOM the pod while the live heap is still small —
+  # which is why OOMKills show up even on tiny clusters where the sizing table
+  # above says there is plenty of headroom.
+  #
+  # goMemLimitRatio is the fraction of the memory limit handed to the Go heap;
+  # the remainder covers non-heap RSS. Lower it if the pod still OOMs, raise it
+  # to trade OOM-safety margin for less GC CPU.
+  goMemLimitRatio: 0.8
+  # Explicit GOMEMLIMIT override; skips the derivation when non-empty. Accepts
+  # the Go form (e.g. "1600MiB" or a plain byte count). Leave empty to derive.
+  goMemLimit: ""
   # Liveness/readiness probes hit the always-on /healthz endpoint on :5000 so a
   # hung or restarting runner is detected and kept out of the Service.
   probes:
@@ -265,6 +280,15 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+    # Extra labels merged into the PodMonitor metadata. Set these to match the
+    # Prometheus CR's podMonitorSelector, otherwise the operator ignores the
+    # PodMonitor and no scrape target is created.
+    # e.g. { pod-monitor: pod-monitor }
+    additionalLabels: {}
+    # Restrict which namespaces Prometheus looks in for matching pods.
+    # Empty means the operator default (the PodMonitor's own namespace).
+    # e.g. { matchNames: [ nudgebee ] } or { any: true }
+    namespaceSelector: {}
   service:
     enabled: false
     annotations: {}

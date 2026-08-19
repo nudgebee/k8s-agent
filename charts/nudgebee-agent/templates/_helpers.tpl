@@ -61,6 +61,46 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+GOMEMLIMIT (in bytes) for the runner, derived from its container memory limit.
+
+The runner is a Go process and the Go runtime is cgroup-unaware: without
+GOMEMLIMIT the GC paces off GOGC alone, so a transient allocation burst can run
+the heap past the container limit and get the pod OOM-killed while the live heap
+is still small. GOMEMLIMIT is a soft limit — as the heap approaches it the GC
+runs progressively harder, trading CPU to stay under the cgroup ceiling.
+
+Derived rather than hardcoded so it cannot drift from resources.limits.memory:
+raising the limit raises the headroom automatically. Emits nothing when no
+memory limit is set (unbounded cgroup — a soft limit would be arbitrary).
+
+Ratio is runner.goMemLimitRatio (default 0.8); the remaining 20% covers non-heap
+RSS (goroutine stacks, runtime metadata, mmap'd binary). Set runner.goMemLimit to
+override with an explicit value and skip the derivation entirely.
+*/}}
+{{- define "nudgebee-agent.goMemLimit" -}}
+{{- if .Values.runner.goMemLimit -}}
+{{- .Values.runner.goMemLimit -}}
+{{- else -}}
+{{- $lim := (dig "resources" "limits" "memory" "" .Values.runner) | toString -}}
+{{- $num := regexFind "^[0-9.]+" $lim -}}
+{{- if $num -}}
+{{- $mult := 1.0 -}}
+{{- if hasSuffix "Ki" $lim -}}{{- $mult = 1024.0 -}}
+{{- else if hasSuffix "Mi" $lim -}}{{- $mult = 1048576.0 -}}
+{{- else if hasSuffix "Gi" $lim -}}{{- $mult = 1073741824.0 -}}
+{{- else if hasSuffix "Ti" $lim -}}{{- $mult = 1099511627776.0 -}}
+{{- else if hasSuffix "k" $lim -}}{{- $mult = 1000.0 -}}
+{{- else if hasSuffix "M" $lim -}}{{- $mult = 1000000.0 -}}
+{{- else if hasSuffix "G" $lim -}}{{- $mult = 1000000000.0 -}}
+{{- else if hasSuffix "T" $lim -}}{{- $mult = 1000000000000.0 -}}
+{{- end -}}
+{{- $ratio := .Values.runner.goMemLimitRatio | default 0.8 -}}
+{{- printf "%d" (int64 (mulf (float64 $num) $mult $ratio)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
@@ -79,6 +119,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
           fieldPath: metadata.namespace
     - name: RUNNER_VERSION
       value: {{ .Chart.AppVersion }}
+    {{- with include "nudgebee-agent.goMemLimit" . }}
+    - name: GOMEMLIMIT
+      value: {{ . | quote }}
+    {{- end }}
     - name: WEBSOCKET_RELAY_ADDRESS
       value: {{ .Values.runner.relay_address }}
     - name: SCANNERS_ENABLED
