@@ -10,11 +10,18 @@ metadata:
   labels:
     {{- include "nudgebee-agent.labels" . | nindent 4 }}
     component: node-agent
+    {{- with .Values.nodeAgent.podmonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels:
       {{- include "node-agent.selectorLabels" . | nindent 6 }}
       app: nudgebee-node-agent
+  {{- with .Values.nodeAgent.podmonitor.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   podMetricsEndpoints:
     - port: http
 {{- end -}}

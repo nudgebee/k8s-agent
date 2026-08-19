@@ -265,6 +265,15 @@ nodeAgent:
   podmonitor:
     enabled: true
     azuremanaged: false
+    # Extra labels merged into the PodMonitor metadata. Set these to match the
+    # Prometheus CR's podMonitorSelector, otherwise the operator ignores the
+    # PodMonitor and no scrape target is created.
+    # e.g. { pod-monitor: pod-monitor }
+    additionalLabels: {}
+    # Restrict which namespaces Prometheus looks in for matching pods.
+    # Empty means the operator default (the PodMonitor's own namespace).
+    # e.g. { matchNames: [ nudgebee ] } or { any: true }
+    namespaceSelector: {}
   service:
     enabled: false
     annotations: {}
