@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -588,5 +589,71 @@ func TestContainersFromTemplate_OmitsResourcesWhenUnset(t *testing.T) {
 	got := containersFromTemplate(tpl)
 	if _, present := got[0]["resources"]; present {
 		t.Errorf("resources should be absent when unset; got %v", got[0]["resources"])
+	}
+}
+
+// TestPodConverter_StatusDictCarriesContainerState pins the field the collector
+// stores as meta.status_info. While it was nil, a pod stuck in CrashLoopBackOff
+// reached the product as "Running" — that is the pod's PHASE, and the waiting
+// reason kubectl prints lives in ContainerStatuses. The readers coded against
+// status_info (pod-detail panels, knowledge-graph host_ip, cost-server's cluster
+// cache) all depend on this being populated, in the Kubernetes API's own
+// camelCase shape.
+func TestPodConverter_StatusDictCarriesContainerState(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "crashloop-demo-547d44bfc8-pnplr", Namespace: "crashloop-lab"},
+		Status: corev1.PodStatus{
+			Phase:    corev1.PodRunning,
+			HostIP:   "10.0.0.7",
+			QOSClass: corev1.PodQOSBurstable,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "boom",
+				Ready:        false,
+				RestartCount: 17,
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+				},
+			}},
+		},
+	}
+
+	got, ok := newPodConverter(func(string, string) *appsv1.ReplicaSet { return nil })(pod)
+	if !ok {
+		t.Fatal("converter ok=false")
+	}
+	dict := got.(map[string]any)
+
+	// The scalar status stays the phase: existing consumers filter on it
+	// (recommendation's spot-eligibility query keys off status = 'Running').
+	if dict["status"] != "Running" {
+		t.Fatalf("status = %v; want the phase, unchanged", dict["status"])
+	}
+
+	status, isPodStatus := dict["status_dict"].(corev1.PodStatus)
+	if !isPodStatus {
+		t.Fatalf("status_dict = %T; want corev1.PodStatus", dict["status_dict"])
+	}
+	if len(status.ContainerStatuses) != 1 {
+		t.Fatalf("container statuses = %d; want 1", len(status.ContainerStatuses))
+	}
+	if got := status.ContainerStatuses[0].State.Waiting.Reason; got != "CrashLoopBackOff" {
+		t.Fatalf("waiting reason = %q; want CrashLoopBackOff — the state phase cannot express", got)
+	}
+
+	// Marshalling must produce the camelCase keys the existing readers index
+	// into: meta -> 'status_info' ->> 'hostIP' in the knowledge graph, and
+	// status_info.containerStatuses / qosClass in the pod-detail panels.
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"containerStatuses", "hostIP", "qosClass"} {
+		if _, present := wire[key]; !present {
+			t.Errorf("wire shape missing %q; readers index this key directly", key)
+		}
 	}
 }
