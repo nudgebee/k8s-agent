@@ -290,8 +290,9 @@ func oomKilledEnrichBlocks(obj, _ map[string]any, ec EnrichContext) []EvidenceBl
 // imagePullBackoffMatcher fires when any container is currently in
 // ImagePullBackOff or ErrImagePull. Same kubewatch pointer-aliasing
 // caveat as pod_crash_loop — we can't rely on oldObj→obj transition
-// detection. The fingerprint (`owner, image`) dedupes: distinct bad
-// images each fire once per 10-min window.
+// detection. The fingerprint is (`owner, image`) for ordinary workloads,
+// and (`job family`) for Job-owned Pods — see FingerprintFn for why the
+// image is deliberately excluded in the Job case.
 func imagePullBackoffMatcher() MatcherSpec {
 	return MatcherSpec{
 		Name:           "image_pull_backoff",
@@ -306,24 +307,30 @@ func imagePullBackoffMatcher() MatcherSpec {
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			ns, name := metaNS(obj), metaName(obj)
+			// The bad image discriminates between containers of one workload:
+			// an operator typo'd a single container and the rest are fine, so
+			// those should be distinct Findings.
+			image := firstFailingImage(obj)
 			owner := ResolveOwner(obj)
 			if owner.Name != "" {
 				name = owner.Name
 				// A Pod owned by a Job resolves to that Job, whose name
 				// carries a per-run suffix — so a creator that runs one Job
-				// per unit of work (our image scanner: one Job per image)
-				// produced a brand-new fingerprint every run and never
-				// chained. Collapse to the job family (#36647).
+				// per unit of work produced a brand-new fingerprint every run
+				// and never chained. Collapse to the job family (#36647).
 				if owner.Kind == "job" {
 					name = JobFamily(name)
+					// ...and drop the image. For a one-Job-per-image creator
+					// (our image scanner) the image IS the per-run identity,
+					// so keeping it re-introduces exactly the fanout the job
+					// family collapse just removed — verified on the dev
+					// cluster after #580 shipped: every scan Job still had its
+					// own fingerprint because each pulls a different image.
+					// The failing image stays in the evidence blocks either
+					// way; it just no longer forks the identity.
+					image = ""
 				}
 			}
-			// Include the bad image — different bad images on the same
-			// workload should be distinct Findings (operator just typo'd
-			// one container, the rest are fine). This also keeps per-image
-			// resolution after the job-family collapse above: one scan Job
-			// family with two bad images is still two Findings.
-			image := firstFailingImage(obj)
 			return fp("image_pull_backoff_reporter", ns, name, image)
 		},
 		EnrichBlocks: imagePullBackoffEnrichBlocks,

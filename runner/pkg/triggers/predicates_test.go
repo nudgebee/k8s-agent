@@ -771,6 +771,56 @@ func TestImagePullBackoff_JobOwnedPodsCollapseToJobFamily(t *testing.T) {
 	}
 }
 
+func TestImagePullBackoff_JobFamilyCollapsesAcrossDifferentImages(t *testing.T) {
+	// Regression for what #580 missed: a one-Job-per-image creator gives every
+	// run a different image, so keeping the image in the fingerprint re-forked
+	// the identity even after the job-family collapse. Observed on the dev
+	// cluster — every trivy-image-scan Job still had its own fingerprint.
+	mk := func(job, image string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+job+`-p9x2","namespace":"scan",
+				"ownerReferences":[{"kind":"Job","name":"`+job+`","controller":true}]
+			},
+			"status":{"containerStatuses":[
+				{"name":"scan","image":"`+image+`",
+				 "state":{"waiting":{"reason":"ErrImagePull"}}}
+			]}
+		}`)
+	}
+	m := imagePullBackoffMatcher()
+	a := m.FingerprintFn(mk("trivy-image-scan-020c9475", "reg/nudgebee-ticket-server:2026-08-20T09-31-55_2a48d6b"))
+	b := m.FingerprintFn(mk("trivy-image-scan-9d22cbf9", "reg/nudgebee-llm-server:2026-08-20T09-12-54_b8f84d9"))
+	if a != b {
+		t.Error("scan Jobs of one family must share a fingerprint even when each pulls a different image")
+	}
+	// A different family in the same namespace stays distinct.
+	if c := m.FingerprintFn(mk("kube-bench-scan-177dde3a", "reg/kube-bench:v1")); c == a {
+		t.Error("a different job family must not collapse into the same fingerprint")
+	}
+}
+
+func TestImagePullBackoff_NonJobOwnersKeepImageDiscrimination(t *testing.T) {
+	// The image must still split Findings for ordinary workloads — one typo'd
+	// container should not hide behind a sibling's good image.
+	mk := func(image string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"api-7f9d8c5b6d-aaaaa","namespace":"prod",
+				"ownerReferences":[{"kind":"ReplicaSet","name":"api-7f9d8c5b6d","controller":true}]
+			},
+			"status":{"containerStatuses":[
+				{"name":"app","image":"`+image+`",
+				 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+			]}
+		}`)
+	}
+	m := imagePullBackoffMatcher()
+	if m.FingerprintFn(mk("registry/api:bad-v1")) == m.FingerprintFn(mk("registry/api:bad-v2")) {
+		t.Error("different bad images on a Deployment must stay distinct")
+	}
+}
+
 func TestImagePullBackoff_DeploymentReplicasStillCollapse(t *testing.T) {
 	// Guards the behaviour that already worked, so the job-family change
 	// above cannot regress it.
