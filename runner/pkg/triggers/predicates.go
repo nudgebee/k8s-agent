@@ -307,29 +307,34 @@ func imagePullBackoffMatcher() MatcherSpec {
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			ns, name := metaNS(obj), metaName(obj)
-			// The bad image discriminates between containers of one workload:
-			// an operator typo'd a single container and the rest are fine, so
-			// those should be distinct Findings.
-			image := firstFailingImage(obj)
 			owner := ResolveOwner(obj)
+			// A Pod owned by a Job resolves to that Job, whose name carries a
+			// per-run suffix — so a creator that runs one Job per unit of work
+			// produced a brand-new fingerprint every run and never chained.
+			// Collapse to the job family (#36647).
+			jobOwned := owner.Name != "" && owner.Kind == "job"
 			if owner.Name != "" {
 				name = owner.Name
-				// A Pod owned by a Job resolves to that Job, whose name
-				// carries a per-run suffix — so a creator that runs one Job
-				// per unit of work produced a brand-new fingerprint every run
-				// and never chained. Collapse to the job family (#36647).
-				if owner.Kind == "job" {
+				if jobOwned {
 					name = JobFamily(name)
-					// ...and drop the image. For a one-Job-per-image creator
-					// (our image scanner) the image IS the per-run identity,
-					// so keeping it re-introduces exactly the fanout the job
-					// family collapse just removed — verified on the dev
-					// cluster after #580 shipped: every scan Job still had its
-					// own fingerprint because each pulls a different image.
-					// The failing image stays in the evidence blocks either
-					// way; it just no longer forks the identity.
-					image = ""
 				}
+			}
+			// The failing image discriminates between containers of one
+			// workload: an operator typo'd a single container and the rest are
+			// fine, so those stay distinct Findings.
+			//
+			// It is deliberately excluded for Job-owned Pods. For a
+			// one-Job-per-image creator (our image scanner) the image IS the
+			// per-run identity, so keeping it re-introduces exactly the fanout
+			// the job-family collapse just removed — verified on the dev
+			// cluster after #580 shipped: every scan Job still had its own
+			// fingerprint because each pulls a different image. The image stays
+			// in the evidence blocks either way; it just no longer forks the
+			// identity. Skipping the call also avoids walking every container
+			// status for a result we would discard.
+			var image string
+			if !jobOwned {
+				image = firstFailingImage(obj)
 			}
 			return fp("image_pull_backoff_reporter", ns, name, image)
 		},
