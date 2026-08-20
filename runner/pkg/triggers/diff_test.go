@@ -164,15 +164,39 @@ func TestBabysitter_EnrichBlocksAttachesDiffBlock(t *testing.T) {
 	}
 }
 
-func TestBabysitter_FingerprintIncludesResourceVersion(t *testing.T) {
-	// Two distinct spec changes (different resourceVersions) → two
-	// distinct fingerprints → two Findings, not deduped to one.
+func TestBabysitter_FingerprintIsPerResourceNotPerChange(t *testing.T) {
+	// Repeated changes to the SAME resource must share a fingerprint so the
+	// server's occurrence chain (event_duplicates, keyed on fingerprint) can
+	// collapse them into one recurring entry with a repeat count. Keying on
+	// resourceVersion made every change a fresh chain of length 1 (#36647).
 	mk := func(rv string, replicas int) map[string]any {
 		return mustObj(t, `{"metadata":{"name":"d","namespace":"prod","resourceVersion":"`+rv+`"},"spec":{"replicas":`+itoa(replicas)+`}}`)
 	}
 	m := babysitterChangeMatcher("Deployment")
-	if m.FingerprintFn(mk("100", 2)) == m.FingerprintFn(mk("101", 5)) {
-		t.Error("different resourceVersions must produce distinct fingerprints")
+	if m.FingerprintFn(mk("100", 2)) != m.FingerprintFn(mk("101", 5)) {
+		t.Error("changes to the same resource must share a fingerprint regardless of resourceVersion")
+	}
+}
+
+func TestBabysitter_FingerprintSeparatesResources(t *testing.T) {
+	mk := func(kind, ns, name string) string {
+		obj := mustObj(t, `{"metadata":{"name":"`+name+`","namespace":"`+ns+`","resourceVersion":"1"},"spec":{"replicas":1}}`)
+		return babysitterChangeMatcher(kind).FingerprintFn(obj)
+	}
+	base := mk("Deployment", "prod", "api")
+	for _, tc := range []struct {
+		desc           string
+		kind, ns, name string
+	}{
+		{"different name", "Deployment", "prod", "web"},
+		{"different namespace", "Deployment", "staging", "api"},
+		// A Deployment and a Service can share a name in one namespace; they
+		// are different resources and must not chain together.
+		{"different kind", "Service", "prod", "api"},
+	} {
+		if got := mk(tc.kind, tc.ns, tc.name); got == base {
+			t.Errorf("%s: expected a distinct fingerprint, got the same one", tc.desc)
+		}
 	}
 }
 

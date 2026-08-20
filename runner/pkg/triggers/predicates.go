@@ -309,10 +309,20 @@ func imagePullBackoffMatcher() MatcherSpec {
 			owner := ResolveOwner(obj)
 			if owner.Name != "" {
 				name = owner.Name
+				// A Pod owned by a Job resolves to that Job, whose name
+				// carries a per-run suffix — so a creator that runs one Job
+				// per unit of work (our image scanner: one Job per image)
+				// produced a brand-new fingerprint every run and never
+				// chained. Collapse to the job family (#36647).
+				if owner.Kind == "job" {
+					name = JobFamily(name)
+				}
 			}
 			// Include the bad image — different bad images on the same
 			// workload should be distinct Findings (operator just typo'd
-			// one container, the rest are fine).
+			// one container, the rest are fine). This also keeps per-image
+			// resolution after the job-family collapse above: one scan Job
+			// family with two bad images is still two Findings.
 			image := firstFailingImage(obj)
 			return fp("image_pull_backoff_reporter", ns, name, image)
 		},
@@ -391,14 +401,34 @@ func jobFailureMatcher() MatcherSpec {
 		AggregationKey: "job_failure",
 		Priority:       "MEDIUM",
 		FindingType:    "issue",
-		RateLimit:      0, // terminal — fingerprint by UID is enough
+		// Was 0 ("terminal — fingerprint by UID is enough"). That reasoning
+		// depended on the UID making every run unique; now that runs of the
+		// same job share a fingerprint, leaving this unlimited would re-emit
+		// for as long as the failed Job lingers. The transition gate cannot be
+		// relied on to prevent that either — same kubewatch pointer-aliasing
+		// caveat as pod_crash_loop, and prod shows single failed Jobs emitting
+		// ~68 times. The occurrence chain still counts every repeat; this only
+		// bounds emission rate.
+		RateLimit: 10 * time.Minute,
 		Predicate: func(obj, oldObj map[string]any) bool {
 			return jobHasFailedCondition(obj) && !jobHasFailedCondition(oldObj)
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			ns := metaNS(obj)
-			uid := metaUID(obj)
-			return fp("job_failure", ns, uid)
+			// Prefer the CronJob parent — the watched object here is the Job
+			// itself, so its ownerReferences carry the CronJob when there is
+			// one. A directly-created Job has no owner to walk, and its own
+			// name is unique per run, so fall back to the job family.
+			// Keying on metadata.uid (the previous behaviour) made every run
+			// a distinct problem and stopped the occurrence chain from ever
+			// forming (#36647).
+			name := metaName(obj)
+			if owner := ResolveOwner(obj); owner.Name != "" {
+				name = owner.Name
+			} else {
+				name = JobFamily(name)
+			}
+			return fp("job_failure", ns, name)
 		},
 	}
 }
@@ -586,10 +616,11 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 		AggregationKey: "ConfigurationChange/KubernetesResource/Change",
 		Priority:       "INFO",
 		FindingType:    "configuration_change",
-		// Each spec change has its own resourceVersion → its own
-		// fingerprint → no rate-limit needed for dedup. We do set a
-		// short rate-limit to absorb the rare spurious double-fire
-		// (kubewatch occasionally re-delivers the same event).
+		// Short rate-limit absorbs the rare spurious double-fire
+		// (kubewatch occasionally re-delivers the same event). A real
+		// second edit within the window is not lost to it in practice:
+		// the predicate requires an actual spec diff, and the status-only
+		// updates that dominate a rollout are excluded by diffOpt.
 		RateLimit: 30 * time.Second,
 		Predicate: func(obj, oldObj map[string]any) bool {
 			if oldObj == nil {
@@ -601,13 +632,17 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 		FingerprintFn: func(obj map[string]any) string {
 			ns := metaNS(obj)
 			name := metaName(obj)
-			// Include resourceVersion so each distinct spec change gets
-			// its own Finding (Plan agent: "include obj.metadata.
-			// resourceVersion so each spec change is a distinct
-			// finding").
-			meta, _ := obj["metadata"].(map[string]any)
-			rv, _ := meta["resourceVersion"].(string)
-			return fp("ConfigurationChange/KubernetesResource/Change", ns, name, rv)
+			// Identity is the resource that changed, NOT the individual
+			// change. This previously mixed in metadata.resourceVersion so
+			// "each spec change is a distinct finding" — but resourceVersion
+			// advances on every write, so no two changes to the same resource
+			// ever shared a fingerprint and the occurrence chain never formed:
+			// all 8824 of these in 30d of prod had occurrence_number = 1
+			// (#36647). Each change is still its own event row carrying its
+			// own diff evidence; they now chain into one recurring entry with
+			// a repeat count. Kind is included so a Deployment and a Service
+			// of the same name in one namespace stay distinct.
+			return fp("ConfigurationChange/KubernetesResource/Change", ns, strings.ToLower(kind), name)
 		},
 		EnrichBlocks: func(obj, oldObj map[string]any, _ EnrichContext) []EvidenceBlock {
 			diffs := ComputeSpecDiff(obj, oldObj, diffOpt)
@@ -823,12 +858,6 @@ func metaNS(obj map[string]any) string {
 	m, _ := obj["metadata"].(map[string]any)
 	n, _ := m["namespace"].(string)
 	return n
-}
-
-func metaUID(obj map[string]any) string {
-	m, _ := obj["metadata"].(map[string]any)
-	u, _ := m["uid"].(string)
-	return u
 }
 
 // fp produces a stable sha256 hex of joined fields. Used by FingerprintFn
