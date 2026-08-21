@@ -433,17 +433,22 @@ opentelemetry-collector:
           max_interval: 30s
           max_elapsed_time: 300s
     service:
+      # memory_limiter must stay FIRST in every pipeline. The subchart defines the
+      # processor (sized off resources.limits.memory) and puts it first in its own
+      # default pipelines, but Helm REPLACES lists rather than merging them — so
+      # every processor list we set here has to re-state it or the collector runs
+      # with no admission backpressure and OOMKills under load.
       pipelines:
         traces:
-          processors: [filter/drop_namespaces, filter/drop_health_check, probabilistic_sampler, batch]
+          processors: [memory_limiter, filter/drop_namespaces, filter/drop_health_check, probabilistic_sampler, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         metrics:
-          processors: [batch]
+          processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
 clickhouse:
