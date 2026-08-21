@@ -709,6 +709,89 @@ func TestJobFailure_DoesNotRefireWhilePersistentlyFailed(t *testing.T) {
 	}
 }
 
+func TestJobFailure_RunsOfTheSameJobShareAFingerprint(t *testing.T) {
+	// Every run of a directly-created Job gets a fresh name and UID. Keying
+	// on the UID made each run its own problem, so the server's occurrence
+	// chain never formed and a job failing all day looked like N unrelated
+	// failures (#36647).
+	mk := func(name, uid string) map[string]any {
+		return asObj(t, `{
+			"metadata":{"name":"`+name+`","namespace":"scan","uid":"`+uid+`"},
+			"status":{"conditions":[{"type":"Failed","status":"True"}]}
+		}`)
+	}
+	m := jobFailureMatcher()
+	first := m.FingerprintFn(mk("trivy-image-scan-24e032a5", "u-1"))
+	second := m.FingerprintFn(mk("trivy-image-scan-ce3efcc1", "u-2"))
+	if first != second {
+		t.Error("two runs of the same job family must share a fingerprint")
+	}
+	if other := m.FingerprintFn(mk("kube-bench-scan-177dde3a", "u-3")); other == first {
+		t.Error("a different job family must not share the fingerprint")
+	}
+}
+
+func TestJobFailure_PrefersCronJobOwnerOverName(t *testing.T) {
+	// A CronJob-created Job carries the CronJob in ownerReferences, and the
+	// generated name suffix is a unix-minute stamp. Both routes must land on
+	// the same identity: the CronJob.
+	mk := func(name string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+name+`","namespace":"ns","uid":"u-`+name+`",
+				"ownerReferences":[{"kind":"CronJob","name":"healthchecks","controller":true}]
+			},
+			"status":{"conditions":[{"type":"Failed","status":"True"}]}
+		}`)
+	}
+	m := jobFailureMatcher()
+	if m.FingerprintFn(mk("healthchecks-29764215")) != m.FingerprintFn(mk("healthchecks-29764220")) {
+		t.Error("consecutive runs of one CronJob must share a fingerprint")
+	}
+}
+
+func TestImagePullBackoff_JobOwnedPodsCollapseToJobFamily(t *testing.T) {
+	// One-Job-per-image scanners produced a new fingerprint for every scan
+	// because the Pod's owner is the per-run Job (#36647).
+	mk := func(job string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+job+`-p9x2","namespace":"scan",
+				"ownerReferences":[{"kind":"Job","name":"`+job+`","controller":true}]
+			},
+			"status":{"containerStatuses":[
+				{"name":"scan","image":"registry/trivy:v1",
+				 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+			]}
+		}`)
+	}
+	m := imagePullBackoffMatcher()
+	if m.FingerprintFn(mk("trivy-image-scan-24e032a5")) != m.FingerprintFn(mk("trivy-image-scan-ce3efcc1")) {
+		t.Error("pods from two runs of the same job family must share a fingerprint")
+	}
+}
+
+func TestImagePullBackoff_DeploymentReplicasStillCollapse(t *testing.T) {
+	// Guards the behaviour that already worked, so the job-family change
+	// above cannot regress it.
+	mk := func(pod string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+pod+`","namespace":"prod",
+				"ownerReferences":[{"kind":"ReplicaSet","name":"api-7f9d8c5b6d","controller":true}]
+			},
+			"status":{"containerStatuses":[
+				{"name":"app","image":"registry/api:bad",
+				 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+			]}
+		}`)
+	}
+	m := imagePullBackoffMatcher()
+	if m.FingerprintFn(mk("api-7f9d8c5b6d-aaaaa")) != m.FingerprintFn(mk("api-7f9d8c5b6d-bbbbb")) {
+		t.Error("replicas of one deployment must share a fingerprint")
+	}
+}
+
 // ---------- node_not_ready ----------
 
 // notReadyNode builds a Node fixture whose Ready condition has been False
@@ -994,6 +1077,28 @@ func TestEngine_ReturnsEmptyForNoMatch(t *testing.T) {
 }
 
 // ---------- owner-walk ----------
+
+func TestJobFamily(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// Generated per-run suffixes we actually see in the field.
+		{"trivy-image-scan-24e032a5", "trivy-image-scan"},             // 8-hex, our scanner
+		{"kube-bench-scan-177dde3a", "kube-bench-scan"},               // 8-hex
+		{"blinq-api-healthchecks-29764215", "blinq-api-healthchecks"}, // CronJob unix-minute stamp
+		{"grade-astropy--astropy-13398", "grade-astropy--astropy"},    // indexed batch creator
+		// Full UUID tail must strip whole, not just its last hex group.
+		{"nb-llm-ct-7e4998e5-2e91-4579-989e-16926b6158e1", "nb-llm-ct"},
+		// Names that must survive untouched.
+		{"nightly-backup", "nightly-backup"},
+		{"postgres-15", "postgres-15"}, // short numeric tail is meaningful
+		{"migrate-v2", "migrate-v2"},
+		{"12345678", "12345678"}, // never strip to empty
+		{"", ""},
+	} {
+		if got := JobFamily(tc.in); got != tc.want {
+			t.Errorf("JobFamily(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 
 func TestResolveOwner_ReplicaSetStripsHash(t *testing.T) {
 	pod := asObj(t, `{

@@ -153,8 +153,15 @@ func TestDiscoveryTransform_StripsHeavyFields(t *testing.T) {
 	if pod.Spec.Containers[0].Env != nil || pod.Spec.Containers[0].LivenessProbe != nil {
 		t.Error("container Env/LivenessProbe not stripped")
 	}
-	if pod.Spec.Volumes != nil || pod.Status.InitContainerStatuses != nil {
-		t.Error("pod Volumes / InitContainerStatuses not stripped")
+	if pod.Spec.Volumes != nil {
+		t.Error("pod Volumes not stripped")
+	}
+	// Status.InitContainerStatuses is deliberately NOT stripped any more: the pod
+	// converter ships the whole Status as status_dict, and the pod-detail panel
+	// reads status_info.initContainerStatuses out of it. Stripping it here would
+	// silently blank that panel.
+	if pod.Status.InitContainerStatuses == nil {
+		t.Error("InitContainerStatuses must survive the transform — the converter ships them")
 	}
 }
 

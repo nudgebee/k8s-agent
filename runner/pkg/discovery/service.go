@@ -814,7 +814,23 @@ func newPodConverter(rsLookup replicaSetLookupFn) func(any) (any, bool) {
 			"node_name":        p.Spec.NodeName,
 			"status":           string(p.Status.Phase),
 			"restart_count":    podRestartCounts(p),
-			"status_dict":      nil,
+			// The pod's status subresource, verbatim. `status` above is only the
+			// PHASE, which is "Running" for a pod stuck in CrashLoopBackOff — the
+			// waiting reason that kubectl prints lives in ContainerStatuses and
+			// never left the agent while this was nil, so the collector stored
+			// meta.status_info = null and every reader coded against it went dark:
+			// the pod-detail panels (conditions, container statuses, IPs, QoS),
+			// the knowledge graph's host_ip, and cost-server's cluster cache.
+			//
+			// Sent whole rather than trimmed. Marshalling corev1.PodStatus yields
+			// the Kubernetes API's own camelCase shape (containerStatuses, hostIP,
+			// podIPs, qosClass), which is what those readers already expect.
+			// Dropping imageID/containerID/image saves only 19% of it (measured on
+			// a 419-pod cluster: 958 KiB -> 781 KiB) and would leave a shape that
+			// looks like PodStatus but silently isn't. Cost as sent: ~2.3 KiB/pod
+			// raw, ~200 B/pod after the sink's gzip, so ~0.8 MiB per snapshot on a
+			// 4000-pod cluster against a 100 MiB message threshold.
+			"status_dict": p.Status,
 			"config": map[string]any{
 				"labels":     nonNilLabels(p.Labels),
 				"containers": containers,
