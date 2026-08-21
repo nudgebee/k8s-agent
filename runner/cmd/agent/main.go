@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -991,9 +992,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				probeCtx, probeCancel := context.WithTimeout(gctx, 30*time.Second)
 				defer probeCancel()
 				probeClient := &http.Client{Timeout: 5 * time.Second}
-				logsProvider, logsURL, logsOK, logCfg := probeLogsProvider(probeCtx, cfg)
+				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              cfg.PrometheusURL,
 					AlertManagerURL:            cfg.AlertManagerURL,
@@ -1002,8 +1004,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogsProvider:               logsProvider,
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
+					LogsProviderError:          logsErr,
 					LogProviderConfig:          logCfg,
-					PrometheusConnected:        prometheusConnected(probeCtx, promClient, logger),
+					PrometheusConnected:        promConnected,
+					PrometheusConnectedError:   promErr,
 					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
@@ -1169,24 +1173,27 @@ func (a *grafanaAdapter) HandlePrometheus(ctx context.Context, r *dispatch.Grafa
 // auth — Chronosphere, Thanos Query, Grafana Mimir, Amazon Managed Prometheus —
 // are reported Connected when metric queries work. Returns false on any error
 // so a broken backend shows Disconnected rather than panicking the tick.
-func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) bool {
+func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) (ok bool, reason string) {
 	if c == nil || c.BaseURL == "" {
-		return false
+		return false, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := c.Query(cctx, "vector(1)", "", "")
 	if err != nil {
 		logger.Debug("prometheus health query failed", "err", err)
-		return false
+		return false, err.Error()
 	}
 	var resp struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return false
+		return false, err.Error()
 	}
-	return resp.Status == "success"
+	if resp.Status == "success" {
+		return true, ""
+	}
+	return false, fmt.Sprintf("prometheus query returned status %q", resp.Status)
 }
 
 // queryNodeAgentCount
@@ -1249,44 +1256,53 @@ func selectedLogsProvider(cfg *config.Config) (provider, url string) {
 // configured provider's own client at action-handler time. Fail-closed: any
 // non-2xx → status=false, URL stays in payload so the UI can show "URL
 // configured but unhealthy".
-func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url string, ok bool, providerCfg map[string]any) {
+func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url string, ok bool, reason string, providerCfg map[string]any) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 	switch {
 	case cfg.PinotURL != "":
-		ok = httpProbe(ctx, httpClient, cfg.PinotURL+"/health")
-		return "pinot", cfg.PinotURL, ok, map[string]any{}
+		err := httpProbeErr(ctx, httpClient, cfg.PinotURL+"/health")
+		return "pinot", cfg.PinotURL, err == nil, errString(err), map[string]any{}
 	case cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "":
 		// ES exposes a `_cluster/health` endpoint; we treat 200 as healthy.
 		// Probe with the configured credentials so the badge reflects whether
 		// queries will actually succeed — a secured OpenSearch/ES otherwise 401s
 		// on an unauthenticated probe even when the configured creds work fine.
-		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
+		err := httpProbeErr(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
 		providerCfg = map[string]any{}
 		if v := os.Getenv("ELASTICSEARCH_LOG_INDEX"); v != "" {
 			providerCfg["default_index"] = v
 		}
-		return "ES", cfg.ElasticsearchURL, ok, providerCfg
+		return "ES", cfg.ElasticsearchURL, err == nil, errString(err), providerCfg
 	case cfg.SignozURL != "":
 		// Signoz health endpoint: /api/v1/health.
-		ok = httpProbe(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
+		err := httpProbeErr(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
 		providerCfg = map[string]any{}
 		// Report the Signoz server version so the backend/UI can surface it
 		// and gate version-specific behaviour. /api/v1/version is unauthed.
 		if v := fetchSignozVersion(ctx, httpClient, cfg.SignozURL); v != "" {
 			providerCfg["version"] = v
 		}
-		return "signoz", cfg.SignozURL, ok, providerCfg
+		return "signoz", cfg.SignozURL, err == nil, errString(err), providerCfg
 	case cfg.LokiURL != "":
 		// LOKI_URL points at the loki gateway, whose nginx only proxies the
 		// `/loki/...` API paths — the backend `/ready` is not exposed there and
 		// 404s. Probe a gateway-served API endpoint instead so the badge
 		// reflects query reachability.
-		ok = httpProbe(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
+		err := httpProbeErr(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
 		providerCfg = map[string]any{"url": cfg.LokiURL}
-		return "loki", cfg.LokiURL, ok, providerCfg
+		return "loki", cfg.LokiURL, err == nil, errString(err), providerCfg
 	default:
-		return "", "", false, map[string]any{}
+		return "", "", false, "", map[string]any{}
 	}
+}
+
+// errString renders a probe failure for the health UI: empty when healthy so
+// the wire field clears, the error text otherwise.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // probeClickhouse mirrors the legacy _check_clickhouse → db.health() probe.
@@ -1394,8 +1410,21 @@ func httpProbeErr(ctx context.Context, c *http.Client, url string, headers ...ma
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		// Include a compact body snippet (whitespace collapsed, truncated) —
+		// backends put the useful detail ("token is expired", CORS/auth pages)
+		// in the body, and the UI renders this string verbatim.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		msg := strings.Join(strings.Fields(string(body)), " ")
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		if msg == "" {
+			return fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
 	}
+	// Drain the body so the transport can reuse the keep-alive connection.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 

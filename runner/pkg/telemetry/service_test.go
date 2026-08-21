@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -418,5 +419,71 @@ func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
 	}
 	if !strings.Contains(string(buf), `"tracesConnectionError":""`) {
 		t.Errorf("marshalled ActivityStats omits an empty tracesConnectionError, so the\ncollector's jsonb merge would keep a stale reason forever: %s", buf)
+	}
+}
+
+// A healthy probe must not consume the response body as data — it drains it so
+// the transport can reuse the keep-alive connection. httpHealth runs every
+// telemetry cycle against every configured datasource, so a probe that stranded
+// an undrained body would open a fresh TCP connection each time.
+func TestHTTPHealth_HealthyProbeReusesConnection(t *testing.T) {
+	var conns int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Larger than the 512-byte snippet limit: an undrained body of this
+		// size is what breaks connection reuse.
+		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			atomic.AddInt32(&conns, 1)
+		}
+	}
+	defer srv.Close()
+
+	c := srv.Client()
+	for i := 0; i < 3; i++ {
+		if ok, reason := httpHealth(context.Background(), c, srv.URL); !ok || reason != "" {
+			t.Fatalf("probe %d: ok=%v reason=%q; want true, empty", i, ok, reason)
+		}
+	}
+	if got := atomic.LoadInt32(&conns); got != 1 {
+		t.Errorf("opened %d connections across 3 probes; want 1 (body must be drained on success)", got)
+	}
+}
+
+// A failing probe must explain itself in one compact line — this is the string
+// the UI renders next to the integration's "Disconnected" pill.
+func TestHTTPHealth_FailureReportsCompactReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		// Multi-line body: the reason must collapse to a single line.
+		_, _ = w.Write([]byte("{\n  \"error\": \"Token is expired\"\n}"))
+	}))
+	defer srv.Close()
+
+	ok, reason := httpHealth(context.Background(), srv.Client(), srv.URL)
+	if ok {
+		t.Fatal("ok = true; want false for a 401")
+	}
+	if !strings.Contains(reason, "HTTP 401") || !strings.Contains(reason, "Token is expired") {
+		t.Errorf("reason = %q; want it to carry the status and the backend's message", reason)
+	}
+	if strings.ContainsAny(reason, "\n\r") {
+		t.Errorf("reason = %q; want a single line", reason)
+	}
+}
+
+// A verbose error body must not blow up the telemetry payload.
+func TestHealthErr_TruncatesLongBodies(t *testing.T) {
+	got := healthErr(500, []byte(strings.Repeat("a", 1000)))
+	if len(got) > 240 {
+		t.Errorf("reason is %d chars; want it truncated", len(got))
+	}
+	if !strings.HasPrefix(got, "HTTP 500: ") {
+		t.Errorf("reason = %q; want it to lead with the status", got)
+	}
+	// An empty body still names the status rather than going silent.
+	if got := healthErr(503, nil); got != "HTTP 503" {
+		t.Errorf("healthErr(503, nil) = %q; want %q", got, "HTTP 503")
 	}
 }
