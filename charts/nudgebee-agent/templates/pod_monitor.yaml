@@ -1,9 +1,13 @@
-{{- if (and .Values.nodeAgent.enabled .Values.nodeAgent.podmonitor.enabled) }}
-{{- if .Values.nodeAgent.podmonitor.azuremanaged }}
-apiVersion: azmonitoring.coreos.com/v1
-{{- else }}
-apiVersion: monitoring.coreos.com/v1
-{{- end }}
+{{- /*
+Gated on the PodMonitor CRD being registered, or on enablePrometheusStack as an
+explicit operator assertion for offline render (Argo CD / Flux), where
+.Capabilities carries only the built-in API versions. Without this the manifest
+is emitted on clusters that have no Prometheus operator and fails the install
+outright — same reasoning as prometheus-alert-rule.yaml.
+*/ -}}
+{{- $podMonitorApiVersion := ternary "azmonitoring.coreos.com/v1" "monitoring.coreos.com/v1" (.Values.nodeAgent.podmonitor.azuremanaged | default false) }}
+{{- if (and .Values.nodeAgent.enabled .Values.nodeAgent.podmonitor.enabled (or .Values.enablePrometheusStack (.Capabilities.APIVersions.Has (printf "%s/PodMonitor" $podMonitorApiVersion)))) }}
+apiVersion: {{ $podMonitorApiVersion }}
 kind: PodMonitor
 metadata:
   name: {{ include "nudgebee-agent.fullname" . }}-node-agent

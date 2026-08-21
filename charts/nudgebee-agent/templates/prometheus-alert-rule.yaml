@@ -1,9 +1,14 @@
 {{- /*
-Gated on enablePrometheusStack as well as the rule toggle: without a Prometheus
+Gated on the rule toggle plus proof the CRD exists: without a Prometheus
 operator in the cluster the monitoring.coreos.com/v1 PrometheusRule CRD is not
-registered, so applying this manifest fails the install outright.
+registered, so applying this manifest fails the install outright. Either the CRD
+is actually registered, or enablePrometheusStack asserts it — the latter covers
+offline render (Argo CD / Flux), where .Capabilities carries only the built-in
+API versions. The capability arm lets an install set enablePrometheusStack=false
+for a cluster that may not have the operator and still get these rules where it
+does.
 */ -}}
-{{- if and (default false .Values.alertmanager.create_nb_default_rules) .Values.enablePrometheusStack }}
+{{- if and (default false .Values.alertmanager.create_nb_default_rules) (or .Values.enablePrometheusStack (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule")) }}
 {{- /*
 Exclusion lists come from .Values.alertmanager.defaultRuleExclusions and are
 compiled into PromQL regexes here.
