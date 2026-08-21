@@ -113,6 +113,17 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     privileged: false
     readOnlyRootFilesystem: false
   env:
+    {{- with .Values.runner.nudgebee.authSecretKeyFrom }}
+    # Sourced from an externally-provisioned Secret rather than the runner
+    # Secret. An explicit `env` entry outranks the same name arriving through
+    # `envFrom`, and runner.yaml omits it from the runner Secret in this case,
+    # so there is exactly one source either way.
+    - name: NUDGEBEE_AUTH_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{ .name }}
+          key: {{ .key }}
+    {{- end }}
     - name: INSTALLATION_NAMESPACE
       valueFrom:
         fieldRef:

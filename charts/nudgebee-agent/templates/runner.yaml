@@ -89,7 +89,17 @@ metadata:
 type: Opaque
 stringData:
   NUDGEBEE_ENDPOINT: {{ .Values.runner.nudgebee.endpoint }}
+  {{- $authFrom := .Values.runner.nudgebee.authSecretKeyFrom | default (dict) }}
+  {{- if $authFrom }}
+    {{- if not (and $authFrom.name $authFrom.key) }}
+      {{- fail "\n\n[ERROR] runner.nudgebee.authSecretKeyFrom needs both `name` and `key`.\n\n  runner:\n    nudgebee:\n      authSecretKeyFrom:\n        name: <secret-name>\n        key: <key-in-that-secret>\n" }}
+    {{- end }}
+    {{- if .Values.runner.nudgebee.auth_secret_key }}
+      {{- fail "\n\n[ERROR] Set either runner.nudgebee.auth_secret_key or runner.nudgebee.authSecretKeyFrom, not both.\nTwo sources for one credential means the effective value depends on template ordering. Pick one.\n" }}
+    {{- end }}
+  {{- else }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
+  {{- end }}
   # Tie cost polling/discovery to the OpenCost subchart toggle. When OpenCost is
   # disabled the runner must NOT autodiscover a neighbouring namespace's OpenCost,
   # so the server side detects cost is off and takes over centrally.

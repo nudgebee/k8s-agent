@@ -268,6 +268,15 @@ runner:
   nudgebee:
     endpoint: https://collector.nudgebee.com
     auth_secret_key: ""
+    # Source NUDGEBEE_AUTH_SECRET_KEY from an existing Secret instead of
+    # `auth_secret_key`. Set both `name` and `key`; setting this together with a
+    # non-empty `auth_secret_key` is an error rather than a silent precedence
+    # rule. Used when the credential is provisioned by something other than this
+    # chart — e.g. a parent chart that generates it at install time — so the
+    # runner Secret never has to carry it. Only this one variable moves; the rest
+    # of the runner Secret is unchanged.
+    # e.g. { name: nudgebee-local-agent, key: NUDGEBEE_AUTH_SECRET_KEY }
+    authSecretKeyFrom: {}
     # Relay Ed25519 public key. Lets the agent verify relay-signed requests and
     # authorize UI-triggered workload mutations (delete/create/replace/restart/
     # scale). The UI install command populates this from the server's
@@ -479,6 +488,16 @@ clickhouse:
       memory: 2000Mi
     limits:
       memory: 2000Mi
+  # NOTE: these render monitoring.coreos.com CRs from the Bitnami subchart, which
+  # this chart cannot gate on `.Capabilities` the way its own templates do — a
+  # parent cannot add a condition to a subchart's template, only flip a value. On
+  # a cluster with no Prometheus operator the CRDs are unregistered and the
+  # install fails on them, so installing there means setting BOTH:
+  #   --set enablePrometheusStack=false \
+  #   --set clickhouse.metrics.serviceMonitor.enabled=false
+  # Left enabled by default so installs that do have the operator (the case the
+  # quick-install script produces, since it installs kube-prometheus-stack) keep
+  # their ClickHouse scrape target.
   metrics:
     enabled: true
     serviceMonitor:
