@@ -47,6 +47,34 @@ jobs:
       - name: Render templates
         run: helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent > /tmp/rendered.yaml
 
+      # Guards a Helm footgun: the opentelemetry-collector subchart puts
+      # memory_limiter first in each of its default pipelines, but Helm replaces
+      # lists instead of merging them, so any processors list we override in
+      # values.yaml silently drops it. Without it the collector has no admission
+      # backpressure and OOMKills under load.
+      - name: Assert memory_limiter is first in every collector pipeline
+        run: |
+          pip install pyyaml
+          python - <<'PY'
+          import sys, yaml
+
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          relay = next(
+              (d['data']['relay'] for d in docs
+               if d.get('kind') == 'ConfigMap' and 'relay' in (d.get('data') or {})),
+              None,
+          )
+          if relay is None:
+              sys.exit('no opentelemetry-collector config ConfigMap in rendered output')
+
+          pipelines = yaml.safe_load(relay)['service']['pipelines']
+          bad = [n for n, p in pipelines.items()
+                 if (p.get('processors') or [None])[0] != 'memory_limiter']
+          if bad:
+              sys.exit(f'memory_limiter missing or not first in pipeline(s): {", ".join(sorted(bad))}')
+          print(f'ok: memory_limiter first in {len(pipelines)} pipeline(s)')
+          PY
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
