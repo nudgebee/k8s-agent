@@ -518,10 +518,13 @@ func httpHealth(ctx context.Context, c *http.Client, url string) (ok bool, reaso
 		return false, err.Error()
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// Drain the body so the transport can reuse the keep-alive connection;
+		// this probe runs every telemetry cycle against every datasource.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return true, ""
 	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	return false, healthErr(resp.StatusCode, body)
 }
 

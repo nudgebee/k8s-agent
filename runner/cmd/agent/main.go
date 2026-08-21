@@ -1423,6 +1423,8 @@ func httpProbeErr(ctx context.Context, c *http.Client, url string, headers ...ma
 		}
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
 	}
+	// Drain the body so the transport can reuse the keep-alive connection.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
