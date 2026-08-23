@@ -99,7 +99,7 @@ runner:
   # goMemLimitRatio is the fraction of the memory limit handed to the Go heap;
   # the remainder covers non-heap RSS. Lower it if the pod still OOMs, raise it
   # to trade OOM-safety margin for less GC CPU.
-  goMemLimitRatio: 0.8
+  goMemLimitRatio: 0.9
   # Explicit GOMEMLIMIT override; skips the derivation when non-empty. Accepts
   # the Go form (e.g. "1600MiB" or a plain byte count). Leave empty to derive.
   goMemLimit: ""
