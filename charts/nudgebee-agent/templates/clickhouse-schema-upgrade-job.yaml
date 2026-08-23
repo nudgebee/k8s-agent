@@ -77,11 +77,18 @@ spec:
               done
               if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}")" != "1" ]; then
                 echo "${CH_DATABASE}.${CH_TRACES_TABLE} does not exist yet; the exporter will create it with the current schema. Nothing to do."
-                exit 0
+              else
+                echo "adding ScopeName/ScopeVersion to ${CH_DATABASE}.${CH_TRACES_TABLE} if missing..."
+                cc "ALTER TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}
+                      ADD COLUMN IF NOT EXISTS ScopeName String CODEC(ZSTD(1)) AFTER ResourceAttributes,
+                      ADD COLUMN IF NOT EXISTS ScopeVersion String CODEC(ZSTD(1)) AFTER ScopeName"
               fi
-              echo "adding ScopeName/ScopeVersion to ${CH_DATABASE}.${CH_TRACES_TABLE} if missing..."
-              cc "ALTER TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}
-                    ADD COLUMN IF NOT EXISTS ScopeName String CODEC(ZSTD(1)) AFTER ResourceAttributes,
-                    ADD COLUMN IF NOT EXISTS ScopeVersion String CODEC(ZSTD(1)) AFTER ScopeName"
+              # Also add ServiceName to clickhouse metric tables if they exist
+              for tbl in otel_metrics_gauge otel_metrics_sum otel_metrics_histogram otel_metrics_summary otel_metrics_exp_histogram; do
+                if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${tbl}")" = "1" ]; then
+                  echo "adding ServiceName to ${CH_DATABASE}.${tbl} if missing..."
+                  cc "ALTER TABLE ${CH_DATABASE}.${tbl} ADD COLUMN IF NOT EXISTS ServiceName LowCardinality(String) CODEC(ZSTD(1))"
+                fi
+              done
               echo "schema upgrade complete."
 {{- end }}
