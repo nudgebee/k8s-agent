@@ -181,6 +181,16 @@ type Datasources struct {
 	// by the caller. Empty when ClickHouse is healthy or was never probed
 	// (unconfigured / disabled). Surfaced as tracesConnectionError.
 	ClickHouseError string
+	// HasMaterializedColumns reports whether otel_traces carries the
+	// agent-added materialized columns (workload_name, trace_source, …).
+	// Reported to the backend as traceProviderConfig.hasMaterializedColumn,
+	// which selects between reading those columns directly and recomputing
+	// them from SpanAttributes/ResourceAttributes on every query.
+	//
+	// Computed by the caller via clickhouse.EnsureMaterializedColumns, which
+	// also creates the columns when they are missing. False whenever the
+	// schema could not be confirmed — the recompute shape is the safe default.
+	HasMaterializedColumns bool
 
 	// Node-agent: count of `up{job=~"...nudgebee(-.*)?-node-agent"}` from
 	// Prometheus, computed by the caller.
@@ -407,11 +417,17 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	if !out.TracesEnabled {
 		out.TracesConnectionError = ds.ClickHouseError
 	}
-	// traceProviderConfig: the legacy code queries ClickHouse for the
-	// otel_traces materialized-column flag. The agent doesn't run a
-	// local ClickHouse anymore; the backend computes this. Emit an
-	// empty dict so the field shape matches.
-	out.TraceProviderConfig = map[string]any{"hasMaterializedColumn": false}
+	// traceProviderConfig: the otel_traces materialized-column flag, which
+	// picks which of two SQL shapes the backend uses for every trace query.
+	// The caller probes the real schema (clickhouse.EnsureMaterializedColumns)
+	// and passes the answer in — this package stays free of a ClickHouse
+	// dependency, same as NodeAgentCount and the logs-provider status.
+	//
+	// This was hardcoded false for the whole of the Go rewrite, on the
+	// assumption the backend recomputed it. The backend reads the field back
+	// verbatim, so installs that did have the columns were told they didn't
+	// and were forced onto the recompute-from-attributes query shape.
+	out.TraceProviderConfig = map[string]any{"hasMaterializedColumn": ds.HasMaterializedColumns}
 
 	return out
 }

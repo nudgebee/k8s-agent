@@ -410,6 +410,23 @@ func TestProbe_TracesConnectionError(t *testing.T) {
 	}
 }
 
+// hasMaterializedColumn selects which of two SQL shapes the backend uses for
+// every trace query, and the backend reads this field back verbatim rather than
+// recomputing it. It was hardcoded false for the whole of the Go rewrite, so
+// installs that did have the columns were forced onto the recompute shape —
+// which on a pre-0.156 table also references a column that isn't there and
+// fails outright. Pin that it reflects the caller's probe in both directions.
+func TestProbe_HasMaterializedColumnReflectsSchema(t *testing.T) {
+	s := &Service{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, want := range []bool{true, false} {
+		ds := Datasources{ClickHouseStatus: true, ClickHouseURL: "ch.svc", HasMaterializedColumns: want}
+		got := s.probe(context.Background(), ds).TraceProviderConfig["hasMaterializedColumn"]
+		if got != want {
+			t.Errorf("hasMaterializedColumn = %v; want %v", got, want)
+		}
+	}
+}
+
 // tracesConnectionError must survive JSON marshalling as an explicit "" rather
 // than vanishing — see the jsonb-merge note on the field.
 func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {

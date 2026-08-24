@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1020,6 +1021,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseStatus:           clickhouseStatus,
 					ClickHouseURL:              clickhouseHost,
 					ClickHouseError:            clickhouseErr,
+					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
 					AutoScalerEnabled:          as.Enabled,
@@ -1330,6 +1332,30 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
 	}
 	return true, ""
+}
+
+// traceColumnsReady latches the materialized-column check. The columns are
+// created once and never removed, so after a confirmed pass there is nothing
+// left to decide — re-issuing the system.columns read on every heartbeat would
+// be pure noise. While it is false we keep retrying, which is what makes the
+// setup self-healing: the exporter creates otel_traces lazily on its first span
+// batch, so the agent usually starts before the table exists.
+var traceColumnsReady atomic.Bool
+
+// ensureTraceColumns reports whether otel_traces carries the materialized
+// columns, creating them when it doesn't.
+func ensureTraceColumns(ctx context.Context, ch *chclient.Client, logger *slog.Logger) bool {
+	if ch == nil {
+		return false
+	}
+	if traceColumnsReady.Load() {
+		return true
+	}
+	if chclient.EnsureMaterializedColumns(ctx, ch, logger) {
+		traceColumnsReady.Store(true)
+		return true
+	}
+	return false
 }
 
 // probeCause unwraps the *url.Error net/http wraps around transport failures.
