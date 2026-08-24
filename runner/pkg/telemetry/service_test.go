@@ -445,7 +445,10 @@ func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
 // an undrained body would open a fresh TCP connection each time.
 func TestHTTPHealth_HealthyProbeReusesConnection(t *testing.T) {
 	var conns int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Unstarted, because ConnState has to be installed before the accept loop
+	// is running: NewServer starts serving immediately and the server goroutine
+	// reads Config.ConnState, so assigning it afterwards is a data race.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Larger than the 512-byte snippet limit: an undrained body of this
 		// size is what breaks connection reuse.
 		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
@@ -455,6 +458,7 @@ func TestHTTPHealth_HealthyProbeReusesConnection(t *testing.T) {
 			atomic.AddInt32(&conns, 1)
 		}
 	}
+	srv.Start()
 	defer srv.Close()
 
 	c := srv.Client()
