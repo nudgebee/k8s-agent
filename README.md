@@ -27,6 +27,7 @@ The runner connects out to `wss://relay.nudgebee.com/register` and `https://coll
 - Kubernetes 1.24+
 - Helm 3.12+
 - (Optional but recommended) [`kube-prometheus-stack`](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) — the chart ships `ServiceMonitor` and `PrometheusRule` resources by default
+- A StorageClass for the ClickHouse volume — the cluster default is used unless you set one explicitly (see [Storage](#storage))
 - A NudgeBee account and auth key — sign up at <https://nudgebee.com>
 
 ## Install
@@ -45,6 +46,13 @@ Or use the opinionated installer (auto-installs `kube-prometheus-stack` and wire
 ```bash
 curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation.sh \
   | bash -s -- -a "<your-auth-key>"
+```
+
+Pass `-C <storage-class>` if the cluster has no default StorageClass (it is applied to the ClickHouse PVC and, when the script installs Loki, to the Loki PVC):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation.sh \
+  | bash -s -- -a "<your-auth-key>" -C gp3
 ```
 
 ### Verifying chart signatures
@@ -95,6 +103,10 @@ runner:
   # Off by default — only enable if you want NudgeBee to perform remediations.
   enableWritePermissions: false
 
+# StorageClass for the PVCs the chart creates (see Storage below)
+global:
+  storageClass: ""
+
 # Subcharts can be disabled if not needed
 opencost:
   enabled: true
@@ -105,6 +117,47 @@ clickhouse:
 ```
 
 Full configuration reference: [installation guide](https://app.nudgebee.com/help/docs/installation/agent/installation/).
+
+### Storage
+
+ClickHouse is the only component that claims persistent storage — one PVC per
+replica, `50Gi` by default. Left unset, the PVC is provisioned from the
+cluster's **default StorageClass**; on clusters that have none, the PVC stays
+`Pending` and the ClickHouse pod never starts. Set the class explicitly:
+
+```yaml
+global:
+  # Applies to every PVC the chart (and its subcharts) creates.
+  storageClass: "gp3"
+
+clickhouse:
+  persistence:
+    size: 50Gi
+    # Per-component alternative — only consulted when global.storageClass is empty.
+    storageClass: ""
+```
+
+Or on the command line:
+
+```bash
+helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent \
+  --namespace nudgebee-agent --create-namespace \
+  --set runner.nudgebee.auth_secret_key="<your-auth-key>" \
+  --set global.storageClass="gp3" \
+  --set clickhouse.persistence.size="100Gi"
+```
+
+| Value | Effect |
+| --- | --- |
+| `""` (default) | `storageClassName` is omitted — the cluster's default StorageClass provisions the volume |
+| `"<name>"` | PVCs request that StorageClass (e.g. `gp3`, `managed-csi`, `standard-rwo`) |
+| `"-"` | `storageClassName: ""` — dynamic provisioning is disabled, so the PVC binds a pre-created PV |
+
+`global.storageClass` takes precedence over `clickhouse.persistence.storageClass`
+when both are set. The StorageClass of an existing PVC is immutable, so changing
+it on an already-installed release only affects PVCs created afterwards — delete
+the old PVC (losing the local traces/logs, which have a 7-day TTL) to move
+ClickHouse to a different class.
 
 ## Uninstall
 

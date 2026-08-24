@@ -22,6 +22,7 @@ image_registry=""
 disable_opencost=""
 disable_otel=""
 disable_prometheus_stack=""
+storage_class=""
 
 # Help function
 usage() {
@@ -47,12 +48,14 @@ usage() {
   echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
+  echo "  -C <storage_class>    StorageClass for the ClickHouse (and Loki) PVCs."
+  echo "                        Defaults to the cluster default StorageClass."
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -107,6 +110,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:" opt; do
       ;;
     g)
       disable_prometheus_stack="$OPTARG"
+      ;;
+    C)
+      storage_class="$OPTARG"
       ;;
     h)
       usage
@@ -343,6 +349,13 @@ if [ "$disable_prometheus_stack" == "true" ]; then
   disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
 fi
 
+# global.storageClass reaches every PVC the chart creates (today: ClickHouse).
+# Left unset, the cluster's default StorageClass applies.
+storage_class_args=()
+if [ -n "$storage_class" ]; then
+  storage_class_args=(--set-string "global.storageClass=$storage_class")
+fi
+
 helm_args+=(
   "${disable_node_agent_args[@]}"
   "${openshift_enable_args[@]}"
@@ -358,6 +371,7 @@ helm_args+=(
   "${disable_opencost_args[@]}"
   "${disable_otel_args[@]}"
   "${disable_prometheus_stack_args[@]}"
+  "${storage_class_args[@]}"
 )
 
 echo "Running command: helm ${helm_args[*]}"
@@ -379,12 +393,17 @@ if [ -z "$loki_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add grafana https://grafana.github.io/helm-charts
         helm repo update
+        loki_storage_class_args=()
+        if [ -n "$storage_class" ]; then
+          loki_storage_class_args=(--set-string "loki.persistence.storageClassName=$storage_class")
+        fi
         helm upgrade --install nudgebee-loki grafana/loki-stack \
             -n "$namespace" --create-namespace \
             --set loki.persistence.enabled=true \
             --set loki.persistence.size=10Gi \
             --set promtail.enabled=true \
-            --set loki.isDefault=false
+            --set loki.isDefault=false \
+            "${loki_storage_class_args[@]}"
         loki_url="http://nudgebee-loki:3100"
     else
         echo "Loki installation not requested. Node Agent will still be installed."
@@ -394,7 +413,11 @@ else
 fi
 
 # Check for ClickHouse PVC requirements
-echo "NudgeBee requires PVCs for ClickHouse. If your environment does not support automatic PVC creation, you will need to create them manually."
+if [ -n "$storage_class" ]; then
+    echo "NudgeBee requires PVCs for ClickHouse. They are provisioned from StorageClass '$storage_class'."
+else
+    echo "NudgeBee requires PVCs for ClickHouse. They are provisioned from the cluster's default StorageClass — if your environment has no default StorageClass, re-run with -C <storage_class> or create the PVs manually."
+fi
 
 # Check installation status of each component
 echo "Checking installation status..."
