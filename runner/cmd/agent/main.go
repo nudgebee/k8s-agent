@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1020,6 +1021,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseStatus:           clickhouseStatus,
 					ClickHouseURL:              clickhouseHost,
 					ClickHouseError:            clickhouseErr,
+					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
 					AutoScalerEnabled:          as.Enabled,
@@ -1330,6 +1332,48 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
 	}
 	return true, ""
+}
+
+// traceColumnsReady latches the materialized-column check. The columns are
+// created once and never removed, so after a confirmed pass there is nothing
+// left to decide — re-issuing the system.columns read on every heartbeat would
+// be pure noise. While it is false we keep retrying, which is what makes the
+// setup self-healing: the exporter creates otel_traces lazily on its first span
+// batch, so the agent usually starts before the table exists.
+var traceColumnsReady atomic.Bool
+
+// traceColumnsWarned suppresses repeats of the same failure reason. The check
+// runs every heartbeat until it confirms, so a ClickHouse that stays down would
+// otherwise repeat one warning forever and bury the rest of the tick's output.
+var traceColumnsWarned atomic.Bool
+
+// ensureTraceColumns reports whether otel_traces carries the materialized
+// columns, creating them when it doesn't.
+//
+// Deliberately not gated on the clickhouseStatus probe. That probe pings
+// http://host:port/ping with the scheme hardcoded and no handling for a scheme
+// already in CLICKHOUSE_HOST, whereas this client honours CLICKHOUSE_SSL_ENABLED
+// and a URL-form host. Skipping the check whenever the probe says "down" would
+// therefore leave every SSL or external ClickHouse without its materialized
+// columns permanently, silently, while queries against it work fine —
+// and TRACES_ENABLED=false forces that probe false regardless of reachability.
+func ensureTraceColumns(ctx context.Context, ch *chclient.Client, logger *slog.Logger) bool {
+	if ch == nil {
+		return false
+	}
+	if traceColumnsReady.Load() {
+		return true
+	}
+	l := logger
+	if traceColumnsWarned.Load() {
+		l = slog.New(slog.DiscardHandler)
+	}
+	if chclient.EnsureMaterializedColumns(ctx, ch, l) {
+		traceColumnsReady.Store(true)
+		return true
+	}
+	traceColumnsWarned.Store(true)
+	return false
 }
 
 // probeCause unwraps the *url.Error net/http wraps around transport failures.

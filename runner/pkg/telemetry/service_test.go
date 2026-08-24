@@ -410,6 +410,23 @@ func TestProbe_TracesConnectionError(t *testing.T) {
 	}
 }
 
+// hasMaterializedColumn selects which of two SQL shapes the backend uses for
+// every trace query, and the backend reads this field back verbatim rather than
+// recomputing it. It was hardcoded false for the whole of the Go rewrite, so
+// installs that did have the columns were forced onto the recompute shape —
+// which on a pre-0.156 table also references a column that isn't there and
+// fails outright. Pin that it reflects the caller's probe in both directions.
+func TestProbe_HasMaterializedColumnReflectsSchema(t *testing.T) {
+	s := &Service{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, want := range []bool{true, false} {
+		ds := Datasources{ClickHouseStatus: true, ClickHouseURL: "ch.svc", HasMaterializedColumns: want}
+		got := s.probe(context.Background(), ds).TraceProviderConfig["hasMaterializedColumn"]
+		if got != want {
+			t.Errorf("hasMaterializedColumn = %v; want %v", got, want)
+		}
+	}
+}
+
 // tracesConnectionError must survive JSON marshalling as an explicit "" rather
 // than vanishing — see the jsonb-merge note on the field.
 func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
@@ -428,7 +445,10 @@ func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
 // an undrained body would open a fresh TCP connection each time.
 func TestHTTPHealth_HealthyProbeReusesConnection(t *testing.T) {
 	var conns int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Unstarted, because ConnState has to be installed before the accept loop
+	// is running: NewServer starts serving immediately and the server goroutine
+	// reads Config.ConnState, so assigning it afterwards is a data race.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Larger than the 512-byte snippet limit: an undrained body of this
 		// size is what breaks connection reuse.
 		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
@@ -438,6 +458,7 @@ func TestHTTPHealth_HealthyProbeReusesConnection(t *testing.T) {
 			atomic.AddInt32(&conns, 1)
 		}
 	}
+	srv.Start()
 	defer srv.Close()
 
 	c := srv.Client()
