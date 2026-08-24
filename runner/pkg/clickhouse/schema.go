@@ -170,7 +170,7 @@ func EnsureMaterializedColumns(ctx context.Context, c *Client, logger *slog.Logg
 	}
 
 	sort.Strings(adds)
-	stmt := fmt.Sprintf("ALTER TABLE %s.%s %s", c.Database, TracesTable, strings.Join(adds, ", "))
+	stmt := fmt.Sprintf("ALTER TABLE %s.%s %s", quoteIdent(c.Database), quoteIdent(TracesTable), strings.Join(adds, ", "))
 	res, err := c.Query(ctx, stmt, nil)
 	if err != nil {
 		logger.Warn("clickhouse: materialized-column ALTER failed", "err", err)
@@ -259,7 +259,19 @@ func traceSourceIsStale(ctx context.Context, c *Client, columns map[string]struc
 	return !strings.Contains(expr, scopeNameColumn), nil
 }
 
-// escapeLiteral escapes a value for a single-quoted ClickHouse string literal.
+// escapeLiteral escapes a value for a single-quoted ClickHouse string literal —
+// the `WHERE database = '…'` position in the system.columns reads.
 func escapeLiteral(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s)
+}
+
+// quoteIdent backtick-quotes a database or table name for the identifier
+// position in DDL. Distinct from escapeLiteral: the same name is a quoted
+// identifier in `ALTER TABLE db.table` but a string literal in a system.columns
+// predicate, and the two take different quoting.
+//
+// CLICKHOUSE_DB is operator-supplied, so it can legally contain characters —
+// a hyphen most likely — that the parser rejects unquoted.
+func quoteIdent(s string) string {
+	return "`" + strings.NewReplacer(`\`, `\\`, "`", "\\`").Replace(s) + "`"
 }

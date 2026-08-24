@@ -308,3 +308,38 @@ func TestEnsure_RealRackspaceSchema(t *testing.T) {
 		t.Errorf("issued DDL against a table that needs none: %v", s.alters)
 	}
 }
+
+// CLICKHOUSE_DB is operator-supplied and may contain characters the parser
+// rejects unquoted — a hyphen being the likely one. The identifier position in
+// the ALTER takes backticks, which is a different quoting rule from the string
+// literal the same name sits in inside the system.columns predicate.
+func TestEnsure_QuotesHyphenatedDatabase(t *testing.T) {
+	s := &chStub{
+		columns:           []string{"Timestamp", "SpanAttributes", scopeNameColumn},
+		columnsAfterAlter: append([]string{"Timestamp", "SpanAttributes", scopeNameColumn}, allMaterialized()...),
+	}
+	srv := s.server(t)
+	srv.Database = "nudgebee-agent-dev"
+
+	if got := EnsureMaterializedColumns(context.Background(), srv, discardLogger()); !got {
+		t.Fatal("EnsureMaterializedColumns = false; want true")
+	}
+	if len(s.alters) != 1 {
+		t.Fatalf("issued %d ALTERs; want 1", len(s.alters))
+	}
+	if !strings.Contains(s.alters[0], "ALTER TABLE `nudgebee-agent-dev`.`otel_traces`") {
+		t.Errorf("unquoted identifiers would be a parse error:\n%s", s.alters[0])
+	}
+}
+
+func TestQuoteIdent(t *testing.T) {
+	for in, want := range map[string]string{
+		"default":            "`default`",
+		"nudgebee-agent-dev": "`nudgebee-agent-dev`",
+		"we`ird":             "`we\\`ird`",
+	} {
+		if got := quoteIdent(in); got != want {
+			t.Errorf("quoteIdent(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
