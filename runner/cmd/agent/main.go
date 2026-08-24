@@ -1342,8 +1342,21 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 // batch, so the agent usually starts before the table exists.
 var traceColumnsReady atomic.Bool
 
+// traceColumnsWarned suppresses repeats of the same failure reason. The check
+// runs every heartbeat until it confirms, so a ClickHouse that stays down would
+// otherwise repeat one warning forever and bury the rest of the tick's output.
+var traceColumnsWarned atomic.Bool
+
 // ensureTraceColumns reports whether otel_traces carries the materialized
 // columns, creating them when it doesn't.
+//
+// Deliberately not gated on the clickhouseStatus probe. That probe pings
+// http://host:port/ping with the scheme hardcoded and no handling for a scheme
+// already in CLICKHOUSE_HOST, whereas this client honours CLICKHOUSE_SSL_ENABLED
+// and a URL-form host. Skipping the check whenever the probe says "down" would
+// therefore leave every SSL or external ClickHouse without its materialized
+// columns permanently, silently, while queries against it work fine —
+// and TRACES_ENABLED=false forces that probe false regardless of reachability.
 func ensureTraceColumns(ctx context.Context, ch *chclient.Client, logger *slog.Logger) bool {
 	if ch == nil {
 		return false
@@ -1351,10 +1364,15 @@ func ensureTraceColumns(ctx context.Context, ch *chclient.Client, logger *slog.L
 	if traceColumnsReady.Load() {
 		return true
 	}
-	if chclient.EnsureMaterializedColumns(ctx, ch, logger) {
+	l := logger
+	if traceColumnsWarned.Load() {
+		l = slog.New(slog.DiscardHandler)
+	}
+	if chclient.EnsureMaterializedColumns(ctx, ch, l) {
 		traceColumnsReady.Store(true)
 		return true
 	}
+	traceColumnsWarned.Store(true)
 	return false
 }
 
