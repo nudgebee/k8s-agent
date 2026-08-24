@@ -48,7 +48,7 @@ curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation
   | bash -s -- -a "<your-auth-key>"
 ```
 
-Pass `-C <storage-class>` if the cluster has no default StorageClass (it is applied to the ClickHouse PVC and, when the script installs Loki, to the Loki PVC):
+Pass `-C <storage-class>` if the cluster has no default StorageClass — it is applied to every PVC the script creates: ClickHouse, and the Prometheus (50Gi) and Loki (10Gi) volumes when the script installs those stacks:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation.sh \
@@ -120,10 +120,11 @@ Full configuration reference: [installation guide](https://app.nudgebee.com/help
 
 ### Storage
 
-ClickHouse is the only component that claims persistent storage — one PVC per
-replica, `50Gi` by default. Left unset, the PVC is provisioned from the
-cluster's **default StorageClass**; on clusters that have none, the PVC stays
-`Pending` and the ClickHouse pod never starts. Set the class explicitly:
+ClickHouse is the only component of *this chart* that claims persistent
+storage — one PVC per replica, `50Gi` by default. Left unset, the PVC is
+provisioned from the cluster's **default StorageClass**; on clusters that have
+none, the PVC stays `Pending` and the ClickHouse pod never starts. Set the class
+explicitly:
 
 ```yaml
 global:
@@ -158,6 +159,19 @@ when both are set. The StorageClass of an existing PVC is immutable, so changing
 it on an already-installed release only affects PVCs created afterwards — delete
 the old PVC (losing the local traces/logs, which have a 7-day TTL) to move
 ClickHouse to a different class.
+
+The stacks `installation.sh` installs alongside the agent claim volumes of their
+own, and `-C` sets the class on those too:
+
+| PVC | Size | Value the installer sets |
+| --- | --- | --- |
+| ClickHouse (this chart) | `50Gi` | `global.storageClass` |
+| Prometheus (`kube-prometheus-stack`, via [`extra-scrape-config.yaml`](extra-scrape-config.yaml)) | `50Gi` | `prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName` |
+| Loki (`loki-stack`) | `10Gi` | `loki.persistence.storageClassName` |
+
+Grafana and Alertmanager are left on their chart defaults (no PVC), so nothing
+is set for them. Installing the chart directly with `helm` only creates the
+ClickHouse PVC — the other two come from stacks the script installs for you.
 
 ## Uninstall
 

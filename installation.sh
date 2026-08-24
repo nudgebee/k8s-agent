@@ -48,7 +48,8 @@ usage() {
   echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
-  echo "  -C <storage_class>    StorageClass for the ClickHouse (and Loki) PVCs."
+  echo "  -C <storage_class>    StorageClass for every PVC this script creates"
+  echo "                        (ClickHouse, and Prometheus/Loki when installed here)."
   echo "                        Defaults to the cluster default StorageClass."
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
@@ -217,6 +218,14 @@ else
         if [ "$install_prometheus" == "yes" ]; then
             helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
             helm repo update
+            # kube-prometheus-stack-values.yaml gives Prometheus a 50Gi
+            # volumeClaimTemplate, so the stack claims a PVC too. --set wins over
+            # -f, so this overrides the class the values file leaves unset (i.e.
+            # the cluster default).
+            prometheus_storage_class_args=()
+            if [ -n "$storage_class" ]; then
+              prometheus_storage_class_args=(--set-string "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=$storage_class")
+            fi
             helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
                 -n $namespace --create-namespace \
                 --set nodeExporter.enabled=true \
@@ -224,7 +233,8 @@ else
                 --set alertmanager.enabled=true \
                 --set kubeStateMetrics.enabled=true \
                 --set grafana.enabled=true \
-                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml
+                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml \
+                "${prometheus_storage_class_args[@]}"
             prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
             grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
         else
