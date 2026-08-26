@@ -547,7 +547,7 @@ alertmanager:
   # The intake address is:
   #   http://<release>-runner.<agent-namespace>.svc/api/alerts
   # `helm install` prints the exact URL for your release. Use that, not the one
-  # hardcoded in extra-scrape-config.yaml -- that file cannot template, so its
+  # hardcoded in kube-prometheus-stack-values.yaml -- that file cannot template, so its
   # nudgebee-agent-runner.nudgebee-agent.svc resolves only when your release is
   # named exactly `nudgebee-agent` in a namespace of the same name. Anywhere
   # else, alerts are POSTed into a black hole and nothing logs an error.

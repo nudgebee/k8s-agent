@@ -1,3 +1,24 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Values for kube-prometheus-stack, as the NudgeBee agent needs it.
+#
+# Despite the name this file used to carry -- extra-scrape-config.yaml -- only
+# part of it is scrape config. It also configures the Alertmanager receiver that
+# routes alerts to the agent, which is the ONLY thing that does so. Skipping this
+# file therefore does not merely lose two scrape jobs: NudgeBee receives no
+# alerts at all, and nothing reports an error. The old name invited exactly that,
+# because "I already have Prometheus, so I do not need extra scrape config" is a
+# reasonable reading and a wrong one.
+#
+#   helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
+#     -n nudgebee-agent --create-namespace \
+#     -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml
+#
+# If you already run Prometheus and are not installing this chart, you still need
+# the Alertmanager receiver below -- add it to your own Alertmanager config, with
+# the runner URL for YOUR release (helm install prints it).
+
 prometheus:
   prometheusSpec:
     storageSpec:
