@@ -1,14 +1,116 @@
 
-                    __           __            
-   ____  __  ______/ /___ ____  / /_  ___  ___ 
+                    __           __
+   ____  __  ______/ /___ ____  / /_  ___  ___
   / __ \/ / / / __  / __ `/ _ \/ __ \/ _ \/ _ \
  / / / / /_/ / /_/ / /_/ /  __/ /_/ /  __/  __/
-/_/ /_/\__,_/\__,_/\__, /\___/_.___/\___/\___/ 
-                  /____/                       
+/_/ /_/\__,_/\__,_/\__, /\___/_.___/\___/\___/
+                  /____/
 ============================================================================
 
 Thank you for installing {{ .Chart.Name | title }} {{ .Chart.Version }}
 
+{{- /*
+  Do not send self-hosted installs to the SaaS UI. runner.nudgebee.endpoint is
+  the collector this agent reports to, so anything other than the default means
+  a self-hosted server and app.nudgebee.com is the wrong address.
+*/}}
+{{- if eq (default "" .Values.runner.nudgebee.endpoint) "https://collector.nudgebee.com" }}
 Visit the web UI at: https://app.nudgebee.com
+{{- else }}
+Reporting to: {{ .Values.runner.nudgebee.endpoint }}
+Open your own NudgeBee UI (not app.nudgebee.com -- this is a self-hosted install).
+{{- end }}
+
+============================================================================
+ALERT DELIVERY -- CHECK THIS, IT FAILS SILENTLY
+============================================================================
+
+Metrics are QUERIED from Prometheus by the runner, so they need no wiring
+beyond a reachable URL. Alerts are PUSHED, and nothing in this chart can make
+your alerting stack send them. Until something is routing alerts here, NudgeBee
+sees metrics and traces but never an alert, and no component reports an error.
+
+Pick the option matching your setup. The distinction that matters is whether
+your Alertmanager runs INSIDE this cluster.
+
+--- A. Alertmanager in this cluster, managed by prometheus-operator ----------
+
+    (kube-prometheus-stack and anything else that installs the
+     monitoring.coreos.com CRDs)
+
+    helm upgrade ... \
+      --set alertmanager.createAlertmanagerConfig=true \
+      --set alertmanager.alertmanagerConfigLabels.release=<your operator's release>
+
+    The label matters: the operator only adopts AlertmanagerConfig objects
+    matching its alertmanagerConfigSelector, which defaults to its own Helm
+    release name, and by default only from the Alertmanager's own namespace.
+    Created-but-unadopted looks exactly like working.
+{{ if and .Values.alertmanager.createAlertmanagerConfig (not .Values.alertmanager.alertmanagerConfigLabels) }}
+    >> You enabled createAlertmanagerConfig but set no labels. On a default
+    >> install the object will be created and then ignored.
+{{ end }}
+--- B. Any other Alertmanager in this cluster --------------------------------
+
+    (a plain Deployment, a different chart, VictoriaMetrics' vmalertmanager,
+     or an operator whose CRDs this chart cannot use)
+
+    Add this receiver to your alertmanager.yml, or its equivalent CR --
+    vmalertmanager, for instance, takes the same shape as VMAlertmanagerConfig:
+
+      route:
+        routes:
+          - receiver: nudgebee-agent
+            group_by: ['...']
+            group_wait: 1s
+            group_interval: 1s
+            repeat_interval: 4h
+            continue: true
+      receivers:
+        - name: nudgebee-agent
+          webhook_configs:
+            - url: http://{{ include "nudgebee-agent.fullname" . }}-runner.{{ .Release.Namespace }}.svc/api/alerts
+              send_resolved: true
+
+    `continue: true` keeps your existing receivers (PagerDuty, Slack) working;
+    without it the first matching route wins and they stop seeing alerts.
+
+--- C. Alertmanager OUTSIDE this cluster -------------------------------------
+
+    (Grafana Cloud, Chronosphere, a central Alertmanager in another cluster,
+     or alerts raised by something that is not Alertmanager at all)
+
+    The URL above is a ClusterIP Service and is unreachable from outside, so
+    none of the above applies. Use the public webhook instead:
+
+      1. NudgeBee UI -> Admin -> Integrations
+         -> Prometheus AlertManager Webhook -> add, selecting this cluster
+      2. Point your alerting at the endpoint it issues:
+
+         https://<your-nudgebee-host>/api/webhooks/prometheus-alertmanager
+         with header:  Authorization: Bearer <token>
+         (or ?token=<token> if you cannot set headers)
+
+    This path needs no agent connectivity at all -- it is also how Datadog,
+    Grafana, New Relic and the other webhook integrations deliver.
+
+--- Proving it works --------------------------------------------------------
+
+Do this now rather than discovering a gap during an incident.
+
+For A or B, check the intake itself is healthy:
+
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "nudgebee-agent.fullname" . }}-runner 8080:80
+    curl -sS -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/alerts \
+      -H 'Content-Type: application/json' \
+      -d '{"version":"4","status":"firing","alerts":[{"status":"firing",
+           "labels":{"alertname":"SmokeTest","severity":"warning"},
+           "startsAt":"2026-01-01T00:00:00Z"}]}'
+
+202 means the intake works; anything else is the agent, not your routing.
+
+For any option, end to end: a `Watchdog` event appearing in NudgeBee confirms
+delivery -- that alert exists purely to certify Alertmanager is working. If you
+instead see `AlertmanagerFailedToSendAlerts`, your receiver URL is wrong.
 
 ============================================================================

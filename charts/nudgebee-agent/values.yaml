@@ -330,6 +330,14 @@ nodeAgent:
 # is off and computes this cluster's allocations centrally (reaching its Prometheus
 # via the relay). To run OpenCost per-cluster in the agent, set
 # `--set opencost.enabled=true`.
+# Cost monitoring. NOTE the default here is false while the UI and docs present
+# OpenCost as an included component -- a plain `helm install` therefore produces
+# no cost data unless you set this. installation.sh enables it for you; if you
+# install with Helm directly, pass --set opencost.enabled=true.
+#
+# It also needs a Prometheus URL, which is NOT inherited from
+# globalConfig.prometheus_url:
+#   --set opencost.opencost.prometheus.external.url=<same prometheus URL>
 opencost:
   enabled: false
   nameOverride: ""
@@ -525,6 +533,39 @@ clickhouse:
             description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
+  # Emit an AlertmanagerConfig that routes alerts to this agent's /api/alerts
+  # intake. OFF by default: installs that followed extra-scrape-config.yaml
+  # already have a working receiver, and a second one duplicates every alert
+  # instead of fixing anything.
+  #
+  # Turn this on when either is true:
+  #   - you already ran Prometheus, so you never passed
+  #     -f extra-scrape-config.yaml and nothing configured your Alertmanager;
+  #   - your release is not named exactly `nudgebee-agent` in a namespace called
+  #     `nudgebee-agent`, which is the only case the hardcoded URL in
+  #     extra-scrape-config.yaml resolves for.
+  #
+  # Both failure modes are silent -- alerts are dropped and nothing logs an
+  # error. See the comments in templates/alertmanager-config.yaml.
+  createAlertmanagerConfig: false
+  # Labels the object needs to be ADOPTED. kube-prometheus-stack matches
+  # AlertmanagerConfig against its alertmanagerConfigSelector, which defaults to
+  # its own Helm release name, so this is usually { release: <that release> }.
+  # Created-but-unlabelled is the common way this silently does nothing.
+  alertmanagerConfigLabels: {}
+  # Routing for the generated receiver. Defaults deliver every alert promptly and
+  # unaggregated, because NudgeBee correlates alerts itself and pre-grouping
+  # discards the detail it correlates on.
+  routeGroupBy: ['...']
+  routeGroupWait: 1s
+  routeGroupInterval: 1s
+  # 4h rather than the usual 12h: a scenario re-run during a demo should not be
+  # suppressed as a repeat of the previous one.
+  routeRepeatInterval: 4h
+  # Optional matchers, e.g. to limit what reaches NudgeBee:
+  #   routeMatchers:
+  #     - severity =~ "critical|warning"
+  routeMatchers: []
   # Extra alternation terms appended to the container-id exclusion regex of the
   # default alert rules (both the log-error and HTTP-failure rules). Terms match
   # as substrings of container_id (/k8s/<namespace>/<pod>/<container>), so a

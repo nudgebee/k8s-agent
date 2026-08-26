@@ -51,6 +51,22 @@ prometheus:
           - source_labels: [__meta_kubernetes_pod_node_name]
             target_label: instance
             action: replace
+# node-exporter defaults to hostPort 9100 with host networking. On any cluster
+# that already runs a node-exporter -- a previous kube-prometheus-stack, or a
+# VictoriaMetrics stack, both common -- that port is taken on every node and
+# every pod of this DaemonSet sits Pending with "didn't have free ports". The
+# nodeExporter.service.targetPort flag in the install docs does NOT fix this: it
+# changes the Service only, not the host binding.
+#
+# Using the pod network instead avoids the collision entirely. node-exporter
+# still reports host metrics -- those come from the /proc and /sys host mounts,
+# not from host networking.
+prometheus-node-exporter:
+  hostNetwork: false
+  service:
+    port: 9101
+    targetPort: 9101
+
 alertmanager:
   config:
     global:
@@ -78,6 +94,16 @@ alertmanager:
       - name: 'null'
       - name: 'nudgebee-agent'
         webhook_configs:
+          # NOTE: this URL is hardcoded because a values file cannot template.
+          # It resolves ONLY when the agent release is named `nudgebee-agent` in
+          # a namespace called `nudgebee-agent`. Any other name and alerts are
+          # POSTed into a black hole, silently -- nothing logs an error.
+          #
+          # For any other layout, or if you already had Prometheus and therefore
+          # never used this file, let the agent chart emit the receiver instead:
+          #   --set alertmanager.createAlertmanagerConfig=true
+          #   --set alertmanager.alertmanagerConfigLabels.release=<kps release>
+          # The chart knows its own release name, so the URL is always right.
           - url: 'http://nudgebee-agent-runner.nudgebee-agent.svc/api/alerts'
             send_resolved: true
 grafana:

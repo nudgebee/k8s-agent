@@ -326,9 +326,16 @@ if [ -n "$image_registry" ]; then
   image_registry_args=(--set "runner.image_registry=$image_registry")
 fi
 
+# OpenCost is presented as an included component in the UI and the docs, but the
+# chart default is enabled:false and this script only ever turned it OFF. So
+# neither documented install path actually produced cost data -- you had to know
+# to pass --set opencost.enabled=true yourself. Enable it unless asked not to,
+# which is what -x already implies.
 disable_opencost_args=()
 if [ "$disable_opencost" == "true" ]; then
   disable_opencost_args=(--set "opencost.enabled=false")
+else
+  disable_opencost_args=(--set "opencost.enabled=true")
 fi
 
 disable_otel_args=()
