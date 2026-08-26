@@ -533,38 +533,67 @@ clickhouse:
             description: "Average query duration is above 1 second over last 5 minutes."
 alertmanager:
   create_nb_default_rules: true
-  # Emit an AlertmanagerConfig that routes alerts to this agent's /api/alerts
-  # intake. OFF by default: installs that followed extra-scrape-config.yaml
-  # already have a working receiver, and a second one duplicates every alert
-  # instead of fixing anything.
+  # --------------------------------------------------------------------------
+  # ROUTING ALERTS TO THIS AGENT
+  # --------------------------------------------------------------------------
+  # Alerts are the one input nothing verifies. Metrics are queried, so a bad
+  # Prometheus URL shows up at once. Alerts are pushed: if no receiver targets
+  # the agent, everything looks healthy and NudgeBee simply never raises an
+  # event. Pick the case that matches you.
   #
-  # Turn this on when either is true:
-  #   - you already ran Prometheus, so you never passed
-  #     -f extra-scrape-config.yaml and nothing configured your Alertmanager;
-  #   - your release is not named exactly `nudgebee-agent` in a namespace called
-  #     `nudgebee-agent`, which is the only case the hardcoded URL in
-  #     extra-scrape-config.yaml resolves for.
+  # The intake address is always:
+  #   http://<release>-runner.<agent-namespace>.svc/api/alerts
+  # (helm install prints the exact URL for your release).
   #
-  # Both failure modes are silent -- alerts are dropped and nothing logs an
-  # error. See the comments in templates/alertmanager-config.yaml.
+  # A. Alertmanager in this cluster, managed by prometheus-operator
+  #      createAlertmanagerConfig: true
+  #      alertmanagerConfigLabels: { release: <your operator's release> }
+  #    The label is what gets the object ADOPTED -- the operator matches its
+  #    alertmanagerConfigSelector, defaulting to its own release name, and by
+  #    default only in the Alertmanager's own namespace. Created-but-unadopted
+  #    looks exactly like working.
+  #
+  # B. Any other in-cluster Alertmanager (plain Deployment, another chart,
+  #    VictoriaMetrics' vmalertmanager). Leave this off and add the receiver to
+  #    your own config:
+  #      receivers:
+  #        - name: nudgebee-agent
+  #          webhook_configs:
+  #            - url: http://<release>-runner.<agent-namespace>.svc/api/alerts
+  #              send_resolved: true
+  #    Route it with `continue: true` so existing receivers keep working.
+  #
+  # C. Alertmanager OUTSIDE this cluster (Grafana Cloud, Chronosphere, a central
+  #    one elsewhere, or alerts not from Alertmanager at all). A ClusterIP URL is
+  #    unreachable from there, so none of the above applies -- use the public
+  #    webhook instead: NudgeBee UI -> Admin -> Integrations -> Prometheus
+  #    AlertManager Webhook, then POST to
+  #    https://<your-host>/api/webhooks/prometheus-alertmanager with
+  #    `Authorization: Bearer <token>`.
+  #
+  # VERIFYING: a `Watchdog` event reaching NudgeBee proves delivery end to end --
+  # that alert exists purely to certify Alertmanager is working.
+  # `AlertmanagerFailedToSendAlerts` means the receiver URL is wrong. To test the
+  # intake alone, port-forward the runner Service and POST an Alertmanager v4
+  # payload to /api/alerts; 202 means the agent side is fine.
+  #
+  # Off by default: an install that used extra-scrape-config.yaml already has a
+  # working receiver, and a second one duplicates every alert instead of fixing
+  # anything. Turn it on when you already ran Prometheus (so you never passed
+  # that file), or when your release is not named exactly `nudgebee-agent` in a
+  # namespace of the same name -- the URL hardcoded in that file resolves for
+  # nothing else, silently.
   createAlertmanagerConfig: false
-  # Labels the object needs to be ADOPTED. kube-prometheus-stack matches
-  # AlertmanagerConfig against its alertmanagerConfigSelector, which defaults to
-  # its own Helm release name, so this is usually { release: <that release> }.
-  # Created-but-unlabelled is the common way this silently does nothing.
   alertmanagerConfigLabels: {}
   # Routing for the generated receiver. Defaults deliver every alert promptly and
   # unaggregated, because NudgeBee correlates alerts itself and pre-grouping
-  # discards the detail it correlates on.
+  # discards the detail it correlates on. repeatInterval is 4h rather than the
+  # usual 12h so a scenario re-run is not suppressed as a repeat.
   routeGroupBy: ['...']
   routeGroupWait: 1s
   routeGroupInterval: 1s
-  # 4h rather than the usual 12h: a scenario re-run during a demo should not be
-  # suppressed as a repeat of the previous one.
   routeRepeatInterval: 4h
-  # Optional matchers, e.g. to limit what reaches NudgeBee:
-  #   routeMatchers:
-  #     - severity =~ "critical|warning"
+  # Optional, e.g.  routeMatchers: [ 'severity =~ "critical|warning"' ]
   routeMatchers: []
   # Extra alternation terms appended to the container-id exclusion regex of the
   # default alert rules (both the log-error and HTTP-failure rules). Terms match
