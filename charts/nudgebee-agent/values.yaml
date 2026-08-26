@@ -330,14 +330,16 @@ nodeAgent:
 # is off and computes this cluster's allocations centrally (reaching its Prometheus
 # via the relay). To run OpenCost per-cluster in the agent, set
 # `--set opencost.enabled=true`.
-# Cost monitoring. NOTE the default here is false while the UI and docs present
-# OpenCost as an included component -- a plain `helm install` therefore produces
-# no cost data unless you set this. installation.sh enables it for you; if you
-# install with Helm directly, pass --set opencost.enabled=true.
+# Cost monitoring. OFF by default and left that way deliberately -- it is opt-in,
+# not an oversight, and installation.sh does not turn it on either.
 #
-# It also needs a Prometheus URL, which is NOT inherited from
-# globalConfig.prometheus_url:
+# Enable it explicitly when you want cost data. It needs a Prometheus URL, which
+# is NOT inherited from globalConfig.prometheus_url:
+#   --set opencost.enabled=true
 #   --set opencost.opencost.prometheus.external.url=<same prometheus URL>
+#
+# Note the UI presents OpenCost as an included component, which does not match
+# this default. That is a UI/doc issue rather than a chart one.
 opencost:
   enabled: false
   nameOverride: ""
@@ -539,62 +541,62 @@ alertmanager:
   # Alerts are the one input nothing verifies. Metrics are queried, so a bad
   # Prometheus URL shows up at once. Alerts are pushed: if no receiver targets
   # the agent, everything looks healthy and NudgeBee simply never raises an
-  # event. Pick the case that matches you.
+  # event. Nothing in this chart can wire that for you -- it lives in your
+  # Alertmanager's own configuration.
   #
-  # The intake address is always:
+  # The intake address is:
   #   http://<release>-runner.<agent-namespace>.svc/api/alerts
-  # (helm install prints the exact URL for your release).
+  # `helm install` prints the exact URL for your release. Use that, not the one
+  # hardcoded in extra-scrape-config.yaml -- that file cannot template, so its
+  # nudgebee-agent-runner.nudgebee-agent.svc resolves only when your release is
+  # named exactly `nudgebee-agent` in a namespace of the same name. Anywhere
+  # else, alerts are POSTed into a black hole and nothing logs an error.
   #
-  # A. Alertmanager in this cluster, managed by prometheus-operator
-  #      createAlertmanagerConfig: true
-  #      alertmanagerConfigLabels: { release: <your operator's release> }
-  #    The label is what gets the object ADOPTED -- the operator matches its
-  #    alertmanagerConfigSelector, defaulting to its own release name, and by
-  #    default only in the Alertmanager's own namespace. Created-but-unadopted
-  #    looks exactly like working.
+  # Add to the MAIN Alertmanager config (alertmanager.yml, or the equivalent
+  # for whatever manages it -- kube-prometheus-stack's alertmanager.config
+  # values, vmalertmanager, a plain Deployment):
   #
-  # B. Any other in-cluster Alertmanager (plain Deployment, another chart,
-  #    VictoriaMetrics' vmalertmanager). Leave this off and add the receiver to
-  #    your own config:
-  #      receivers:
-  #        - name: nudgebee-agent
-  #          webhook_configs:
-  #            - url: http://<release>-runner.<agent-namespace>.svc/api/alerts
-  #              send_resolved: true
-  #    Route it with `continue: true` so existing receivers keep working.
+  #   route:
+  #     routes:
+  #       - receiver: nudgebee-agent
+  #         group_by: ['...']
+  #         group_wait: 1s
+  #         group_interval: 1s
+  #         repeat_interval: 4h
+  #         continue: true
+  #   receivers:
+  #     - name: nudgebee-agent
+  #       webhook_configs:
+  #         - url: http://<release>-runner.<agent-namespace>.svc/api/alerts
+  #           send_resolved: true
   #
-  # C. Alertmanager OUTSIDE this cluster (Grafana Cloud, Chronosphere, a central
-  #    one elsewhere, or alerts not from Alertmanager at all). A ClusterIP URL is
-  #    unreachable from there, so none of the above applies -- use the public
-  #    webhook instead: NudgeBee UI -> Admin -> Integrations -> Prometheus
-  #    AlertManager Webhook, then POST to
-  #    https://<your-host>/api/webhooks/prometheus-alertmanager with
-  #    `Authorization: Bearer <token>`.
+  # `continue: true` keeps your existing receivers working; without it the first
+  # matching route wins and PagerDuty/Slack stop seeing alerts. group_by ['...']
+  # means do not aggregate -- NudgeBee correlates alerts itself and pre-grouping
+  # discards the detail it correlates on.
+  #
+  # DO NOT USE AN AlertmanagerConfig CR FOR THIS. prometheus-operator defaults
+  # alertmanagerConfigMatcherStrategy to `OnNamespace`, which injects a
+  # namespace=<the CR's namespace> matcher into every route it generates. An
+  # AlertmanagerConfig in the agent's namespace therefore forwards only alerts
+  # from that one namespace, which is useless here and looks like partial
+  # delivery rather than a misconfiguration. Making it cluster-wide requires
+  # setting that strategy to `None` on the Alertmanager resource itself, which
+  # is global and lets any namespace route any alert. Tried, does not work,
+  # documented so nobody re-attempts it.
+  #
+  # ALERTMANAGER OUTSIDE THIS CLUSTER (Grafana Cloud, Chronosphere, a central
+  # one elsewhere): a ClusterIP URL is unreachable from there. Use the public
+  # webhook instead -- NudgeBee UI -> Admin -> Integrations -> Prometheus
+  # AlertManager Webhook, then POST to
+  # https://<your-host>/api/webhooks/prometheus-alertmanager with
+  # `Authorization: Bearer <token>`.
   #
   # VERIFYING: a `Watchdog` event reaching NudgeBee proves delivery end to end --
   # that alert exists purely to certify Alertmanager is working.
   # `AlertmanagerFailedToSendAlerts` means the receiver URL is wrong. To test the
   # intake alone, port-forward the runner Service and POST an Alertmanager v4
   # payload to /api/alerts; 202 means the agent side is fine.
-  #
-  # Off by default: an install that used extra-scrape-config.yaml already has a
-  # working receiver, and a second one duplicates every alert instead of fixing
-  # anything. Turn it on when you already ran Prometheus (so you never passed
-  # that file), or when your release is not named exactly `nudgebee-agent` in a
-  # namespace of the same name -- the URL hardcoded in that file resolves for
-  # nothing else, silently.
-  createAlertmanagerConfig: false
-  alertmanagerConfigLabels: {}
-  # Routing for the generated receiver. Defaults deliver every alert promptly and
-  # unaggregated, because NudgeBee correlates alerts itself and pre-grouping
-  # discards the detail it correlates on. repeatInterval is 4h rather than the
-  # usual 12h so a scenario re-run is not suppressed as a repeat.
-  routeGroupBy: ['...']
-  routeGroupWait: 1s
-  routeGroupInterval: 1s
-  routeRepeatInterval: 4h
-  # Optional, e.g.  routeMatchers: [ 'severity =~ "critical|warning"' ]
-  routeMatchers: []
   # Extra alternation terms appended to the container-id exclusion regex of the
   # default alert rules (both the log-error and HTTP-failure rules). Terms match
   # as substrings of container_id (/k8s/<namespace>/<pod>/<container>), so a

@@ -24,13 +24,6 @@ Alerts: point your Alertmanager at
 
 Nothing here can do that for you, and if no receiver targets it NudgeBee gets
 metrics but never an alert -- with no error anywhere.
-{{- if and .Values.alertmanager.createAlertmanagerConfig (not .Values.alertmanager.alertmanagerConfigLabels) }}
-
-  ! createAlertmanagerConfig is on but alertmanagerConfigLabels is empty, so
-    the object will be created and then ignored. Set the selector label of
-    your Alertmanager's release.
-{{- end }}
-
-Setup for each kind of Alertmanager (operator, plain, or outside the cluster),
-and how to verify delivery: see `alertmanager:` in values.yaml.
+Add it to your Alertmanager config (not an AlertmanagerConfig CR -- those are
+namespace-scoped by default). Details: `alertmanager:` in values.yaml.
 ============================================================================

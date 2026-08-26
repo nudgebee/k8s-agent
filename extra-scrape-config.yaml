@@ -58,11 +58,17 @@ prometheus:
 # nodeExporter.service.targetPort flag in the install docs does NOT fix this: it
 # changes the Service only, not the host binding.
 #
-# Using the pod network instead avoids the collision entirely. node-exporter
-# still reports host metrics -- those come from the /proc and /sys host mounts,
-# not from host networking.
+# Moving the port is enough -- keep host networking. Dropping it would avoid the
+# collision too, but silently costs the host NETWORK metrics: /proc/net/dev is
+# per-network-namespace, so from inside a pod netns node-exporter sees only the
+# pod's own interfaces, and --path.procfs does not help because /proc/net
+# resolves per-namespace regardless of the mount.
+#
+# With hostNetwork kept and the port moved, the chart renders
+# --web.listen-address=[$(HOST_IP)]:9101, so it binds host port 9101 and leaves
+# 9100 to whoever already has it.
 prometheus-node-exporter:
-  hostNetwork: false
+  hostNetwork: true
   service:
     port: 9101
     targetPort: 9101
