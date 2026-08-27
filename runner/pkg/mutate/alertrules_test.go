@@ -13,18 +13,24 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-// promRuleScheme registers PrometheusRule so the dynamic fake recognises the GVR.
+// promRuleScheme registers PrometheusRule and Prometheus so the dynamic fake
+// recognises both GVRs. Prometheus is needed by every legacy alert-rule test:
+// that path lists Prometheus CRs to derive the ruleSelector labels.
 func promRuleScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
-	gvr := prometheusRuleGVR
-	s.AddKnownTypeWithName(
-		schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: "PrometheusRule"},
-		&unstructured.Unstructured{},
-	)
-	s.AddKnownTypeWithName(
-		schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: "PrometheusRuleList"},
-		&unstructured.UnstructuredList{},
-	)
+	for gvr, kind := range map[schema.GroupVersionResource]string{
+		prometheusRuleGVR: "PrometheusRule",
+		prometheusGVR:     "Prometheus",
+	} {
+		s.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: kind},
+			&unstructured.Unstructured{},
+		)
+		s.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: gvr.Group, Version: gvr.Version, Kind: kind + "List"},
+			&unstructured.UnstructuredList{},
+		)
+	}
 	return s
 }
 
@@ -418,5 +424,162 @@ func TestHandleDeletePromRule_RoutesByAlertVsName(t *testing.T) {
 		"name": "standalone", "namespace": "monitoring",
 	}); err != nil {
 		t.Fatalf("manifest-shape: %v", err)
+	}
+}
+
+// --- ruleSelector label stamping ------------------------------------------
+//
+// prometheus-operator only loads a PrometheusRule whose labels match the
+// Prometheus CR's spec.ruleSelector. A CR written without them is accepted and
+// reported healthy but never evaluated, so these tests pin the labels onto both
+// the create and the update path.
+
+func newPrometheusCR(namespace, name string, matchLabels map[string]any) *unstructured.Unstructured {
+	spec := map[string]any{}
+	if matchLabels != nil {
+		spec["ruleSelector"] = map[string]any{"matchLabels": matchLabels}
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "monitoring.coreos.com/v1",
+		"kind":       "Prometheus",
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"spec":       spec,
+	}}
+}
+
+func crLabels(t *testing.T, dyn *dynamicfake.FakeDynamicClient, namespace string) map[string]string {
+	t.Helper()
+	got, err := dyn.Resource(prometheusRuleGVR).Namespace(namespace).Get(
+		context.Background(), LegacyAlertRuleCRDName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read CR: %v", err)
+	}
+	return got.GetLabels()
+}
+
+func TestCreateOrReplaceAlertRule_StampsRuleSelectorLabelsOnCreate(t *testing.T) {
+	prom := newPrometheusCR("nudgebee-agent", "kube-p-prometheus",
+		map[string]any{"release": "nudgebee-prometheus"})
+	dyn := dynamicfake.NewSimpleDynamicClient(promRuleScheme(), prom)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	m.SetNamespace("nudgebee-agent")
+
+	if _, err := m.CreateOrReplaceAlertRule(context.Background(), LegacyAlertRuleParams{
+		Alert: "A", Expr: "up == 0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	labels := crLabels(t, dyn, "nudgebee-agent")
+	if labels["release"] != "nudgebee-prometheus" {
+		t.Errorf("release label = %q, want nudgebee-prometheus (rule would never be evaluated)", labels["release"])
+	}
+	// Legacy identification labels must survive — the agent finds the CR by them.
+	if labels[LegacyAlertRuleLabelKey] != LegacyAlertRuleLabelValue || labels["role"] != "alert-rules" {
+		t.Errorf("legacy labels lost: %v", labels)
+	}
+}
+
+func TestCreateOrReplaceAlertRule_HealsExistingCRMissingSelectorLabels(t *testing.T) {
+	// A CR as written before this fix: legacy labels only, no `release`.
+	pre := newLegacyCR("nudgebee-agent", []map[string]any{{"alert": "Existing", "expr": "up"}})
+	prom := newPrometheusCR("nudgebee-agent", "kube-p-prometheus",
+		map[string]any{"release": "nudgebee-prometheus"})
+	dyn := dynamicfake.NewSimpleDynamicClient(promRuleScheme(), pre, prom)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	m.SetNamespace("nudgebee-agent")
+
+	if _, err := m.CreateOrReplaceAlertRule(context.Background(), LegacyAlertRuleParams{
+		Alert: "B", Expr: "up == 0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := crLabels(t, dyn, "nudgebee-agent")["release"]; got != "nudgebee-prometheus" {
+		t.Errorf("release label = %q, want nudgebee-prometheus (existing CR not healed)", got)
+	}
+	if rules := legacyRulesFromCR(t, dyn, "nudgebee-agent"); len(rules) != 2 {
+		t.Errorf("want 2 rules after append, got %d", len(rules))
+	}
+}
+
+func TestCreateOrReplaceAlertRule_KeepsOperatorEditedSelectorLabel(t *testing.T) {
+	pre := newLegacyCR("nudgebee-agent", nil)
+	pre.SetLabels(map[string]string{
+		LegacyAlertRuleLabelKey: LegacyAlertRuleLabelValue,
+		"release":               "hand-picked",
+	})
+	prom := newPrometheusCR("nudgebee-agent", "kube-p-prometheus",
+		map[string]any{"release": "nudgebee-prometheus"})
+	dyn := dynamicfake.NewSimpleDynamicClient(promRuleScheme(), pre, prom)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	m.SetNamespace("nudgebee-agent")
+
+	if _, err := m.CreateOrReplaceAlertRule(context.Background(), LegacyAlertRuleParams{
+		Alert: "C", Expr: "up == 0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := crLabels(t, dyn, "nudgebee-agent")["release"]; got != "hand-picked" {
+		t.Errorf("release label = %q, want hand-picked (operator edit clobbered)", got)
+	}
+}
+
+func TestCreateOrReplaceAlertRule_PrefersPrometheusInAgentNamespace(t *testing.T) {
+	other := newPrometheusCR("aaa-other-ns", "other", map[string]any{"release": "wrong"})
+	local := newPrometheusCR("nudgebee-agent", "zzz-local", map[string]any{"release": "right"})
+	dyn := dynamicfake.NewSimpleDynamicClient(promRuleScheme(), other, local)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	m.SetNamespace("nudgebee-agent")
+
+	if _, err := m.CreateOrReplaceAlertRule(context.Background(), LegacyAlertRuleParams{
+		Alert: "D", Expr: "up == 0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := crLabels(t, dyn, "nudgebee-agent")["release"]; got != "right" {
+		t.Errorf("release label = %q, want right (agent-namespace Prometheus ignored)", got)
+	}
+}
+
+func TestCreateOrReplaceAlertRule_NoPrometheusCRStillWritesRule(t *testing.T) {
+	// No Prometheus CR, or no RBAC to read one: the rule must still be written
+	// (pre-existing behaviour) rather than the whole request failing.
+	dyn := dynamicfake.NewSimpleDynamicClient(promRuleScheme())
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	m.SetNamespace("nudgebee-agent")
+
+	if _, err := m.CreateOrReplaceAlertRule(context.Background(), LegacyAlertRuleParams{
+		Alert: "E", Expr: "up == 0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rules := legacyRulesFromCR(t, dyn, "nudgebee-agent"); len(rules) != 1 {
+		t.Errorf("want 1 rule, got %d", len(rules))
+	}
+}
+
+func TestCreateOrReplaceAlertRule_IgnoresExpressionOnlySelector(t *testing.T) {
+	// matchExpressions can't be satisfied by stamping labels; don't guess.
+	prom := newPrometheusCR("nudgebee-agent", "kube-p-prometheus", nil)
+	_ = unstructured.SetNestedSlice(prom.Object, []any{
+		map[string]any{"key": "release", "operator": "Exists"},
+	}, "spec", "ruleSelector", "matchExpressions")
+	dyn := dynamicfake.NewSimpleDynamicClient(promRuleScheme(), prom)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	m.SetNamespace("nudgebee-agent")
+
+	if _, err := m.CreateOrReplaceAlertRule(context.Background(), LegacyAlertRuleParams{
+		Alert: "F", Expr: "up == 0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	labels := crLabels(t, dyn, "nudgebee-agent")
+	if len(labels) != 2 {
+		t.Errorf("labels = %v, want only the two legacy labels", labels)
 	}
 }

@@ -146,6 +146,10 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 		rule["for"] = p.Duration
 	}
 
+	// Resolve once, outside the retry loop: the selector can't change between
+	// conflict retries, and each lookup is an extra apiserver call.
+	selectorLabels := m.ruleSelectorLabels(ctx)
+
 	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(m.Namespace)
 	// Shared CR + concurrent UI sessions → 409 Conflict whenever two callers
 	// land between Get and Update. RetryOnConflict re-reads + re-applies the
@@ -156,7 +160,7 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing, gerr := ri.Get(ctx, LegacyAlertRuleCRDName, metav1.GetOptions{})
 		if apierrors.IsNotFound(gerr) {
-			u := newLegacyAlertRuleCR(m.Namespace, []any{rule})
+			u := newLegacyAlertRuleCR(m.Namespace, []any{rule}, selectorLabels)
 			created, cerr := ri.Create(ctx, u, metav1.CreateOptions{})
 			if cerr != nil {
 				if apierrors.IsAlreadyExists(cerr) {
@@ -191,6 +195,11 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 		if serr := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); serr != nil {
 			return serr
 		}
+		// Heal a CR created before selector labels were stamped (or after the
+		// Prometheus release was renamed): without this, every rule written
+		// into an already-mislabelled CR stays invisible to prometheus-operator
+		// forever, since labels were only ever set on create.
+		applySelectorLabels(existing, selectorLabels)
 
 		updated, uerr := ri.Update(ctx, existing, metav1.UpdateOptions{})
 		if uerr != nil {
@@ -284,20 +293,49 @@ func replaceLegacyRuleInPlace(groups []any, alert string, rule map[string]any) b
 	return false
 }
 
+// applySelectorLabels adds any missing selector labels to an existing CR.
+// Existing values are left alone: an operator who deliberately retargeted the
+// CR keeps their edit.
+func applySelectorLabels(u *unstructured.Unstructured, selectorLabels map[string]string) {
+	if len(selectorLabels) == 0 {
+		return
+	}
+	labels := u.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	changed := false
+	for k, v := range selectorLabels {
+		if _, ok := labels[k]; !ok {
+			labels[k] = v
+			changed = true
+		}
+	}
+	if changed {
+		u.SetLabels(labels)
+	}
+}
+
 // newLegacyAlertRuleCR builds a fresh canonical PrometheusRule CR with the
 // Robusta-compat labels so a parallel legacy runner can still find it via
-// the same label selector.
-func newLegacyAlertRuleCR(namespace string, rules []any) *unstructured.Unstructured {
+// the same label selector, plus selectorLabels — the Prometheus CR's
+// ruleSelector.matchLabels, without which prometheus-operator never loads
+// the rule (see ruleSelectorLabels).
+func newLegacyAlertRuleCR(namespace string, rules []any, selectorLabels map[string]string) *unstructured.Unstructured {
+	labels := map[string]any{
+		LegacyAlertRuleLabelKey: LegacyAlertRuleLabelValue,
+		"role":                  "alert-rules",
+	}
+	for k, v := range selectorLabels {
+		labels[k] = v
+	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "monitoring.coreos.com/v1",
 		"kind":       "PrometheusRule",
 		"metadata": map[string]any{
 			"name":      LegacyAlertRuleCRDName,
 			"namespace": namespace,
-			"labels": map[string]any{
-				LegacyAlertRuleLabelKey: LegacyAlertRuleLabelValue,
-				"role":                  "alert-rules",
-			},
+			"labels":    labels,
 		},
 		"spec": map[string]any{
 			"groups": []any{
