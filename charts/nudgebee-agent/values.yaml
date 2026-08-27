@@ -213,6 +213,12 @@ runner:
     enabled: false
     url: ""
     apiKey: ""
+    # Extra request headers, comma-separated "Key: Value" pairs (same form as
+    # globalConfig.prometheus_headers). For OpenSearch-compatible services that
+    # authenticate on a custom header instead of ApiKey or basic auth — Logz.io
+    # uses X-API-TOKEN. Surfaces as ELASTICSEARCH_HEADERS.
+    # e.g. "X-API-TOKEN: <token>"
+    headers: ""
     # Verify the ES server's TLS certificate (https URLs only). Defaults off to
     # match the legacy client. Surfaces as ELASTICSEARCH_SSL_VERIFY.
     sslVerify: false
