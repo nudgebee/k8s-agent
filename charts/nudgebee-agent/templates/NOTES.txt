@@ -24,6 +24,8 @@ Alerts: point your Alertmanager at
 
 Nothing here can do that for you, and if no receiver targets it NudgeBee gets
 metrics but never an alert -- with no error anywhere.
-Add it to your Alertmanager config (not an AlertmanagerConfig CR -- those are
-namespace-scoped by default). Details: `alertmanager:` in values.yaml.
+Add it to your Alertmanager config. An AlertmanagerConfig CR in THIS namespace
+forwards only this namespace's alerts -- see `alertmanager:` in values.yaml for
+the two CR layouts that do work, or
+https://app.nudgebee.com/help/docs/installation/agent/connect/alertmanager
 ============================================================================

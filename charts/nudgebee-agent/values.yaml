@@ -565,15 +565,22 @@ alertmanager:
   # means do not aggregate -- NudgeBee correlates alerts itself and pre-grouping
   # discards the detail it correlates on.
   #
-  # DO NOT USE AN AlertmanagerConfig CR FOR THIS. prometheus-operator defaults
-  # alertmanagerConfigMatcherStrategy to `OnNamespace`, which injects a
-  # namespace=<the CR's namespace> matcher into every route it generates. An
-  # AlertmanagerConfig in the agent's namespace therefore forwards only alerts
-  # from that one namespace, which is useless here and looks like partial
-  # delivery rather than a misconfiguration. Making it cluster-wide requires
-  # setting that strategy to `None` on the Alertmanager resource itself, which
-  # is global and lets any namespace route any alert. Tried, does not work,
-  # documented so nobody re-attempts it.
+  # A PLAIN AlertmanagerConfig CR IN THIS NAMESPACE DOES NOT WORK.
+  # prometheus-operator defaults alertmanagerConfigMatcherStrategy to
+  # `OnNamespace`, which injects a namespace=<the CR's namespace> matcher into
+  # every route it generates. An AlertmanagerConfig in the agent's namespace
+  # therefore forwards only alerts from that one namespace -- partial delivery
+  # that reads as "mostly working" rather than as a misconfiguration.
+  #
+  # Two CR-based arrangements DO route cluster-wide:
+  #   - alertmanagerConfigMatcherStrategy `OnNamespaceExceptForAlertmanagerNamespace`
+  #     (prometheus-operator v0.84.0+) with the AlertmanagerConfig created in the
+  #     ALERTMANAGER's namespace, not the agent's; or
+  #   - spec.alertmanagerConfiguration.name on the Alertmanager, pointing at an
+  #     AlertmanagerConfig in its own namespace, which the operator uses as the
+  #     base config without enforcing a namespace label on its routes.
+  # Not `None`: that drops the namespace restriction for every AlertmanagerConfig
+  # in the cluster, not just ours.
   #
   # ALERTMANAGER OUTSIDE THIS CLUSTER (Grafana Cloud, Chronosphere, a central
   # one elsewhere): a ClusterIP URL is unreachable from there. Use the public
@@ -582,11 +589,14 @@ alertmanager:
   # https://<your-host>/api/webhooks/prometheus-alertmanager with
   # `Authorization: Bearer <token>`.
   #
-  # VERIFYING: a `Watchdog` event reaching NudgeBee proves delivery end to end --
-  # that alert exists purely to certify Alertmanager is working.
-  # `AlertmanagerFailedToSendAlerts` means the receiver URL is wrong. To test the
-  # intake alone, port-forward the runner Service and POST an Alertmanager v4
-  # payload to /api/alerts; 202 means the agent side is fine.
+  # VERIFYING: `amtool config routes show` proves the route loaded, and an alert
+  # firing in Alertmanager's own UI showing up in NudgeBee proves delivery.
+  # Alertmanager stops at the first matching route unless it sets
+  # `continue: true`, so a route above this one can swallow the alerts.
+  # `AlertmanagerFailedToSendAlerts` means the receiver URL is wrong or blocked.
+  # To test the intake alone, port-forward the runner Service and POST an
+  # Alertmanager v4 payload to /api/alerts; it answers 202 once it reads the
+  # body and forwards asynchronously, so check the runner logs alongside it.
   # Extra alternation terms appended to the container-id exclusion regex of the
   # default alert rules (both the log-error and HTTP-failure rules). Terms match
   # as substrings of container_id (/k8s/<namespace>/<pod>/<container>), so a
