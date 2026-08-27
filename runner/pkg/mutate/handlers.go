@@ -32,6 +32,7 @@ func Handlers(m *Mutator) map[string]dispatch.Handler {
 		hs["create_workload"] = wrap(m, handleCreateWorkload)
 		hs["replace_workload"] = wrap(m, handleReplaceWorkload)
 		hs["delete_workload"] = wrap(m, handleDeleteWorkload)
+		hs["revert_workload"] = wrap(m, handleRevertWorkload)
 		// replica_rightsizing scales Deployment/StatefulSet/Rollout via the
 		// dynamic client. Delivered through the agent_task poller (trusted),
 		// so — like rightsizing_resource — it is deliberately NOT a lightAction.
@@ -208,6 +209,15 @@ func handleReplaceWorkload(ctx context.Context, m *Mutator, p map[string]any) (a
 	if kind == "" {
 		return nil, errors.New("replace_workload: kind required (Deployment|DaemonSet|StatefulSet|ReplicaSet|Rollout|NodePool|EC2NodeClass)")
 	}
+	// An event revert sends `revert_paths` alongside the legacy per-kind
+	// manifest: the manifest is there only for tenants still on the Python
+	// agent, which ignores unknown params. Whenever the paths are present they
+	// win — the manifest is a stale snake_case snapshot this agent must not
+	// replay (see revert.go). A malformed revert_paths is an error, never a
+	// silent fall-through to that snapshot.
+	if _, ok := p["revert_paths"]; ok {
+		return handleRevertWorkload(ctx, m, p)
+	}
 	name := str(p, "name")
 	namespace := str(p, "namespace")
 	body := pickReplaceBody(kind, p)
@@ -227,6 +237,23 @@ func handleReplaceWorkload(ctx context.Context, m *Mutator, p map[string]any) (a
 		"updated": updated,
 		"message": fmt.Sprintf("%s/%s updated", kind, loc),
 	}, nil
+}
+
+// handleRevertWorkload undoes a recorded configuration change by writing the
+// previous value back at each changed field path. Params: kind, name,
+// namespace, and revert_paths — a list of {path, old} taken from the diff
+// evidence's updated_values. See revert.go for why this is not
+// replace_workload fed the pre-change manifest.
+func handleRevertWorkload(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	kind := str(p, "kind")
+	if kind == "" {
+		return nil, errors.New("revert_workload: kind required (Deployment|DaemonSet|StatefulSet|ReplicaSet|Rollout|NodePool|EC2NodeClass)")
+	}
+	entries, err := parseRevertEntries(p["revert_paths"])
+	if err != nil {
+		return nil, err
+	}
+	return m.RevertWorkload(ctx, kind, str(p, "namespace"), str(p, "name"), entries)
 }
 
 // handleDeleteWorkload deletes a workload by kind/namespace/name. The delete UI
