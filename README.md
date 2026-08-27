@@ -48,7 +48,7 @@ curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation
   | bash -s -- -a "<your-auth-key>"
 ```
 
-Pass `-C <storage-class>` if the cluster has no default StorageClass — it is applied to every PVC the script creates: ClickHouse, and the Prometheus (50Gi) and Loki (10Gi) volumes when the script installs those stacks:
+Pass `-C <storage-class>` if the cluster has no default StorageClass — the name is applied to every PVC the script creates: ClickHouse, and the Prometheus (50Gi) and Loki (10Gi) volumes when the script installs those stacks:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation.sh \
@@ -128,7 +128,7 @@ explicitly:
 
 ```yaml
 global:
-  # Applies to every PVC the chart (and its subcharts) creates.
+  # Applies to the ClickHouse PVC, the only one this chart creates by default.
   storageClass: "gp3"
 
 clickhouse:
@@ -154,11 +154,20 @@ helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent \
 | `"<name>"` | PVCs request that StorageClass (e.g. `gp3`, `managed-csi`, `standard-rwo`) |
 | `"-"` | `storageClassName: ""` — dynamic provisioning is disabled, so the PVC binds a pre-created PV |
 
+The `"-"` form is a chart-value convention and works only for the values above,
+not for the installer's `-C` flag (see below).
+
 `global.storageClass` takes precedence over `clickhouse.persistence.storageClass`
 when both are set. The StorageClass of an existing PVC is immutable, so changing
 it on an already-installed release only affects PVCs created afterwards — delete
 the old PVC (losing the local traces/logs, which have a 7-day TTL) to move
 ClickHouse to a different class.
+
+`global.storageClass` is a Helm convention, not a guarantee: it reaches a
+subchart's PVCs only if that subchart reads it. The Bitnami ClickHouse subchart
+does. The OpenCost subchart does **not** — its PVC is disabled by default, but if
+you turn it on, set `opencost.opencost.exporter.persistence.storageClass`
+separately.
 
 The stacks `installation.sh` installs alongside the agent claim volumes of their
 own, and `-C` sets the class on those too:
@@ -172,6 +181,13 @@ own, and `-C` sets the class on those too:
 Grafana and Alertmanager are left on their chart defaults (no PVC), so nothing
 is set for them. Installing the chart directly with `helm` only creates the
 ClickHouse PVC — the other two come from stacks the script installs for you.
+
+`-C` takes a StorageClass **name** only. It rejects `-`, because the Prometheus
+and Loki charts do not implement that convention: `kube-prometheus-stack` would
+copy it into the PVC verbatim and leave the volume `Pending` on a StorageClass
+named `-`, and `loki-stack` renders the value unquoted, which fails to parse as
+YAML. To bind pre-created PVs, install the chart directly with
+`--set global.storageClass=-` and install those stacks yourself.
 
 ## Uninstall
 

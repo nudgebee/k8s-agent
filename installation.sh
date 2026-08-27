@@ -48,9 +48,11 @@ usage() {
   echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
-  echo "  -C <storage_class>    StorageClass for every PVC this script creates"
+  echo "  -C <storage_class>    StorageClass name for every PVC this script creates"
   echo "                        (ClickHouse, and Prometheus/Loki when installed here)."
   echo "                        Defaults to the cluster default StorageClass."
+  echo "                        A name only — '-' (bind a pre-created PV) is rejected,"
+  echo "                        the Prometheus and Loki charts do not understand it."
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
   exit 1
@@ -132,6 +134,20 @@ done
 # Check if an access key is provided
 if [ -z "$auth_key" ]; then
   echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."
+  exit 1
+fi
+
+# `-` is the Bitnami convention for "disable dynamic provisioning, bind a
+# pre-created PV". Only the agent chart understands it: kube-prometheus-stack
+# copies the value straight into the PVC (yielding a StorageClass named "-" that
+# does not exist, so the volume stays Pending forever) and loki-stack renders it
+# unquoted, which is not even valid YAML. Reject it here rather than letting two
+# of the three stacks break in different ways.
+if [ "$storage_class" == "-" ]; then
+  echo "Error: -C takes a StorageClass name; '-' is not supported." >&2
+  echo "       To bind pre-created PVs, install the chart directly with" >&2
+  echo "       --set global.storageClass=- and install the Prometheus/Loki" >&2
+  echo "       stacks yourself." >&2
   exit 1
 fi
 
@@ -359,8 +375,8 @@ if [ "$disable_prometheus_stack" == "true" ]; then
   disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
 fi
 
-# global.storageClass reaches every PVC the chart creates (today: ClickHouse).
-# Left unset, the cluster's default StorageClass applies.
+# global.storageClass reaches the ClickHouse PVC, the only one the chart creates
+# by default. Left unset, the cluster's default StorageClass applies.
 storage_class_args=()
 if [ -n "$storage_class" ]; then
   storage_class_args=(--set-string "global.storageClass=$storage_class")

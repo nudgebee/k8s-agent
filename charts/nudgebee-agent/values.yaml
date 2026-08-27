@@ -8,6 +8,9 @@ global:
   # default StorageClass, set to a name (e.g. "gp3", "managed-csi") on clusters
   # that have no default, or to "-" to disable dynamic provisioning and bind a
   # pre-created PV. When set, this wins over `clickhouse.persistence.storageClass`.
+  # Helm propagates this to every subchart, but only subcharts that read it act
+  # on it — the OpenCost one does not, so if you enable its PVC set
+  # `opencost.opencost.exporter.persistence.storageClass` too.
   storageClass: ""
 enablePrometheusStack: true
 automountServiceAccountToken: true
