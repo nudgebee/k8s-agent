@@ -214,12 +214,11 @@ else
             helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
                 -n $namespace --create-namespace \
                 --set nodeExporter.enabled=true \
-                --set nodeExporter.service.targetPort=9101 \
                 --set pushgateway.enabled=false \
                 --set alertmanager.enabled=true \
                 --set kubeStateMetrics.enabled=true \
                 --set grafana.enabled=true \
-                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/extra-scrape-config.yaml
+                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml
             prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
             grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
         else

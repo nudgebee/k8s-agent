@@ -1,0 +1,145 @@
+# Copyright The OpenTelemetry Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Values for kube-prometheus-stack, as the NudgeBee agent needs it.
+#
+# Despite the name this file used to carry -- extra-scrape-config.yaml -- only
+# part of it is scrape config. It also configures the Alertmanager receiver that
+# routes alerts to the agent, which is the ONLY thing that does so. Skipping this
+# file therefore does not merely lose two scrape jobs: NudgeBee receives no
+# alerts at all, and nothing reports an error. The old name invited exactly that,
+# because "I already have Prometheus, so I do not need extra scrape config" is a
+# reasonable reading and a wrong one.
+#
+#   helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
+#     -n nudgebee-agent --create-namespace \
+#     -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml
+#
+# If you already run Prometheus and are not installing this chart, you still need
+# the Alertmanager receiver below -- add it to your own Alertmanager config, with
+# the runner URL for YOUR release (helm install prints it).
+
+prometheus:
+  prometheusSpec:
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 50Gi
+    additionalScrapeConfigs: |
+      - job_name: opencost
+        honor_labels: true
+        scrape_interval: 1m
+        scrape_timeout: 10s
+        metrics_path: /metrics
+        scheme: http
+        dns_sd_configs:
+        - names:
+          - opencost.opencost
+          type: 'A'
+          port: 9003
+      - job_name: 'nudgebee-node-agent'
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [ __meta_kubernetes_pod_annotation_prometheus_io_scrape ]
+            action: keep
+            regex: true
+          - source_labels: [ __meta_kubernetes_pod_annotation_prometheus_io_scrape_slow ]
+            action: drop
+            regex: true
+          - source_labels: [ __meta_kubernetes_pod_label_app]
+            action: keep
+            regex: nudgebee-node-agent
+          - source_labels: [ __meta_kubernetes_pod_annotation_prometheus_io_scheme ]
+            action: replace
+            regex: (https?)
+            target_label: __scheme__
+          - source_labels: [ __meta_kubernetes_pod_annotation_prometheus_io_path ]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [ __address__, __meta_kubernetes_pod_annotation_prometheus_io_port ]
+            action: replace
+            regex: (.+?)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [ __meta_kubernetes_pod_phase ]
+            regex: Pending|Succeeded|Failed|Completed
+            action: drop
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: instance
+            action: replace
+# node-exporter defaults to hostPort 9100 with host networking. On any cluster
+# that already runs a node-exporter -- a previous kube-prometheus-stack, or a
+# VictoriaMetrics stack, both common -- that port is taken on every node and
+# every pod of this DaemonSet sits Pending with "didn't have free ports". The
+# nodeExporter.service.targetPort flag in the install docs does NOT fix this: it
+# changes the Service only, not the host binding.
+#
+# Moving the port is enough -- keep host networking. Dropping it would avoid the
+# collision too, but silently costs the host NETWORK metrics: /proc/net/dev is
+# per-network-namespace, so from inside a pod netns node-exporter sees only the
+# pod's own interfaces, and --path.procfs does not help because /proc/net
+# resolves per-namespace regardless of the mount.
+#
+# With hostNetwork kept and the port moved, the chart renders
+# --web.listen-address=[$(HOST_IP)]:9101, so it binds host port 9101 and leaves
+# 9100 to whoever already has it.
+prometheus-node-exporter:
+  hostNetwork: true
+  service:
+    port: 9101
+    targetPort: 9101
+
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: [ 'namespace' ]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'null'
+      routes:
+        - receiver: 'null'
+          matchers:
+            - alertname =~ "InfoInhibitor|Watchdog"
+          continue: true
+        - receiver: 'nudgebee-agent'
+          group_by: [ '...' ]
+          group_wait: 1s
+          group_interval: 1s
+          matchers:
+            - severity =~ ".*"
+          repeat_interval: 4h
+          continue: true #
+    receivers:
+      - name: 'null'
+      - name: 'nudgebee-agent'
+        webhook_configs:
+          # NOTE: this URL is hardcoded because a values file cannot template.
+          # It resolves ONLY when the agent release is named `nudgebee-agent` in
+          # a namespace called `nudgebee-agent`. Any other name and alerts are
+          # POSTed into a black hole, silently -- nothing logs an error.
+          #
+          # For any other layout, replace the URL below with the one that
+          # `helm install` printed for your release. The agent chart's NOTES
+          # output gives the correct value:
+          #   http://<release>-runner.<namespace>.svc/api/alerts
+          #
+          # There is no chart option that emits this receiver for you. An
+          # AlertmanagerConfig CR looks like the answer and is not -- see the
+          # `alertmanager:` section of the agent chart's values.yaml for why.
+          - url: 'http://nudgebee-agent-runner.nudgebee-agent.svc/api/alerts'
+            send_resolved: true
+grafana:
+  enabled: true
+  adminPassword: 'admin'
+  adminUser: 'admin'
+  grafana.ini:
+    security:
+      allow_embedding: true
