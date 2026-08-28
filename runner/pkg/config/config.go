@@ -50,10 +50,15 @@ type Config struct {
 	AzureTokenEndpoint       string
 
 	// Elasticsearch
-	ElasticsearchURL       string
-	ElasticsearchUser      string
-	ElasticsearchPassword  string
-	ElasticsearchAPIKey    string
+	ElasticsearchURL      string
+	ElasticsearchUser     string
+	ElasticsearchPassword string
+	ElasticsearchAPIKey   string
+	// ELASTICSEARCH_HEADERS; comma-separated "Key: Value" pairs, same form as
+	// PROMETHEUS_HEADERS / LOKI_EXTRA_HEADER. Needed by OpenSearch-compatible
+	// services that authenticate on a custom header rather than ApiKey or
+	// basic auth — Logz.io wants X-API-TOKEN, for instance.
+	ElasticsearchHeaders   string
 	ElasticsearchEnabled   bool // ELASTICSEARCH_ENABLED; default true when URL is set
 	ElasticsearchSSLVerify bool // ELASTICSEARCH_SSL_VERIFY; default false (skip cert verify) to match legacy
 
@@ -231,6 +236,7 @@ func FromEnv() (*Config, error) {
 		ElasticsearchUser:        os.Getenv("ELASTICSEARCH_USERNAME"),
 		ElasticsearchPassword:    os.Getenv("ELASTICSEARCH_PASSWORD"),
 		ElasticsearchAPIKey:      os.Getenv("ELASTICSEARCH_APIKEY"),
+		ElasticsearchHeaders:     os.Getenv("ELASTICSEARCH_HEADERS"),
 		// ELASTICSEARCH_ENABLED is the explicit opt-in for ES as the logs
 		// provider, defaulting false to match the legacy agent
 		// (env_vars.ELASTICSEARCH_ENABLED = load_bool(..., False)) and the prod

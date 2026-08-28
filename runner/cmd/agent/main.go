@@ -377,6 +377,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	ec.Username = cfg.ElasticsearchUser
 	ec.Password = cfg.ElasticsearchPassword
 	ec.APIKey = cfg.ElasticsearchAPIKey
+	// Custom auth headers (e.g. Logz.io's X-API-TOKEN). Applied on top of
+	// APIKey/basic auth, which the client sets first.
+	ec.ExtraHeaders = config.ParseHeaders(cfg.ElasticsearchHeaders)
 	registerProxy("elasticsearch", esEnabled, elasticsearch.Handlers(ec))
 	if esEnabled {
 		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL)

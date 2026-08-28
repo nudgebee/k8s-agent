@@ -151,6 +151,28 @@ func TestAPIKeyHeader(t *testing.T) {
 	}
 }
 
+// TestExtraHeaders covers the OpenSearch-compatible services that authenticate
+// on a custom header rather than ApiKey or basic auth (Logz.io: X-API-TOKEN).
+// The header must survive alongside whatever auth the client already set.
+func TestExtraHeaders(t *testing.T) {
+	var token, auth string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		token = r.Header.Get("X-API-TOKEN")
+		auth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`[]`))
+	})
+	defer srv.Close()
+	c.APIKey = "test-key"
+	c.ExtraHeaders = http.Header{"X-Api-Token": []string{"logz-token"}}
+	_, _ = c.Indices(context.Background())
+	if token != "logz-token" {
+		t.Errorf("X-API-TOKEN = %q, want logz-token", token)
+	}
+	if auth != "ApiKey test-key" {
+		t.Errorf("Authorization = %q; extra headers must not drop existing auth", auth)
+	}
+}
+
 func TestBasicAuth(t *testing.T) {
 	var u, p string
 	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
