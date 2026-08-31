@@ -1127,14 +1127,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 type shellTerminalAdapter struct{ m *podshell.Manager }
 
 func (a *shellTerminalAdapter) Handle(ctx context.Context, r *dispatch.TerminalRequest) (any, int) {
-	return a.m.Handle(ctx, &podshell.Request{
+	return a.m.Handle(ctx, toPodshellRequest(r))
+}
+
+// toPodshellRequest copies the dispatch wire struct across to podshell's.
+//
+// Extracted from the adapter so it can be tested directly: a field-by-field
+// copy between two structs that duplicate the same wire shape silently drops
+// anything the author forgets to list, and no compiler or linter flags it.
+// That is how `container` was lost after #581 — the picker looked functional
+// while every session attached to the default container.
+func toPodshellRequest(r *dispatch.TerminalRequest) *podshell.Request {
+	return &podshell.Request{
 		Action:    r.Action,
 		SessionID: r.SessionID,
 		Name:      r.Name,
 		Namespace: r.Namespace,
 		Command:   r.Command,
 		RequestID: r.RequestID,
-	})
+		Container: r.Container,
+	}
 }
 
 // grafanaAdapter bridges pkg/dispatch's GrafanaHandler interface to

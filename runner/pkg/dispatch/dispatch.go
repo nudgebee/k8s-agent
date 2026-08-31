@@ -83,6 +83,11 @@ type TerminalRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 	Command   string `json:"command,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	// Container selects which container of the pod to attach to. This struct
+	// duplicates podshell.Request's wire shape (so pkg/dispatch need not import
+	// pkg/podshell), which means a field added there but not here is silently
+	// dropped at unmarshal — see TestTerminalRequestMatchesPodshellRequest.
+	Container string `json:"container,omitempty"`
 }
 
 // GrafanaRequest is the wire shape of a Grafana / API-proxy call.
