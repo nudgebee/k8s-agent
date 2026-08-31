@@ -3,12 +3,29 @@ Pre-upgrade schema migration for the OTel clickhouse exporter tables.
 
 The opentelemetry-collector clickhouse exporter only creates its tables when
 they are absent — it never ALTERs an existing one. The 0.75 -> 0.156 collector
-upgrade added ScopeName/ScopeVersion columns to the traces insert, so installs
-upgraded across that boundary fail every traces batch with
-"No such column ScopeName in table default.otel_traces" until the columns are
-added. This hook runs the additive, idempotent ALTER before each upgrade:
-harmless when the columns (or the table itself) don't exist yet, and it keeps
+upgrade widened the insert column list for every signal, so installs upgraded
+across that boundary fail every batch with "No such column X in table ..." and
+drop the signal entirely until the columns are added. Per signal:
+
+  traces  — ScopeName, ScopeVersion
+  metrics — ServiceName (all five tables), plus AggregationTemporality on the
+            sum/histogram/exponential_histogram tables. 0.75 called the sum
+            column AggTemp; we add the new name rather than RENAME so the ALTER
+            stays idempotent, and the orphaned AggTemp ages out under the TTL.
+  logs    — ResourceSchemaUrl, ScopeSchemaUrl, ScopeName, ScopeVersion,
+            ScopeAttributes. EventName is also new but the exporter probes for
+            it and omits it from the insert when absent, so it is optional; we
+            add it anyway to keep upgraded tables at parity with fresh ones.
+
+This hook runs the additive, idempotent ALTERs before each upgrade: harmless
+when the columns (or the tables themselves) don't exist yet, and it keeps
 existing telemetry data (7d TTL) instead of requiring a table drop.
+
+Note that upgraded tables keep their original ORDER BY — new installs sort
+metrics by (ServiceName, MetricName, ...), upgraded ones still by
+(MetricName, Attributes, ...). Inserts are unaffected (the exporter names its
+columns explicitly, so appended columns are fine), but ServiceName-filtered
+queries won't hit the primary key on upgraded clusters.
 */}}
 {{- if and .Values.clickhouse.enabled (index .Values "opentelemetry-collector" "enabled") }}
 {{- /* Mirror the bitnami subchart's fullname logic: fullnameOverride wins,
@@ -20,6 +37,16 @@ existing telemetry data (7d TTL) instead of requiring a table drop.
 {{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
 {{- $chDatabase := default "default" (get $chExporter "database") }}
 {{- $chTracesTable := default "otel_traces" (get $chExporter "traces_table_name") }}
+{{- $chLogsTable := default "otel_logs" (get $chExporter "logs_table_name") }}
+{{- /* Metric table names come from exporter `metrics_tables.<type>.name`. The
+       exponential histogram default is otel_metrics_exponential_histogram —
+       not ..._exp_histogram, which is only the exporter's internal shorthand. */}}
+{{- $chMetricsTables := dig "metrics_tables" (dict) $chExporter }}
+{{- $chGauge := default "otel_metrics_gauge" (dig "gauge" "name" "" $chMetricsTables) }}
+{{- $chSum := default "otel_metrics_sum" (dig "sum" "name" "" $chMetricsTables) }}
+{{- $chHistogram := default "otel_metrics_histogram" (dig "histogram" "name" "" $chMetricsTables) }}
+{{- $chSummary := default "otel_metrics_summary" (dig "summary" "name" "" $chMetricsTables) }}
+{{- $chExpHistogram := default "otel_metrics_exponential_histogram" (dig "exponential_histogram" "name" "" $chMetricsTables) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -60,6 +87,13 @@ spec:
               value: {{ $chDatabase | quote }}
             - name: CH_TRACES_TABLE
               value: {{ $chTracesTable | quote }}
+            - name: CH_LOGS_TABLE
+              value: {{ $chLogsTable | quote }}
+            - name: CH_METRICS_TABLES
+              value: {{ printf "%s %s %s %s %s" $chGauge $chSum $chHistogram $chSummary $chExpHistogram | quote }}
+            {{- /* Only the delta/cumulative signals carry AggregationTemporality. */}}
+            - name: CH_TEMPORALITY_TABLES
+              value: {{ printf "%s %s %s" $chSum $chHistogram $chExpHistogram | quote }}
             - name: CH_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -75,6 +109,11 @@ spec:
                 cc "SELECT 1" >/dev/null 2>&1 && break
                 echo "waiting for clickhouse ($i/30)..."; sleep 5
               done
+              # Without this, an unreachable clickhouse makes every EXISTS check
+              # below return empty (command substitution hides the failure from
+              # `set -e`), so the job would skip all the ALTERs and still exit 0 —
+              # letting the upgrade proceed onto an unmigrated schema.
+              cc "SELECT 1" >/dev/null || { echo "clickhouse never became reachable; refusing to report a successful migration"; exit 1; }
               if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${CH_TRACES_TABLE}")" != "1" ]; then
                 echo "${CH_DATABASE}.${CH_TRACES_TABLE} does not exist yet; the exporter will create it with the current schema. Nothing to do."
               else
@@ -83,12 +122,27 @@ spec:
                       ADD COLUMN IF NOT EXISTS ScopeName String CODEC(ZSTD(1)) AFTER ResourceAttributes,
                       ADD COLUMN IF NOT EXISTS ScopeVersion String CODEC(ZSTD(1)) AFTER ScopeName"
               fi
-              # Also add ServiceName to clickhouse metric tables if they exist
-              for tbl in otel_metrics_gauge otel_metrics_sum otel_metrics_histogram otel_metrics_summary otel_metrics_exp_histogram; do
+              for tbl in ${CH_METRICS_TABLES}; do
                 if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${tbl}")" = "1" ]; then
                   echo "adding ServiceName to ${CH_DATABASE}.${tbl} if missing..."
                   cc "ALTER TABLE ${CH_DATABASE}.${tbl} ADD COLUMN IF NOT EXISTS ServiceName LowCardinality(String) CODEC(ZSTD(1))"
                 fi
               done
+              for tbl in ${CH_TEMPORALITY_TABLES}; do
+                if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${tbl}")" = "1" ]; then
+                  echo "adding AggregationTemporality to ${CH_DATABASE}.${tbl} if missing..."
+                  cc "ALTER TABLE ${CH_DATABASE}.${tbl} ADD COLUMN IF NOT EXISTS AggregationTemporality Int32 CODEC(ZSTD(1))"
+                fi
+              done
+              if [ "$(cc "EXISTS TABLE ${CH_DATABASE}.${CH_LOGS_TABLE}")" = "1" ]; then
+                echo "adding scope/schema-url columns to ${CH_DATABASE}.${CH_LOGS_TABLE} if missing..."
+                cc "ALTER TABLE ${CH_DATABASE}.${CH_LOGS_TABLE}
+                      ADD COLUMN IF NOT EXISTS ResourceSchemaUrl LowCardinality(String) CODEC(ZSTD(1)) AFTER Body,
+                      ADD COLUMN IF NOT EXISTS ScopeSchemaUrl LowCardinality(String) CODEC(ZSTD(1)) AFTER ResourceAttributes,
+                      ADD COLUMN IF NOT EXISTS ScopeName String CODEC(ZSTD(1)) AFTER ScopeSchemaUrl,
+                      ADD COLUMN IF NOT EXISTS ScopeVersion LowCardinality(String) CODEC(ZSTD(1)) AFTER ScopeName,
+                      ADD COLUMN IF NOT EXISTS ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)) AFTER ScopeVersion,
+                      ADD COLUMN IF NOT EXISTS EventName String CODEC(ZSTD(1))"
+              fi
               echo "schema upgrade complete."
 {{- end }}
