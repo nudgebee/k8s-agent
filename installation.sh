@@ -220,10 +220,14 @@ if storage_class_list=$(kubectl get storageclass -o jsonpath='{range .items[*]}{
     storage_class_names=$(printf '%s\n' "$storage_class_list" | cut -d= -f1 | grep -v '^$' || true)
     default_storage_class=$(printf '%s\n' "$storage_class_list" | grep '=.*true' | head -1 | cut -d= -f1 || true)
     if [ -n "$storage_class" ]; then
-        if ! printf '%s\n' "$storage_class_names" | grep -qx "$storage_class"; then
+        if ! printf '%s\n' "$storage_class_names" | grep -Fqx "$storage_class"; then
             echo "Error: StorageClass '$storage_class' does not exist in this cluster." >&2
-            echo "       Available StorageClasses:" >&2
-            printf '%s\n' "$storage_class_names" | sed 's/^/         /' >&2
+            if [ -n "$storage_class_names" ]; then
+                echo "       Available StorageClasses:" >&2
+                printf '%s\n' "$storage_class_names" | sed 's/^/         /' >&2
+            else
+                echo "       This cluster has no StorageClasses at all." >&2
+            fi
             exit 1
         fi
         echo "Using StorageClass '$storage_class' for the PVCs this script creates."
@@ -235,9 +239,14 @@ if storage_class_list=$(kubectl get storageclass -o jsonpath='{range .items[*]}{
         echo "         Prometheus or Loki, their PVCs will stay Pending — re-run with -C <storage_class>."
     else
         echo "Error: this cluster has no default StorageClass, so the ClickHouse PVC would stay" >&2
-        echo "       Pending forever. Re-run with -C <storage_class> naming one of:" >&2
-        printf '%s\n' "$storage_class_names" | sed 's/^/         /' >&2
-        echo "       or with -t true to install without ClickHouse." >&2
+        echo "       Pending forever. Re-run with -C <storage_class>, or with -t true to" >&2
+        echo "       install without ClickHouse." >&2
+        if [ -n "$storage_class_names" ]; then
+            echo "       StorageClasses in this cluster:" >&2
+            printf '%s\n' "$storage_class_names" | sed 's/^/         /' >&2
+        else
+            echo "       This cluster has no StorageClasses at all." >&2
+        fi
         exit 1
     fi
 else
