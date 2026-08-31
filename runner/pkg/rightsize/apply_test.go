@@ -225,3 +225,102 @@ func TestApply_WorkloadNotFound(t *testing.T) {
 		t.Fatal("expected not-found error, got nil")
 	}
 }
+
+// An applied rightsizing could not be undone: the value written was recorded, the value replaced was
+// not. The applier holds the object before it mutates it, so it captures what was there.
+func TestApply_ReturnsPreviousResourcesForUndo(t *testing.T) {
+	existing := deploymentWith("web", "shop", "app", map[string]any{
+		"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
+		"limits":   map[string]any{"memory": "512Mi"},
+	})
+	dyn := dynamicfake.NewSimpleDynamicClient(applyScheme(), existing)
+	a := NewApplier(dyn)
+
+	res, err := a.Handle(context.Background(), map[string]any{
+		"kind": "Deployment", "name": "web", "namespace": "shop",
+		"containers": []any{map[string]any{
+			"container_name": "app",
+			"cpu_request":    "250m",
+			"memory_request": "256Mi",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	prev, _ := res.(map[string]any)["previous_containers"].([]map[string]any)
+	if len(prev) != 1 {
+		t.Fatalf("want 1 captured container, got %v", res.(map[string]any)["previous_containers"])
+	}
+	// Keyed the way action_params.containers is, so the undo is this list passed straight back.
+	if prev[0]["container_name"] != "app" {
+		t.Errorf("container_name = %v", prev[0]["container_name"])
+	}
+	if prev[0]["cpu_request"] != "100m" || prev[0]["memory_request"] != "128Mi" {
+		t.Errorf("captured the wrong requests: %v", prev[0])
+	}
+	if prev[0]["memory_limit"] != "512Mi" {
+		t.Errorf("captured the wrong limit: %v", prev[0])
+	}
+	// cpu had no limit. Recording "" would mean "remove the limit" to the apply path, so an undo
+	// built from it would strip a limit that was never set.
+	if _, present := prev[0]["cpu_limit"]; present {
+		t.Errorf("absent cpu limit must stay absent, got %v", prev[0]["cpu_limit"])
+	}
+}
+
+// A container named in the change but absent from the workload must not be recorded at all — an undo
+// must never write blank resources onto something it did not touch.
+func TestApply_DoesNotCaptureContainersItDidNotTouch(t *testing.T) {
+	existing := deploymentWith("web", "shop", "app", map[string]any{
+		"requests": map[string]any{"cpu": "100m"},
+	})
+	dyn := dynamicfake.NewSimpleDynamicClient(applyScheme(), existing)
+	a := NewApplier(dyn)
+
+	res, err := a.Handle(context.Background(), map[string]any{
+		"kind": "Deployment", "name": "web", "namespace": "shop",
+		"containers": []any{map[string]any{"container_name": "app", "cpu_request": "250m"}},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	prev, _ := res.(map[string]any)["previous_containers"].([]map[string]any)
+	for _, entry := range prev {
+		if entry["container_name"] != "app" {
+			t.Errorf("captured a container the change never targeted: %v", entry)
+		}
+	}
+}
+
+// A quantity is legal as a bare number in a manifest (`cpu: 1`), which decodes to int64/float64.
+// NestedString reports such a field as absent, and absent means "was unset" to the undo — so a
+// numeric limit was dropped here and then REMOVED by the undo meant to restore it.
+func TestApply_CapturesNumericQuantities(t *testing.T) {
+	existing := deploymentWith("web", "shop", "app", map[string]any{
+		"requests": map[string]any{"cpu": int64(1), "memory": int64(104857600)},
+		"limits":   map[string]any{"cpu": float64(2)},
+	})
+	dyn := dynamicfake.NewSimpleDynamicClient(applyScheme(), existing)
+	a := NewApplier(dyn)
+
+	res, err := a.Handle(context.Background(), map[string]any{
+		"kind": "Deployment", "name": "web", "namespace": "shop",
+		"containers": []any{map[string]any{"container_name": "app", "cpu_request": "500m"}},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	prev, _ := res.(map[string]any)["previous_containers"].([]map[string]any)
+	if len(prev) != 1 {
+		t.Fatalf("want 1 captured container, got %v", res.(map[string]any)["previous_containers"])
+	}
+	if prev[0]["cpu_request"] != "1" {
+		t.Errorf("cpu_request = %v; want \"1\" — a numeric quantity must survive capture", prev[0]["cpu_request"])
+	}
+	if prev[0]["memory_request"] != "104857600" {
+		t.Errorf("memory_request = %v; want \"104857600\"", prev[0]["memory_request"])
+	}
+	if prev[0]["cpu_limit"] != "2" {
+		t.Errorf("cpu_limit = %v; want \"2\"", prev[0]["cpu_limit"])
+	}
+}
