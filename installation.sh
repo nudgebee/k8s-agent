@@ -22,6 +22,7 @@ image_registry=""
 disable_opencost=""
 disable_otel=""
 disable_prometheus_stack=""
+storage_class=""
 
 # Help function
 usage() {
@@ -47,12 +48,16 @@ usage() {
   echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
+  echo "  -C <storage_class>    StorageClass name for every PVC this script creates"
+  echo "                        (ClickHouse, and Prometheus/Loki when installed here)."
+  echo "                        Defaults to the cluster default StorageClass; required"
+  echo "                        when the cluster has none. A name only, not '-'."
   echo "Example:"
-  echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret"
+  echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret -C gp3"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -108,6 +113,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:" opt; do
     g)
       disable_prometheus_stack="$OPTARG"
       ;;
+    C)
+      storage_class="$OPTARG"
+      ;;
     h)
       usage
       ;;
@@ -125,6 +133,20 @@ done
 # Check if an access key is provided
 if [ -z "$auth_key" ]; then
   echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."
+  exit 1
+fi
+
+# `-` is the Bitnami convention for "disable dynamic provisioning, bind a
+# pre-created PV". Only the agent chart understands it: kube-prometheus-stack
+# copies the value straight into the PVC (yielding a StorageClass named "-" that
+# does not exist, so the volume stays Pending forever) and loki-stack renders it
+# unquoted, which is not even valid YAML. Reject it here rather than letting two
+# of the three stacks break in different ways.
+if [ "$storage_class" == "-" ]; then
+  echo "Error: -C takes a StorageClass name; '-' is not supported." >&2
+  echo "       To bind pre-created PVs, install the chart directly with" >&2
+  echo "       --set global.storageClass=- and install the Prometheus/Loki" >&2
+  echo "       stacks yourself." >&2
   exit 1
 fi
 
@@ -188,6 +210,51 @@ if ! command -v helm &> /dev/null; then
     exit 1
 fi
 
+# Storage preflight. Every PVC below is provisioned asynchronously, so a
+# nonexistent StorageClass — or none at all — does not fail the install: the
+# volume sits Pending and the pod never starts, with nothing pointing at the
+# cause. Catch both cases here, before anything is installed. One `name=true`
+# line per class, `true` present when either the GA or the legacy beta
+# default-class annotation is set.
+if storage_class_list=$(kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class}{"\n"}{end}' 2>/dev/null); then
+    storage_class_names=$(printf '%s\n' "$storage_class_list" | cut -d= -f1 | grep -v '^$' || true)
+    default_storage_class=$(printf '%s\n' "$storage_class_list" | grep '=.*true' | head -1 | cut -d= -f1 || true)
+    if [ -n "$storage_class" ]; then
+        if ! printf '%s\n' "$storage_class_names" | grep -Fqx "$storage_class"; then
+            echo "Error: StorageClass '$storage_class' does not exist in this cluster." >&2
+            if [ -n "$storage_class_names" ]; then
+                echo "       Available StorageClasses:" >&2
+                printf '%s\n' "$storage_class_names" | sed 's/^/         /' >&2
+            else
+                echo "       This cluster has no StorageClasses at all." >&2
+            fi
+            exit 1
+        fi
+        echo "Using StorageClass '$storage_class' for the PVCs this script creates."
+    elif [ -n "$default_storage_class" ]; then
+        echo "Using the cluster's default StorageClass '$default_storage_class' for the PVCs this script creates."
+    elif [ "$disable_otel" == "true" ]; then
+        # No ClickHouse PVC in this mode, but Prometheus/Loki may still be installed below.
+        echo "Warning: this cluster has no default StorageClass. If you let this script install"
+        echo "         Prometheus or Loki, their PVCs will stay Pending — re-run with -C <storage_class>."
+    else
+        echo "Error: this cluster has no default StorageClass, so the ClickHouse PVC would stay" >&2
+        echo "       Pending forever. Re-run with -C <storage_class>, or with -t true to" >&2
+        echo "       install without ClickHouse." >&2
+        if [ -n "$storage_class_names" ]; then
+            echo "       StorageClasses in this cluster:" >&2
+            printf '%s\n' "$storage_class_names" | sed 's/^/         /' >&2
+        else
+            echo "       This cluster has no StorageClasses at all." >&2
+        fi
+        exit 1
+    fi
+else
+    # Listing StorageClasses is cluster-scoped and some install credentials cannot
+    # do it. Not a reason to block the install — just say the check was skipped.
+    echo "Warning: could not list StorageClasses (insufficient permissions?), skipping the storage preflight."
+fi
+
 # Check for existing Prometheus (skip if prometheus stack is disabled)
 existingPrometheus=false
 grafana_command=""
@@ -211,6 +278,14 @@ else
         if [ "$install_prometheus" == "yes" ]; then
             helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
             helm repo update
+            # kube-prometheus-stack-values.yaml gives Prometheus a 50Gi
+            # volumeClaimTemplate, so the stack claims a PVC too. --set wins over
+            # -f, so this overrides the class the values file leaves unset (i.e.
+            # the cluster default).
+            prometheus_storage_class_args=()
+            if [ -n "$storage_class" ]; then
+              prometheus_storage_class_args=(--set-string "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=$storage_class")
+            fi
             helm upgrade --install nudgebee-prometheus prometheus-community/kube-prometheus-stack \
                 -n $namespace --create-namespace \
                 --set nodeExporter.enabled=true \
@@ -218,7 +293,8 @@ else
                 --set alertmanager.enabled=true \
                 --set kubeStateMetrics.enabled=true \
                 --set grafana.enabled=true \
-                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml
+                -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml \
+                "${prometheus_storage_class_args[@]}"
             prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
             grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
         else
@@ -343,6 +419,13 @@ if [ "$disable_prometheus_stack" == "true" ]; then
   disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
 fi
 
+# global.storageClass reaches the ClickHouse PVC, the only one the chart creates
+# by default. Left unset, the cluster's default StorageClass applies.
+storage_class_args=()
+if [ -n "$storage_class" ]; then
+  storage_class_args=(--set-string "global.storageClass=$storage_class")
+fi
+
 helm_args+=(
   "${disable_node_agent_args[@]}"
   "${openshift_enable_args[@]}"
@@ -358,6 +441,7 @@ helm_args+=(
   "${disable_opencost_args[@]}"
   "${disable_otel_args[@]}"
   "${disable_prometheus_stack_args[@]}"
+  "${storage_class_args[@]}"
 )
 
 echo "Running command: helm ${helm_args[*]}"
@@ -379,12 +463,17 @@ if [ -z "$loki_url" ]; then
         # Add Helm installation command here or instructions
         helm repo add grafana https://grafana.github.io/helm-charts
         helm repo update
+        loki_storage_class_args=()
+        if [ -n "$storage_class" ]; then
+          loki_storage_class_args=(--set-string "loki.persistence.storageClassName=$storage_class")
+        fi
         helm upgrade --install nudgebee-loki grafana/loki-stack \
             -n "$namespace" --create-namespace \
             --set loki.persistence.enabled=true \
             --set loki.persistence.size=10Gi \
             --set promtail.enabled=true \
-            --set loki.isDefault=false
+            --set loki.isDefault=false \
+            "${loki_storage_class_args[@]}"
         loki_url="http://nudgebee-loki:3100"
     else
         echo "Loki installation not requested. Node Agent will still be installed."
@@ -394,7 +483,13 @@ else
 fi
 
 # Check for ClickHouse PVC requirements
-echo "NudgeBee requires PVCs for ClickHouse. If your environment does not support automatic PVC creation, you will need to create them manually."
+if [ -n "$storage_class" ]; then
+    echo "NudgeBee requires PVCs for ClickHouse. They are provisioned from StorageClass '$storage_class'."
+elif [ -n "$default_storage_class" ]; then
+    echo "NudgeBee requires PVCs for ClickHouse. They are provisioned from the cluster's default StorageClass '$default_storage_class'."
+else
+    echo "NudgeBee requires PVCs for ClickHouse. If your environment does not support automatic PVC creation, create them manually or re-run with -C <storage_class>."
+fi
 
 # Check installation status of each component
 echo "Checking installation status..."

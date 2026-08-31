@@ -1,6 +1,17 @@
 # Global name overrides for all resources
 nameOverride: ""
 fullnameOverride: ""
+# Values Helm propagates to every subchart.
+global:
+  # StorageClass used for the PersistentVolumeClaims this chart creates — today
+  # that is only the ClickHouse data volume. Leave empty to use the cluster's
+  # default StorageClass, set to a name (e.g. "gp3", "managed-csi") on clusters
+  # that have no default, or to "-" to disable dynamic provisioning and bind a
+  # pre-created PV. When set, this wins over `clickhouse.persistence.storageClass`.
+  # Helm propagates this to every subchart, but only subcharts that read it act
+  # on it — the OpenCost one does not, so if you enable its PVC set
+  # `opencost.opencost.exporter.persistence.storageClass` too.
+  storageClass: ""
 enablePrometheusStack: true
 automountServiceAccountToken: true
 globalConfig:
@@ -476,6 +487,10 @@ clickhouse:
   fullnameOverride: ""
   persistence:
     size: 50Gi
+    # StorageClass for the ClickHouse data PVC. Empty = cluster default
+    # StorageClass; "-" disables dynamic provisioning. Only consulted when
+    # `global.storageClass` is empty.
+    storageClass: ""
   replicaCount: 1
   shards: 1
   zookeeper:
