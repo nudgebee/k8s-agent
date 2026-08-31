@@ -291,3 +291,36 @@ func TestApply_DoesNotCaptureContainersItDidNotTouch(t *testing.T) {
 		}
 	}
 }
+
+// A quantity is legal as a bare number in a manifest (`cpu: 1`), which decodes to int64/float64.
+// NestedString reports such a field as absent, and absent means "was unset" to the undo — so a
+// numeric limit was dropped here and then REMOVED by the undo meant to restore it.
+func TestApply_CapturesNumericQuantities(t *testing.T) {
+	existing := deploymentWith("web", "shop", "app", map[string]any{
+		"requests": map[string]any{"cpu": int64(1), "memory": int64(104857600)},
+		"limits":   map[string]any{"cpu": float64(2)},
+	})
+	dyn := dynamicfake.NewSimpleDynamicClient(applyScheme(), existing)
+	a := NewApplier(dyn)
+
+	res, err := a.Handle(context.Background(), map[string]any{
+		"kind": "Deployment", "name": "web", "namespace": "shop",
+		"containers": []any{map[string]any{"container_name": "app", "cpu_request": "500m"}},
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	prev, _ := res.(map[string]any)["previous_containers"].([]map[string]any)
+	if len(prev) != 1 {
+		t.Fatalf("want 1 captured container, got %v", res.(map[string]any)["previous_containers"])
+	}
+	if prev[0]["cpu_request"] != "1" {
+		t.Errorf("cpu_request = %v; want \"1\" — a numeric quantity must survive capture", prev[0]["cpu_request"])
+	}
+	if prev[0]["memory_request"] != "104857600" {
+		t.Errorf("memory_request = %v; want \"104857600\"", prev[0]["memory_request"])
+	}
+	if prev[0]["cpu_limit"] != "2" {
+		t.Errorf("cpu_limit = %v; want \"2\"", prev[0]["cpu_limit"])
+	}
+}

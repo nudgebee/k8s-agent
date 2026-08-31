@@ -160,17 +160,20 @@ func captureContainerResources(obj *unstructured.Unstructured, path []string, ch
 		entry := map[string]any{"container_name": cname}
 		// Absent keys are left absent, not written as "". An empty string means "no limit" to the
 		// apply path, so emitting one would turn an undo into an unintended removal.
-		if v, ok, _ := unstructured.NestedString(c, "resources", "requests", "cpu"); ok {
-			entry["cpu_request"] = v
-		}
-		if v, ok, _ := unstructured.NestedString(c, "resources", "limits", "cpu"); ok {
-			entry["cpu_limit"] = v
-		}
-		if v, ok, _ := unstructured.NestedString(c, "resources", "requests", "memory"); ok {
-			entry["memory_request"] = v
-		}
-		if v, ok, _ := unstructured.NestedString(c, "resources", "limits", "memory"); ok {
-			entry["memory_limit"] = v
+		for key, path := range map[string][]string{
+			"cpu_request":    {"resources", "requests", "cpu"},
+			"cpu_limit":      {"resources", "limits", "cpu"},
+			"memory_request": {"resources", "requests", "memory"},
+			"memory_limit":   {"resources", "limits", "memory"},
+		} {
+			// NestedFieldNoCopy + asString, not NestedString: a quantity is legal as a bare number
+			// in a manifest (`cpu: 1`, `memory: 104857600`), which decodes to int64/float64 and makes
+			// NestedString report the field as absent. Absent means "was unset" to the undo, so a
+			// numeric limit would be silently dropped here and then REMOVED by the undo meant to
+			// restore it. asString is what the apply path already uses on the way in.
+			if v, found, err := unstructured.NestedFieldNoCopy(c, path...); found && err == nil && v != nil {
+				entry[key] = asString(v)
+			}
 		}
 		out = append(out, entry)
 	}
