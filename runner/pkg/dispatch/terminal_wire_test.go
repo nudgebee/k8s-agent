@@ -2,33 +2,29 @@ package dispatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/podshell"
 )
 
-// jsonFieldNames returns the json tag name of every field on a struct type.
-func jsonFieldNames(t reflect.Type) []string {
-	names := make([]string, 0, t.NumField())
+// fieldSignatures describes a struct's fields as "Name type json-tag" strings.
+// Name and type are included alongside the tag because the tag alone is not
+// enough: two fields can share a json tag under different Go names (the
+// adapter's field-by-field copy then fails to compile, or worse, silently
+// copies the wrong one), and a type change on one side would break the copy
+// rather than the wire.
+func fieldSignatures(t reflect.Type) []string {
+	sigs := make([]string, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
-		tag := t.Field(i).Tag.Get("json")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		if comma := len(tag); comma > 0 {
-			for j, r := range tag {
-				if r == ',' {
-					tag = tag[:j]
-					break
-				}
-			}
-		}
-		names = append(names, tag)
+		f := t.Field(i)
+		sigs = append(sigs, fmt.Sprintf("%s %s `json:%q`", f.Name, f.Type, f.Tag.Get("json")))
 	}
-	sort.Strings(names)
-	return names
+	sort.Strings(sigs)
+	return sigs
 }
 
 // TestTerminalRequestMatchesPodshellRequest — TerminalRequest duplicates
@@ -46,11 +42,12 @@ func jsonFieldNames(t reflect.Type) []string {
 // Keep the two shapes identical. If they must legitimately diverge, narrow this
 // assertion deliberately rather than deleting it.
 func TestTerminalRequestMatchesPodshellRequest(t *testing.T) {
-	got := jsonFieldNames(reflect.TypeOf(TerminalRequest{}))
-	want := jsonFieldNames(reflect.TypeOf(podshell.Request{}))
+	got := fieldSignatures(reflect.TypeOf(TerminalRequest{}))
+	want := fieldSignatures(reflect.TypeOf(podshell.Request{}))
 
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("wire shapes have drifted:\n  dispatch.TerminalRequest = %v\n  podshell.Request         = %v\nA field present on one but not the other is dropped in transit.", got, want)
+		t.Errorf("wire shapes have drifted:\n  dispatch.TerminalRequest:\n    %s\n  podshell.Request:\n    %s\nA field present on one but not the other is dropped in transit; a name, type or tag mismatch breaks the copy.",
+			strings.Join(got, "\n    "), strings.Join(want, "\n    "))
 	}
 }
 
