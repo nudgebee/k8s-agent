@@ -75,6 +75,31 @@ jobs:
           print(f'ok: memory_limiter first in {len(pipelines)} pipeline(s)')
           PY
 
+      # global.storageClass / clickhouse.persistence.storageClass work only
+      # because the Bitnami common helper reads them, and the chart tracks
+      # `clickhouse 3.1.*` with a floating patch. Pin the three semantics the
+      # README documents rather than trusting a subchart bump not to change them.
+      - name: Assert the StorageClass values reach the ClickHouse PVC
+        run: |
+          assert() { # <expected-storageClassName-line-or-empty> <helm-args...>
+            expected="$1"; shift
+            if ! rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@")"; then
+              echo "helm template $*: render failed"
+              exit 1
+            fi
+            actual="$(printf '%s\n' "$rendered" | grep 'storageClassName' | tr -d ' ' || true)"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: expected [$expected], got [$actual]"
+              exit 1
+            fi
+          }
+          assert ''                              # default: key omitted, cluster default provisions
+          assert 'storageClassName:ci-global' --set global.storageClass=ci-global
+          assert 'storageClassName:ci-local' --set clickhouse.persistence.storageClass=ci-local
+          assert 'storageClassName:ci-global' --set global.storageClass=ci-global --set clickhouse.persistence.storageClass=ci-local
+          assert 'storageClassName:""' --set global.storageClass=- --set clickhouse.persistence.storageClass=ci-local
+          echo 'ok: storageClass precedence and "-" handling intact'
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
