@@ -105,6 +105,11 @@ func (a *Applier) Handle(ctx context.Context, params map[string]any) (any, error
 		return nil, fmt.Errorf("rightsizing_resource: get %s %s/%s: %w", kind, namespace, name, err)
 	}
 
+	// Capture what the containers hold BEFORE the change, while obj is still the fetched object.
+	// Without this an applied rightsizing cannot be undone: the value we wrote is recorded, the one
+	// we replaced is not, so nothing downstream knows what to put back.
+	previous := captureContainerResources(obj, spec.containerPath, changes)
+
 	if err := applyContainerChanges(obj, spec.containerPath, changes); err != nil {
 		return nil, fmt.Errorf("rightsizing_resource: %s %s/%s: %w", kind, namespace, name, err)
 	}
@@ -120,7 +125,56 @@ func (a *Applier) Handle(ctx context.Context, params map[string]any) (any, error
 		return nil, fmt.Errorf("rightsizing_resource: apply %s %s/%s: %w", kind, namespace, name, err)
 	}
 
-	return map[string]any{"success": true, "response": "Succeeded"}, nil
+	// previous_containers is what an undo re-applies. Same shape as action_params.containers, so
+	// the undo is the same call with this list substituted in.
+	return map[string]any{"success": true, "response": "Succeeded", "previous_containers": previous}, nil
+}
+
+// captureContainerResources reads the current requests/limits of the containers a change targets,
+// in the same shape action_params.containers uses. Only the targeted containers are read: recording
+// the whole pod spec would put an unbounded blob on every rightsizing task response.
+//
+// A container the change names but the workload does not have is skipped rather than recorded as
+// empty — an undo must never write blank resources onto something it did not touch.
+func captureContainerResources(obj *unstructured.Unstructured, path []string, changes []containerChange) []map[string]any {
+	containers, found, err := unstructured.NestedSlice(obj.Object, path...)
+	if !found || err != nil {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(changes))
+	for _, c := range changes {
+		wanted[c.name] = struct{}{}
+	}
+
+	out := make([]map[string]any, 0, len(changes))
+	for _, raw := range containers {
+		c, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		cname, _ := c["name"].(string)
+		if _, targeted := wanted[cname]; !targeted {
+			continue
+		}
+		// Keyed as action_params.containers is, so an undo is this list passed straight back in.
+		entry := map[string]any{"container_name": cname}
+		// Absent keys are left absent, not written as "". An empty string means "no limit" to the
+		// apply path, so emitting one would turn an undo into an unintended removal.
+		if v, ok, _ := unstructured.NestedString(c, "resources", "requests", "cpu"); ok {
+			entry["cpu_request"] = v
+		}
+		if v, ok, _ := unstructured.NestedString(c, "resources", "limits", "cpu"); ok {
+			entry["cpu_limit"] = v
+		}
+		if v, ok, _ := unstructured.NestedString(c, "resources", "requests", "memory"); ok {
+			entry["memory_request"] = v
+		}
+		if v, ok, _ := unstructured.NestedString(c, "resources", "limits", "memory"); ok {
+			entry["memory_limit"] = v
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // parseContainerChanges decodes the action_params.containers list. It rejects a
