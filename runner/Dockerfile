@@ -27,10 +27,16 @@ RUN go build \
 	./cmd/agent
 
 # Pin kubectl to a known-good version. Bump alongside the Kubernetes versions
-# we test against. The binary is amd64; if the agent runs on arm64 nodes, the
-# build pipeline should pull the arm64 variant. Currently we only build amd64
-# images (.github/workflows/build-image.yaml).
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS kubectl
+# we test against. The download follows TARGETARCH so the arch matches the image
+# being built — dl.k8s.io's path segments are literally `amd64` / `arm64`, the
+# same values buildx sets. This used to be hardcoded to amd64 while
+# runner-image.yaml built both arches, so the arm64 image shipped an x86-64
+# kubectl and every kubectl_command_executor action on an arm64 node died with
+# `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
+# Pinned to BUILDPLATFORM: this stage only curls a binary, so there is no reason
+# to run it emulated on the arm64 leg.
+FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS kubectl
+ARG TARGETARCH
 # v1.36.2 (current stable): upstream builds the 1.32 line on Go 1.24.13, whose
 # stale stdlib + x/net account for 33 of the image's 37 fixable Trivy findings
 # (20 HIGH). v1.36.2 is built on Go 1.26.4 — residual is only the industry-wide
@@ -38,8 +44,29 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 # CLI surface used by kubectl_command_executor is stable across these versions.
 ARG KUBECTL_VERSION=v1.36.2
 RUN apk add --no-cache curl ca-certificates && \
-	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
 	chmod +x /usr/local/bin/kubectl
+
+# Assert the downloaded binary's ELF e_machine matches TARGETARCH, so this
+# cannot silently regress to shipping the wrong arch again.
+#
+# Byte 18 of the ELF header is e_machine: 0x3e = x86-64, 0xb7 = aarch64.
+# We check the header rather than running `kubectl version --client` on
+# purpose — both Docker Desktop (Rosetta) and CI (binfmt, registered by
+# setup-qemu-action) will happily execute an amd64 binary inside an arm64
+# container, so an exec-based check passes even when the arch is wrong. That
+# is the same emulation that made this bug so hard to see from the outside.
+RUN set -eu; \
+	case "$TARGETARCH" in \
+		amd64) want=3e ;; \
+		arm64) want=b7 ;; \
+		*) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+	esac; \
+	got="$(od -An -tx1 -j18 -N1 /usr/local/bin/kubectl | tr -d ' \n')"; \
+	if [ "$got" != "$want" ]; then \
+		echo "kubectl ELF e_machine=0x${got}, expected 0x${want} for TARGETARCH=${TARGETARCH}" >&2; \
+		exit 1; \
+	fi
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 WORKDIR /
