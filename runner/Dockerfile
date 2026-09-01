@@ -62,7 +62,7 @@ RUN set -eu; \
 		arm64) want=b7 ;; \
 		*) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
 	esac; \
-	got="$(od -An -tx1 -j18 -N1 /usr/local/bin/kubectl | tr -d ' \n')"; \
+	got="$(hexdump -n 1 -s 18 -e '1/1 "%02x"' /usr/local/bin/kubectl)"; \
 	if [ "$got" != "$want" ]; then \
 		echo "kubectl ELF e_machine=0x${got}, expected 0x${want} for TARGETARCH=${TARGETARCH}" >&2; \
 		exit 1; \
