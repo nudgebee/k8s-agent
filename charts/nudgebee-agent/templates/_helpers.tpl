@@ -73,7 +73,7 @@ Derived rather than hardcoded so it cannot drift from resources.limits.memory:
 raising the limit raises the headroom automatically. Emits nothing when no
 memory limit is set (unbounded cgroup — a soft limit would be arbitrary).
 
-Ratio is runner.goMemLimitRatio (default 0.8); the remaining 20% covers non-heap
+Ratio is runner.goMemLimitRatio (default 0.9); the remaining 10% covers non-heap
 RSS (goroutine stacks, runtime metadata, mmap'd binary). Set runner.goMemLimit to
 override with an explicit value and skip the derivation entirely.
 */}}
@@ -94,7 +94,7 @@ override with an explicit value and skip the derivation entirely.
 {{- else if hasSuffix "G" $lim -}}{{- $mult = 1000000000.0 -}}
 {{- else if hasSuffix "T" $lim -}}{{- $mult = 1000000000000.0 -}}
 {{- end -}}
-{{- $ratio := .Values.runner.goMemLimitRatio | default 0.8 -}}
+{{- $ratio := .Values.runner.goMemLimitRatio | default 0.9 -}}
 {{- printf "%d" (int64 (mulf (float64 $num) $mult $ratio)) -}}
 {{- end -}}
 {{- end -}}
