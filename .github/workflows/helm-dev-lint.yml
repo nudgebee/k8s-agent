@@ -75,6 +75,60 @@ jobs:
           print(f'ok: memory_limiter first in {len(pipelines)} pipeline(s)')
           PY
 
+      # Guards a values/template desync: prometheus-alert-rule.yaml compiles the
+      # rules' exclusion matchers from alertmanager.defaultRuleExclusions, and
+      # emits NO matcher when the lists are empty. #553 moved the previously
+      # hardcoded lists into values and left the key undefined, so every 0.1.x
+      # rendered rules that alerted on every container in the cluster --
+      # including the agent's own -- and helm lint/template/kubeconform all
+      # passed. This asserts behaviour, not just presence, so a future edit that
+      # loosens a boundary (e.g. "otel" starting to swallow "hotel-service")
+      # fails here too.
+      - name: Assert default alert rules carry their exclusion matchers
+        run: |
+          python - <<'PY'
+          import re, sys, yaml
+
+          docs = [d for d in yaml.safe_load_all(open('/tmp/rendered.yaml')) if d]
+          rules = {
+              r['alert']: r['expr']
+              for d in docs if d.get('kind') == 'PrometheusRule'
+              for g in d['spec']['groups'] for r in g.get('rules', [])
+              if 'alert' in r
+          }
+          for alert in ('HighErrorCriticalLogs', 'ApplicationAPIFailures'):
+              if alert not in rules:
+                  sys.exit(f'{alert} missing from rendered output')
+
+          log_excl = re.findall(r'container_id!~"([^"]*)"', rules['HighErrorCriticalLogs'])
+          api_excl = re.findall(r'destination_workload_namespace!~"([^"]*)"', rules['ApplicationAPIFailures'])
+          if not log_excl:
+              sys.exit('HighErrorCriticalLogs renders with no container_id exclusion')
+          if not api_excl:
+              sys.exit('ApplicationAPIFailures renders with no namespace exclusion')
+
+          # PromQL =~/!~ are fully anchored, so fullmatch mirrors the evaluator.
+          def excluded(cid):
+              return any(re.fullmatch(p, cid) for p in set(log_excl))
+
+          cases = [
+              ('/k8s/nudgebee-agent/runner-1/runner', True),
+              ('/k8s/nudgebee-agent-dev/nb-node-agent-x/node-agent', True),  # -suffix variant
+              ('/k8s/kube-system/calico-node-x/calico-node', True),
+              ('/k8s/loki/loki-0/loki', True),
+              ('/k8s/otel/otel-collector-1/collector', True),
+              ('/system.slice/containerd.service', True),
+              ('/k8s-cronjob/kube-system/job-x/job', True),
+              ('/k8s/nudgebee/services-server-abc/services-server', False),
+              ('/k8s/demo/hotel-service-1/hotel-service', False),  # "otel" must not match
+          ]
+          bad = [(c, w) for c, w in cases if excluded(c) != w]
+          if bad:
+              sys.exit('exclusion regex misclassified:\n' + '\n'.join(
+                  f'  {c} -- expected excluded={w}, got {not w}' for c, w in bad))
+          print(f'ok: {len(cases)} exclusion cases classified correctly')
+          PY
+
       # global.storageClass / clickhouse.persistence.storageClass work only
       # because the Bitnami common helper reads them, and the chart tracks
       # `clickhouse 3.1.*` with a floating patch. Pin the three semantics the

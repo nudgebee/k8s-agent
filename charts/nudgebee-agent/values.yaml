@@ -618,6 +618,49 @@ alertmanager:
   # To test the intake alone, port-forward the runner Service and POST an
   # Alertmanager v4 payload to /api/alerts; it answers 202 once it reads the
   # body and forwards asynchronously, so check the runner logs alongside it.
+  # Baseline exclusions for the default alert rules. Platform components that
+  # log at error level as a matter of course, or serve 4xx/5xx by design, would
+  # otherwise dominate both rules — these are the terms every install wants.
+  # Override to replace the defaults wholesale; to keep them and add your own,
+  # use extra_rule_exclusions below.
+  #
+  # MUST stay non-empty. The template compiles these into the rules' PromQL
+  # matchers and, when both lists are empty, emits NO matcher at all — the rules
+  # then alert on every container in the cluster, including this agent's own.
+  # .github/workflows/helm-dev-lint.yml asserts the rendered rules carry them.
+  #
+  #   namespaces  applies to BOTH rules. On the log rule it matches the
+  #               /k8s/<namespace>/ segment of container_id; on the HTTP rule it
+  #               matches destination_workload_namespace. A "-<suffix>" variant
+  #               is matched too, so "nudgebee-agent" also covers
+  #               "nudgebee-agent-dev" and "nudgebee-agent-prod".
+  #   containers  applies to the LOG rule only, matched as a component name
+  #               anywhere in container_id — which covers the namespace segment
+  #               as well, so log-shipping stacks are excluded wherever they
+  #               run. Kept off the HTTP rule so a genuinely failing collector
+  #               endpoint still alerts.
+  defaultRuleExclusions:
+    namespaces:
+      - prometheus
+      - grafana
+      - kube-system
+      - nudgebee-agent
+      - keda
+      - karpenter
+      - actions-runner-system-1
+    containers:
+      - containerd
+      - kubelet
+      - fluent-bit
+      - fluentd
+      - promtail
+      - logstash
+      - loki
+      - opensearch
+      - elasticsearch
+      - otel
+      - datadog
+      - newrelic
   # Extra alternation terms appended to the container-id exclusion regex of the
   # default alert rules (both the log-error and HTTP-failure rules). Terms match
   # as substrings of container_id (/k8s/<namespace>/<pod>/<container>), so a
