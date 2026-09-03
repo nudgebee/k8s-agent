@@ -255,3 +255,61 @@ func TestToken_AbsentWhenUnset(t *testing.T) {
 		t.Errorf("unexpected Authorization = %q", auth)
 	}
 }
+
+// TestMetrics_AppliesLegacyDefaults: a caller that sends only `services` must
+// still get the window params legacy get_metrics filled in — lookback, step,
+// ratePer, endTs, groupByOperation and spanKind.
+func TestMetrics_AppliesLegacyDefaults(t *testing.T) {
+	var q string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/metrics/calls" {
+			q = r.URL.RawQuery
+		}
+		_, _ = w.Write([]byte(`{}`))
+	})
+	defer srv.Close()
+
+	if _, err := c.Metrics(context.Background(), map[string]any{"services": "frontend"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"lookback=3600000",
+		"step=3600000",
+		"ratePer=3600000",
+		"groupByOperation=true",
+		"spanKind=server",
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q missing default %q", q, want)
+		}
+	}
+	if !strings.Contains(q, "endTs=") {
+		t.Errorf("query %q missing endTs default", q)
+	}
+}
+
+// TestMetrics_CallerParamsWinOverDefaults: explicit values are not clobbered.
+func TestMetrics_CallerParamsWinOverDefaults(t *testing.T) {
+	var q string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/metrics/calls" {
+			q = r.URL.RawQuery
+		}
+		_, _ = w.Write([]byte(`{}`))
+	})
+	defer srv.Close()
+
+	if _, err := c.Metrics(context.Background(), map[string]any{
+		"services":  "frontend",
+		"lookback":  60000,
+		"spanKinds": "SPAN_KIND_CLIENT",
+		"endTs":     1700000000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"lookback=60000", "step=60000", "ratePer=60000", "spanKind=SPAN_KIND_CLIENT", "endTs=1700000000"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q missing caller value %q", q, want)
+		}
+	}
+}

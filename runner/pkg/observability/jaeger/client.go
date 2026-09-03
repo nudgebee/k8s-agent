@@ -110,8 +110,14 @@ func (c *Client) Metrics(ctx context.Context, params map[string]any) (json.RawMe
 // metricsQuery builds the shared SPM query params, remapping the composer's
 // plural `services`/`spanKinds` to Jaeger's singular `service`/`spanKind` and
 // dropping any legacy `metric_type` (the fan-out covers all four metrics).
+//
+// Any window param the composer omits is defaulted exactly as the legacy
+// get_metrics did — it filled lookback/endTs/step/ratePer/groupByOperation/
+// spanKinds before calling Jaeger, so a caller that sends only `services`
+// still gets a well-formed query rather than whatever Jaeger does with a
+// missing window.
 func metricsQuery(params map[string]any) url.Values {
-	remapped := make(map[string]any, len(params))
+	remapped := make(map[string]any, len(params)+5)
 	for k, v := range params {
 		switch k {
 		case "services", "service":
@@ -124,8 +130,28 @@ func metricsQuery(params map[string]any) url.Values {
 			remapped[k] = v
 		}
 	}
+	// lookback drives three other defaults, so resolve it first.
+	lookback, ok := remapped["lookback"]
+	if !ok {
+		lookback = defaultLookbackMillis
+		remapped["lookback"] = lookback
+	}
+	for k, v := range map[string]any{
+		"step":             lookback,
+		"ratePer":          lookback,
+		"endTs":            time.Now().UnixMilli(),
+		"groupByOperation": true,
+		"spanKind":         "server",
+	} {
+		if _, ok := remapped[k]; !ok {
+			remapped[k] = v
+		}
+	}
 	return paramsToQuery(remapped)
 }
+
+// defaultLookbackMillis is the legacy get_metrics default window (1h in ms).
+const defaultLookbackMillis = 3600000
 
 func cloneValues(v url.Values) url.Values {
 	out := make(url.Values, len(v))
@@ -156,6 +182,10 @@ func paramsToQuery(params map[string]any) url.Values {
 		case float64:
 			v.Set(k, fmt.Sprintf("%g", x))
 		case int:
+			v.Set(k, fmt.Sprintf("%d", x))
+		case int64:
+			// Millisecond timestamps arrive as int64 (time.UnixMilli); without
+			// this case they were silently dropped from the query.
 			v.Set(k, fmt.Sprintf("%d", x))
 		case bool:
 			v.Set(k, fmt.Sprintf("%t", x))
