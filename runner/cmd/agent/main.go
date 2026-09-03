@@ -1489,10 +1489,6 @@ func httpProbeErr(ctx context.Context, c *http.Client, url string, headers ...ma
 	return nil
 }
 
-// esHTTPClient returns the HTTP client the ES query client uses. When
-// sslVerify is false (the legacy default), it disables TLS certificate
-// verification to match the legacy client's verify_certs=False. For plain
-// http URLs the TLS config is inert.
 // promHeadersWithAuth parses PROMETHEUS_HEADERS and, when PROMETHEUS_AUTH is
 // set, overlays it as the Authorization header (legacy prometheus_auth). Set,
 // not Add, so PROMETHEUS_AUTH takes precedence over any Authorization carried
@@ -1505,6 +1501,10 @@ func promHeadersWithAuth(cfg *config.Config) http.Header {
 	return h
 }
 
+// esHTTPClient returns the HTTP client the ES query client uses. When
+// sslVerify is false (the legacy default), it disables TLS certificate
+// verification to match the legacy client's verify_certs=False. For plain
+// http URLs the TLS config is inert.
 func esHTTPClient(sslVerify bool) *http.Client {
 	if sslVerify {
 		return nil // nil → elasticsearch.New builds a default verifying client

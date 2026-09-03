@@ -24,6 +24,12 @@ type prometheusFlagsResponse struct {
 // 404s it) or none of those keys are present, it falls back to the caller-
 // supplied value (PROMETHEUS_RETENTION_TIME). Empty string when nothing
 // resolves.
+//
+// This deliberately extends the legacy get_prometheus_flags, which applies
+// PROMETHEUS_RETENTION_TIME only when the flags call returns nothing at all —
+// if the call succeeds but carries neither retention key, legacy reports "".
+// Falling back in that case too means an operator who sets the env var always
+// sees it honored, which is the only reason to set it.
 func PrometheusRetention(ctx context.Context, c *prometheus.Client, fallback string, logger *slog.Logger) string {
 	if c == nil || c.BaseURL == "" {
 		return fallback
