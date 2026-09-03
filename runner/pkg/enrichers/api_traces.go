@@ -3,6 +3,7 @@ package enrichers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -58,8 +59,15 @@ func buildTracesPayload(ctx context.Context, ch *clickhouse.Client, params map[s
 		// ClickHouse isn't configured on this agent. Return an empty—but
 		// successful—traces payload (no `error` key) so the backend traces
 		// parser renders "no traces" instead of surfacing a hard error to
-		// the user. Matches the legacy nudgebee_actions.get_application_traces,
-		// which returns an empty result when the trace store is absent.
+		// the user. This matches the legacy path: clickhouse.db.run_query
+		// short-circuits to [] when CLICKHOUSE_ENABLED is false, and the
+		// caller turns that into an error-free empty QueryResult.
+		//
+		// Logged because the empty payload is otherwise indistinguishable
+		// from a working agent that genuinely has no traces — without this
+		// line a misconfigured CLICKHOUSE_HOST looks like normal operation.
+		slog.Warn("api_traces_enricher: clickhouse not configured; returning empty traces",
+			"action", "api_traces_enricher_v2")
 		return out
 	}
 
