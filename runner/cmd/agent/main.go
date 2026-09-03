@@ -932,7 +932,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			jaegerQueryURL = cfg.JaegerURL // fall back to JAEGER_URL the agent uses for the jaeger handlers
 		}
 		chronosphereEnabled := os.Getenv("CHRONOSPHERE_TRACES_ENABLED") == "true"
-		chronosphereURL := os.Getenv("CHRONOSPHERE_TRACES_URL")
+		// Same value the chronosphere client is configured from above — read it
+		// from cfg rather than os.Getenv so the query path and the telemetry
+		// report can never disagree about the traces URL.
+		chronosphereURL := cfg.ChronosphereTracesURL
 		traceTable := os.Getenv("TRACE_TABLE")
 		// ClickHouse status for the otel_clickhouse trace provider. Mirrors
 		// the legacy _check_clickhouse → db.health() probe: the Helm chart
