@@ -290,3 +290,40 @@ func TestNew_FailsCleanlyWithoutCreds(t *testing.T) {
 		t.Errorf("error %q does not look like ADC failure", err.Error())
 	}
 }
+
+// TestGkeTraces_LocationOnlyWhenExplicit: the handler must forward `location`
+// verbatim and must NOT synthesize one from `zone` — a compute zone is not a
+// valid BigQuery location, and a wrong value fails the job outright.
+func TestGkeTraces_LocationOnlyWhenExplicit(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		_, _ = w.Write([]byte(`{"schema":{"fields":[]},"rows":[]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient()
+	c.BigQueryBaseURL = srv.URL
+	h := Handlers(c, "proj")["gke_traces"]
+
+	// zone present, location absent → no location in the job body.
+	if _, err := h(context.Background(), map[string]any{
+		"query": "SELECT 1", "zone": "us-central1-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, `"location"`) {
+		t.Errorf("zone must not be turned into a BigQuery location: %s", body)
+	}
+
+	// explicit location → forwarded as-is.
+	if _, err := h(context.Background(), map[string]any{
+		"query": "SELECT 1", "zone": "us-central1-a", "location": "US",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `"location":"US"`) {
+		t.Errorf("explicit location not forwarded: %s", body)
+	}
+}

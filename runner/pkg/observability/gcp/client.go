@@ -146,9 +146,11 @@ func hasLogEntries(raw json.RawMessage) bool {
 // QueryBigQuery runs an arbitrary SQL query as a synchronous query job and
 // reshapes the BigQuery REST response into the {data, columns, column_types}
 // envelope the backend warehouse consumer expects (mirroring the legacy
-// run_bigquery). location, when non-empty, scopes the job to the dataset's
-// region (required for non-US/EU datasets). Does not perform server-side
-// pagination.
+// run_bigquery). location, when non-empty, pins the job to a BigQuery
+// location — a multi-region ("US", "EU") or a region ("us-central1"). Leave it
+// empty unless the caller knows the dataset's location: BigQuery then resolves
+// it from the referenced dataset, whereas a wrong value fails the job. It is
+// never a compute zone. Does not perform server-side pagination.
 func (c *Client) QueryBigQuery(ctx context.Context, projectID, query, location string) (json.RawMessage, error) {
 	if projectID == "" {
 		return nil, errors.New("gcp: project_id required")

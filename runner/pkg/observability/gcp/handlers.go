@@ -25,14 +25,14 @@ func Handlers(c *Client, defaultProjectID string) map[string]dispatch.Handler {
 		},
 		"gke_traces": func(ctx context.Context, p map[string]any) (any, error) {
 			project := strOrDefault(p, "project_id", defaultProjectID)
-			// Dataset location: explicit `location`, else derive from `zone`.
-			location := str(p, "location")
-			if location == "" {
-				if z := str(p, "zone"); z != "" {
-					location = zoneToRegion(z)
-				}
-			}
-			raw, err := c.QueryBigQuery(ctx, project, str(p, "query"), location)
+			// Only an explicit `location` is forwarded. It is deliberately NOT
+			// derived from `zone`: BigQuery locations are multi-regions ("US",
+			// "EU") or regions ("us-central1"), and a job pinned to the wrong
+			// one fails outright, whereas omitting it lets BigQuery resolve the
+			// location from the dataset the query references. The legacy
+			// run_bigquery passed the raw compute zone here, which is not a
+			// valid BigQuery location at all.
+			raw, err := c.QueryBigQuery(ctx, project, str(p, "query"), str(p, "location"))
 			if err != nil {
 				return nil, err
 			}
