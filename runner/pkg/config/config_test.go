@@ -196,3 +196,53 @@ func TestParseHeaders(t *testing.T) {
 		})
 	}
 }
+
+// TestFromEnv_ElasticsearchHeaderAlias: ELASTICSEARCH_HEADER is the legacy
+// agent's name; ELASTICSEARCH_HEADERS is what the chart's runner.es.headers
+// emits. Both must work, with the legacy name winning when both are set.
+func TestFromEnv_ElasticsearchHeaderAlias(t *testing.T) {
+	base := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+		t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	}
+
+	t.Run("legacy_singular", func(t *testing.T) {
+		base(t)
+		t.Setenv("ELASTICSEARCH_HEADER", "X-API-TOKEN: a")
+		t.Setenv("ELASTICSEARCH_HEADERS", "")
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.ElasticsearchHeaders != "X-API-TOKEN: a" {
+			t.Errorf("got %q", c.ElasticsearchHeaders)
+		}
+	})
+
+	t.Run("chart_plural_alias", func(t *testing.T) {
+		base(t)
+		t.Setenv("ELASTICSEARCH_HEADER", "")
+		t.Setenv("ELASTICSEARCH_HEADERS", "X-API-TOKEN: b")
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.ElasticsearchHeaders != "X-API-TOKEN: b" {
+			t.Errorf("got %q", c.ElasticsearchHeaders)
+		}
+	})
+
+	t.Run("singular_wins", func(t *testing.T) {
+		base(t)
+		t.Setenv("ELASTICSEARCH_HEADER", "X-API-TOKEN: a")
+		t.Setenv("ELASTICSEARCH_HEADERS", "X-API-TOKEN: b")
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.ElasticsearchHeaders != "X-API-TOKEN: a" {
+			t.Errorf("got %q", c.ElasticsearchHeaders)
+		}
+	})
+}

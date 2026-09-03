@@ -54,10 +54,14 @@ type Config struct {
 	ElasticsearchUser     string
 	ElasticsearchPassword string
 	ElasticsearchAPIKey   string
-	// ELASTICSEARCH_HEADERS; comma-separated "Key: Value" pairs, same form as
-	// PROMETHEUS_HEADERS / LOKI_EXTRA_HEADER. Needed by OpenSearch-compatible
-	// services that authenticate on a custom header rather than ApiKey or
-	// basic auth — Logz.io wants X-API-TOKEN, for instance.
+	// ";"-separated "Key: Value" pairs, same form as PROMETHEUS_HEADERS /
+	// LOKI_EXTRA_HEADER. Needed by OpenSearch-compatible services that
+	// authenticate on a custom header rather than ApiKey or basic auth —
+	// Logz.io wants X-API-TOKEN, for instance.
+	//
+	// Read from ELASTICSEARCH_HEADER (the legacy agent's name, and what
+	// es_client.py splits on ";") with ELASTICSEARCH_HEADERS accepted as an
+	// alias, since this chart's `es.headers` shipped the plural spelling.
 	ElasticsearchHeaders   string
 	ElasticsearchEnabled   bool // ELASTICSEARCH_ENABLED; default true when URL is set
 	ElasticsearchSSLVerify bool // ELASTICSEARCH_SSL_VERIFY; default false (skip cert verify) to match legacy
@@ -236,7 +240,8 @@ func FromEnv() (*Config, error) {
 		ElasticsearchUser:        os.Getenv("ELASTICSEARCH_USERNAME"),
 		ElasticsearchPassword:    os.Getenv("ELASTICSEARCH_PASSWORD"),
 		ElasticsearchAPIKey:      os.Getenv("ELASTICSEARCH_APIKEY"),
-		ElasticsearchHeaders:     os.Getenv("ELASTICSEARCH_HEADERS"),
+		// Legacy agent name first, chart's plural spelling as the alias.
+		ElasticsearchHeaders: cmp(os.Getenv("ELASTICSEARCH_HEADER"), os.Getenv("ELASTICSEARCH_HEADERS")),
 		// ELASTICSEARCH_ENABLED is the explicit opt-in for ES as the logs
 		// provider, defaulting false to match the legacy agent
 		// (env_vars.ELASTICSEARCH_ENABLED = load_bool(..., False)) and the prod
