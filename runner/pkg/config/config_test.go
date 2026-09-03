@@ -186,10 +186,29 @@ func TestParseHeaders(t *testing.T) {
 		{"skips_invalid", "no-colon-here; X-Y: ok", http.Header{"X-Y": []string{"ok"}}},
 		{"value_can_contain_colons", "Authorization: Bearer x:y:z",
 			http.Header{"Authorization": []string{"Bearer x:y:z"}}},
-		// A comma inside a value must survive — we split on ";" only, so a
-		// multi-value header (e.g. Accept) is not truncated at the comma.
+		// A comma inside a value must survive: the comma-separated pieces do
+		// not all look like "Header: value" pairs, so this stays one header.
 		{"value_can_contain_comma", "Accept: text/html, application/json",
 			http.Header{"Accept": []string{"text/html, application/json"}}},
+		// Back-compat: this runner shipped comma-splitting first, so an
+		// existing multi-header config written with "," keeps working.
+		{
+			"legacy_comma_multi_header",
+			"X-Scope-OrgID: tenant-1, Authorization: Bearer abc",
+			http.Header{
+				"X-Scope-Orgid": []string{"tenant-1"},
+				"Authorization": []string{"Bearer abc"},
+			},
+		},
+		// ";" wins whenever present, even if a value also contains a comma.
+		{
+			"semicolon_wins_over_comma",
+			"Accept: text/html, application/json; X-A: 1",
+			http.Header{
+				"Accept": []string{"text/html, application/json"},
+				"X-A":    []string{"1"},
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

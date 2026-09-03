@@ -45,7 +45,7 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | Variable | Required | Description |
 |---|---|---|
 | `PROMETHEUS_URL` | recommended | Enables `prometheus_*` actions and `service_map` |
-| `PROMETHEUS_HEADERS` | optional | Semicolon-separated `Header: value` pairs (e.g. `X-Scope-OrgID: tenant-1`); use for static basic/bearer auth |
+| `PROMETHEUS_HEADERS` | optional | Semicolon-separated `Header: value` pairs (e.g. `X-Scope-OrgID: tenant-1`); use for static basic/bearer auth. See [header separator](#header-separator) |
 | `AWS_ACCESS_KEY` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | optional | Managed Prometheus: sign requests with AWS SigV4. `AWS_SERVICE_NAME` defaults to `aps` |
 | `CORALOGIX_PROMETHEUS_TOKEN` | optional | Managed Prometheus: sent as `token` header |
 | `AZURE_USE_MANAGED_ID` / `AZURE_CLIENT_SECRET` (+ `AZURE_CLIENT_ID` / `AZURE_TENANT_ID`) | optional | Managed Prometheus: Azure AD Bearer token (managed identity or client-secret). Precedence: AWS → Coralogix → Azure |
@@ -71,6 +71,20 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | `ALERTMANAGER_HEADERS` | Semicolon-separated headers for AlertManager |
 | `LOKI_RULES_URL` | Loki ruler component URL — enables `create_loki_alert_rule`, etc. |
 | `LOKI_RULES_HEADERS` | Semicolon-separated headers for Loki rules API |
+
+### Header separator
+
+Every `*_HEADERS` / `*_EXTRA_HEADER` variable takes `Header: value` pairs separated by `;`,
+matching the legacy agent:
+
+```
+PROMETHEUS_HEADERS=X-Scope-OrgID: tenant-1; Authorization: Bearer abc
+```
+
+`,` is still accepted when the value contains no `;` and every comma-separated piece is itself a
+`Header: value` pair — earlier releases of this runner split on `,`, so existing configs keep
+working. Prefer `;`: it is the only separator that lets a value contain a comma, e.g.
+`Accept: text/html, application/json` parses as one header.
 
 ## Authentication
 
