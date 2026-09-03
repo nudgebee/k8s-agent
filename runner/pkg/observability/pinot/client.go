@@ -59,14 +59,22 @@ func (c *Client) Query(ctx context.Context, sql string) (json.RawMessage, error)
 	if err != nil {
 		return nil, err
 	}
+	triedFallback := false
 	if status == http.StatusNotFound {
 		// PINOT_URL points at the controller — retry the controller path.
+		triedFallback = true
 		raw, status, err = c.doRaw(ctx, http.MethodPost, "/sql", body, "application/json")
 		if err != nil {
 			return nil, err
 		}
 	}
 	if status >= 400 {
+		// Name both paths when the fallback also failed, so a 404 caused by a
+		// missing table is not mistaken for a misconfigured PINOT_URL.
+		if triedFallback {
+			return nil, fmt.Errorf("pinot query: HTTP %d on both /query/sql (broker) and /sql (controller): %s",
+				status, string(raw))
+		}
 		return nil, fmt.Errorf("pinot query: HTTP %d: %s", status, string(raw))
 	}
 	return raw, nil
