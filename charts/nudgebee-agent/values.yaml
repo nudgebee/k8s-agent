@@ -19,7 +19,7 @@ globalConfig:
   # Prometheus URL the runner queries (e.g. "http://prometheus-server.prometheus.svc:80").
   # Surfaces as PROMETHEUS_URL on the runner pod. Leave empty to let the agent auto-discover.
   prometheus_url: ""
-  # Optional headers (comma-separated "Header: value" pairs). Surfaces as PROMETHEUS_HEADERS.
+  # Optional headers (semicolon-separated "Header: value" pairs, e.g. "X-Scope-OrgID: t1; Authorization: Bearer x"). Surfaces as PROMETHEUS_HEADERS.
   prometheus_headers: ""
   # Optional labels appended to every PromQL query (legacy multi-cluster parity).
   # A YAML map, e.g. {k8s_cluster: aws-prod}. Surfaces as PROMETHEUS_ADDITIONAL_LABELS
@@ -76,7 +76,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-08-31T11-32-34_53f9de616cdcf571a975f6e262781adc48a2a94c
+    tag: 2026-09-01T10-10-56_289d9134e14a00421576ab793c7e8acd41e7eef6
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -224,7 +224,7 @@ runner:
     enabled: false
     url: ""
     apiKey: ""
-    # Extra request headers, comma-separated "Key: Value" pairs (same form as
+    # Extra request headers, semicolon-separated "Key: Value" pairs (same form as
     # globalConfig.prometheus_headers). For OpenSearch-compatible services that
     # authenticate on a custom header instead of ApiKey or basic auth — Logz.io
     # uses X-API-TOKEN. Surfaces as ELASTICSEARCH_HEADERS.

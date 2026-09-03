@@ -54,7 +54,7 @@ type Config struct {
 	ElasticsearchUser     string
 	ElasticsearchPassword string
 	ElasticsearchAPIKey   string
-	// ELASTICSEARCH_HEADERS; comma-separated "Key: Value" pairs, same form as
+	// ELASTICSEARCH_HEADERS; ";"-separated "Key: Value" pairs, same form as
 	// PROMETHEUS_HEADERS / LOKI_EXTRA_HEADER. Needed by OpenSearch-compatible
 	// services that authenticate on a custom header rather than ApiKey or
 	// basic auth — Logz.io wants X-API-TOKEN, for instance.
@@ -392,16 +392,31 @@ func ParseTargets(s string) map[string]string {
 	return out
 }
 
-// ParseHeaders splits a comma-separated "Header: value" string into an
-// http.Header. Returns an empty Header for empty input. Same shape used
-// by the GRAFANA_EXTRA_HEADER / LOKI_EXTRA_HEADER pattern (a single
-// "Header: value" or comma-separated list).
+// ParseHeaders splits a "Header: value" list into an http.Header. Returns an
+// empty Header for empty input. Same shape used by the GRAFANA_EXTRA_HEADER /
+// LOKI_EXTRA_HEADER / PROMETHEUS_HEADERS / ELASTICSEARCH_HEADER pattern.
+//
+// ";" is the canonical separator: the legacy Python agent splits every one of
+// these vars on ";" (prometheus/utils.go, loki_client, grafana_client,
+// es_client, silence_utils), so a header *value* may itself contain a comma
+// (e.g. a multi-value Accept header) without being truncated.
+//
+// "," is still accepted as a fallback when the input contains no ";", because
+// this runner shipped comma-splitting from its first release and live
+// deployments were configured against that. Such configs keep working; they
+// just cannot express a comma inside a value. New config should use ";".
+// HeadersUseLegacyCommaSplit reports whether a given value took that path, so
+// callers can log a deprecation notice.
 func ParseHeaders(s string) http.Header {
 	h := http.Header{}
 	if s == "" {
 		return h
 	}
-	for _, part := range strings.Split(s, ",") {
+	sep := ";"
+	if HeadersUseLegacyCommaSplit(s) {
+		sep = ","
+	}
+	for _, part := range strings.Split(s, sep) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -417,4 +432,30 @@ func ParseHeaders(s string) http.Header {
 		}
 	}
 	return h
+}
+
+// HeadersUseLegacyCommaSplit reports whether s must be split on "," rather
+// than the canonical ";" — i.e. it carries no ";" and *every* comma-separated
+// piece independently looks like a "Header: value" pair.
+//
+// That last condition is what keeps a comma inside a single header's value
+// safe: "Accept: text/html, application/json" splits into a piece with no
+// colon, so it is treated as one header whose value contains a comma (the
+// legacy behavior) instead of being truncated at the comma. Meanwhile a
+// genuine multi-header config written the old way, "X-A: 1, X-B: 2", still
+// parses as two headers.
+func HeadersUseLegacyCommaSplit(s string) bool {
+	if strings.Contains(s, ";") || !strings.Contains(s, ",") {
+		return false
+	}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if i := strings.IndexByte(part, ':'); i <= 0 {
+			return false
+		}
+	}
+	return true
 }
