@@ -88,7 +88,7 @@ func (c *AlertRulesCollector) Collect(ctx context.Context) error {
 
 	// Prometheus /api/v1/rules — best-effort. VictoriaMetrics' vmsingle
 	// returns 404; we silently fall back to CRD-only mode.
-	if c.Prom != nil && c.Prom.BaseURL != "" {
+	if c.Prom != nil && c.Prom.URL() != "" {
 		raw, err := c.Prom.Rules(ctx)
 		if err == nil && len(raw) > 0 {
 			parsed, ok := unwrapPromRules(raw)
