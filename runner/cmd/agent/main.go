@@ -780,7 +780,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			cfg.PrometheusURL, config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			promClient.URL(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
+		// Read the URL per request rather than pinning the one we had at
+		// startup, so the /prometheus-v2/* route works on a Prometheus that
+		// only shows up later.
+		gp.PrometheusURLFn = promClient.URL
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
 			logger.Info("grafana proxy enabled", "url", grafanaURL)
@@ -1027,7 +1031,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
-					PrometheusURL:              cfg.PrometheusURL,
+					PrometheusURL:              promClient.URL(),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
 					OpencostURL:                opencostURL,
