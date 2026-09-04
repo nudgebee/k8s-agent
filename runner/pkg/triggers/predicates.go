@@ -173,9 +173,11 @@ func markdownBlock(text string) EvidenceBlock {
 
 // ------- Pod OOMKilled -------
 
-// podOOMKilledMatcher implements PodOomKilledTrigger: fires when any
-// container's lastState.terminated.reason == "OOMKilled". Fires whenever
-// any container's lastState.terminated.reason == OOMKilled.
+// podOOMKilledMatcher implements PodOomKilledTrigger: fires when a
+// container's *most recent* termination was OOMKilled — state.terminated
+// when the container is still down, lastState.terminated once it has
+// restarted. An OOM in lastState that a later non-OOM termination has
+// superseded does not fire (see containerOOMTermination).
 // Same kubewatch oldObj/obj pointer-aliasing problem as pod_crash_loop —
 // the previous transition gate (`prev[name] != obj[name]`) never tripped
 // because oldObj is the same snapshot as obj. We rely on the 1h rate
@@ -195,9 +197,9 @@ func podOOMKilledMatcher() MatcherSpec {
 			// (lastState.terminated) OOMKilled. A restartPolicy:Never pod or
 			// a Job OOMs once and records it in state.terminated with an empty
 			// lastState — checking only lastState missed those entirely.
-			// mostRecentOOMKilledContainerStatus already prefers state over
-			// lastState (the same logic the enricher uses), so this keeps the
-			// fire predicate and the enrichment consistent.
+			// mostRecentOOMKilledContainerStatus applies the same
+			// most-recent-termination rule the enricher uses, so the fire
+			// predicate and the enrichment stay consistent.
 			return mostRecentOOMKilledContainerStatus(obj) != nil
 		},
 		FingerprintFn: func(obj map[string]any) string {
@@ -206,11 +208,16 @@ func podOOMKilledMatcher() MatcherSpec {
 			if owner.Name != "" {
 				name = owner.Name
 			}
-			// Hour bucket pairs with the 1h rate limit. After the limit
-			// expires, the bucket has rolled too — so the next OOM
-			// produces a fresh fingerprint and a fresh Finding.
-			hourBucket := time.Now().UTC().Truncate(time.Hour).Unix()
-			return fp("pod_oom_killer_enricher", ns, name, fmt.Sprintf("h%d", hourBucket))
+			// Hour bucket pairs with the 1h rate limit, and comes from
+			// the OOM's own finishedAt rather than the wall clock: one
+			// kill always lands in one bucket, so re-observing the same
+			// unchanged status can only ever produce the same
+			// fingerprint. A wall-clock bucket rolled every hour, which
+			// let a single OOM mint an unbounded number of Findings for
+			// as long as the container kept running. A genuinely new OOM
+			// carries a later finishedAt, so a Pod stuck OOMing still
+			// produces ~1 fire/hour.
+			return fp("pod_oom_killer_enricher", ns, name, fmt.Sprintf("h%d", oomHourBucket(obj)))
 		},
 		EnrichBlocks: oomKilledEnrichBlocks,
 	}
@@ -889,34 +896,60 @@ func mostRecentOOMKilledContainerStatus(obj map[string]any) map[string]any {
 }
 
 // containerOOMTermination returns (terminated_state, finishedAt) when the
-// container's most recent termination was OOMKilled. state wins over
-// lastState (current OOM is fresher than recovered OOM). Returns (nil, "")
-// when neither side has an OOMKilled terminated state.
+// container's most recent termination was OOMKilled. state.terminated is
+// the most recent termination when present, so a non-OOM one there ends
+// the search: the OOM still sitting in lastState belongs to an earlier
+// incarnation and re-reporting it labels the current crash an OOM.
+// (Seen on workflow-server: a container OOMed once, ran for 21h, then
+// died with exitCode 2 — the moment state.terminated said Error while
+// lastState still said OOMKilled produced a bogus "was OOMKilled"
+// Finding.) Returns (nil, "") when the most recent termination was not
+// an OOM, or when the container never terminated.
 func containerOOMTermination(cs map[string]any) (map[string]any, string) {
-	if t := terminatedIfOOM(cs["state"]); t != nil {
-		ts, _ := t["finishedAt"].(string)
-		return t, ts
+	if st := terminatedState(cs["state"]); st != nil {
+		if !isOOM(st) {
+			return nil, ""
+		}
+		ts, _ := st["finishedAt"].(string)
+		return st, ts
 	}
-	if t := terminatedIfOOM(cs["lastState"]); t != nil {
-		ts, _ := t["finishedAt"].(string)
-		return t, ts
+	if st := terminatedState(cs["lastState"]); st != nil && isOOM(st) {
+		ts, _ := st["finishedAt"].(string)
+		return st, ts
 	}
 	return nil, ""
 }
 
-func terminatedIfOOM(v any) map[string]any {
+// terminatedState unwraps a ContainerState's `terminated` sub-object,
+// or nil when the container is not in a terminated state.
+func terminatedState(v any) map[string]any {
 	st, _ := v.(map[string]any)
 	if st == nil {
 		return nil
 	}
 	t, _ := st["terminated"].(map[string]any)
-	if t == nil {
-		return nil
-	}
-	if reason, _ := t["reason"].(string); reason != "OOMKilled" {
-		return nil
-	}
 	return t
+}
+
+func isOOM(terminated map[string]any) bool {
+	reason, _ := terminated["reason"].(string)
+	return reason == "OOMKilled"
+}
+
+// oomHourBucket returns the UTC hour bucket of the most recent OOM
+// termination's finishedAt, for use as the fingerprint's dedup bucket.
+// Falls back to the current hour when no OOM is present or its
+// timestamp is missing/unparseable — that keeps the fingerprint stable
+// within the rate-limit window even on malformed status.
+func oomHourBucket(obj map[string]any) int64 {
+	if cs := mostRecentOOMKilledContainerStatus(obj); cs != nil {
+		if _, ts := containerOOMTermination(cs); ts != "" {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				return t.UTC().Truncate(time.Hour).Unix()
+			}
+		}
+	}
+	return time.Now().UTC().Truncate(time.Hour).Unix()
 }
 
 // podNodeName returns spec.nodeName, or "" when unset (pod not yet scheduled).

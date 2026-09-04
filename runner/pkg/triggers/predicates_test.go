@@ -321,6 +321,53 @@ func TestPodOOMKilled_DropsForOtherTerminationReasons(t *testing.T) {
 	}
 }
 
+func TestPodOOMKilled_DropsStaleLastStateOOMUnderNonOOMTermination(t *testing.T) {
+	// The workflow-server shape: the container OOMed once, ran for ~21h,
+	// then died with exitCode 2. In the window between the crash and the
+	// restart, state.terminated says Error while lastState still says
+	// OOMKilled. The most recent termination is the crash, so the OOM
+	// matcher must stay silent — firing here labelled a crash an OOM.
+	pod := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","restartCount":1,
+			 "state":{"terminated":{"reason":"Error","exitCode":2,"finishedAt":"2026-05-08T07:39:13Z"}},
+			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-07T10:53:50Z"}}}
+		]}
+	}`)
+	if podOOMKilledMatcher().Predicate(pod, nil) {
+		t.Error("non-OOM state.terminated supersedes the OOM in lastState; must not fire")
+	}
+	if got := oomKilledEnrichBlocks(pod, nil, EnrichContext{}); got != nil {
+		t.Errorf("oomKilledEnrichBlocks = %v; want nil when the current termination is not an OOM", got)
+	}
+}
+
+func TestPodOOMKilled_FingerprintIsStableForTheSameOOM(t *testing.T) {
+	// The bucket must come from the OOM's finishedAt, not the wall
+	// clock: the same kill observed in two different hours has to keep
+	// one fingerprint, or the 1h rate limit never suppresses it and a
+	// single OOM mints a Finding every hour the container stays up.
+	podAt := func(finishedAt string) map[string]any {
+		return asObj(t, `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","restartCount":1,
+				 "state":{"running":{"startedAt":"2026-05-07T10:53:53Z"}},
+				 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"`+finishedAt+`"}}}
+			]}
+		}`)
+	}
+	fpFn := podOOMKilledMatcher().FingerprintFn
+	same := podAt("2026-05-07T10:53:50Z")
+	if a, b := fpFn(same), fpFn(podAt("2026-05-07T10:58:00Z")); a != b {
+		t.Errorf("same OOM hour must share a fingerprint; got %s vs %s", a, b)
+	}
+	if a, b := fpFn(same), fpFn(podAt("2026-05-07T11:00:01Z")); a == b {
+		t.Error("an OOM in a later hour must get a fresh fingerprint")
+	}
+}
+
 func TestPodOOMKilled_FiresOnStateTerminatedWithoutRestart(t *testing.T) {
 	// restartPolicy:Never / Job pods OOM once: the kill lands in
 	// state.terminated with restartCount 0 and an empty lastState. The
