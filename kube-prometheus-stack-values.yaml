@@ -21,6 +21,27 @@
 
 prometheus:
   prometheusSpec:
+    # Select every PrometheusRule / ServiceMonitor / ScrapeConfig, not only those
+    # labelled `release: <this release>`.
+    #
+    # kube-prometheus-stack defaults these to true, which scopes each selector to its
+    # OWN Helm release name. The NudgeBee agent is a separate release, so nothing it
+    # ships carries that label and none of it is ever evaluated -- silently. The objects
+    # are accepted by the apiserver, show up in `kubectl get`, and report no error; they
+    # simply never appear in Prometheus's /api/v1/rules or /api/v1/targets. Measured on
+    # one such cluster: all four agent alert rules, the nine rabbitmq rules, and every
+    # non-stock ServiceMonitor were inert from install day.
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    # podMonitorSelectorNilUsesHelmValues is deliberately NOT set to false here.
+    # The `nudgebee-node-agent` job in additionalScrapeConfigs below already scrapes the
+    # node-agent pods; selecting the chart's PodMonitor as well would scrape them twice,
+    # and the two do not agree on labels (this job sets honor_labels and rewrites
+    # `instance` to the node name, the PodMonitor does neither), so you would get two
+    # series per metric with different label sets rather than simply double the samples.
+    # installation.sh therefore also passes `nodeAgent.podmonitor.enabled=false` when it
+    # installs this chart. Converging on one mechanism is tracked as follow-up work.
     storageSpec:
       volumeClaimTemplate:
         spec:

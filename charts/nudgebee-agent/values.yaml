@@ -13,6 +13,14 @@ global:
   # `opencost.opencost.exporter.persistence.storageClass` too.
   storageClass: ""
 enablePrometheusStack: true
+# Labels stamped onto the PrometheusRule, ServiceMonitor and PodMonitor this chart ships,
+# so the cluster's Prometheus will actually select them. Must match the Prometheus CR's
+# ruleSelector / serviceMonitorSelector / podMonitorSelector -- kube-prometheus-stack
+# defaults those to `release: <that chart's release name>`, which is a DIFFERENT release
+# from this one. Objects without the matching labels load silently as no-ops.
+# installation.sh sets this automatically; e.g. { release: nudgebee-prometheus }.
+prometheusStack:
+  selectorLabels: {}
 automountServiceAccountToken: true
 globalConfig:
   custom_annotations: {}
@@ -76,7 +84,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-09-01T10-10-56_289d9134e14a00421576ab793c7e8acd41e7eef6
+    tag: 2026-09-03T08-01-11_52b528ca78cb71326c508474c976dd8800528698
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -323,7 +331,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.5
+    tag: 0.1.6-rc.1
   resources:
     requests:
       cpu: "100m"

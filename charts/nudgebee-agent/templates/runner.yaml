@@ -67,16 +67,23 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "nudgebee-agent.fullname" . }}-runner-service-monitor
+  namespace: {{ .Release.Namespace }}
   labels:
-    # release label matches kube-prometheus-stack's default ServiceMonitor selector
-    release: {{ .Release.Name }}
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: runner
+    {{- include "nudgebee-agent.prometheusSelectorLabels" . | nindent 4 }}
 spec:
   endpoints:
     - path: /metrics
       port: http
   selector:
     matchLabels:
-      app: {{ include "nudgebee-agent.fullname" . }}-runner
+      # Must match the runner Service's labels above, which come from
+      # nudgebee-agent.labels + component. This previously matched on `app:`, a label
+      # the Service has never carried, so the ServiceMonitor selected nothing and the
+      # runner's own /metrics was never scraped on any cluster.
+      {{- include "nudgebee-agent.selectorLabels" . | nindent 6 }}
+      component: runner
   targetLabels:
     - target
 {{ end }}
