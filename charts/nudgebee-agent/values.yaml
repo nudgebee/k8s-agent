@@ -13,6 +13,14 @@ global:
   # `opencost.opencost.exporter.persistence.storageClass` too.
   storageClass: ""
 enablePrometheusStack: true
+# Labels stamped onto the PrometheusRule, ServiceMonitor and PodMonitor this chart ships,
+# so the cluster's Prometheus will actually select them. Must match the Prometheus CR's
+# ruleSelector / serviceMonitorSelector / podMonitorSelector -- kube-prometheus-stack
+# defaults those to `release: <that chart's release name>`, which is a DIFFERENT release
+# from this one. Objects without the matching labels load silently as no-ops.
+# installation.sh sets this automatically; e.g. { release: nudgebee-prometheus }.
+prometheusStack:
+  selectorLabels: {}
 automountServiceAccountToken: true
 globalConfig:
   custom_annotations: {}

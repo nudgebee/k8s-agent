@@ -371,6 +371,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Labels a PrometheusRule / ServiceMonitor / PodMonitor must carry before the cluster's
+Prometheus will select it.
+
+prometheus-operator only evaluates an object whose labels match the Prometheus CR's
+ruleSelector / serviceMonitorSelector / podMonitorSelector. kube-prometheus-stack defaults
+those to `release: <its own Helm release name>`, which is NOT this chart's release name --
+the two are separate Helm releases in every install we ship. An object without the matching
+labels is accepted by the apiserver and reported healthy; it just never loads.
+
+Empty by default, so this changes nothing until an operator opts in. installation.sh reads
+the labels off the Prometheus CR and passes them automatically; set them by hand for a
+Prometheus this chart did not install:
+
+  prometheusStack:
+    selectorLabels:
+      release: kube-prometheus-stack
+
+See runner/pkg/mutate/promruleselector.go, which does the same discovery at runtime for
+alert rules created from the UI.
+*/}}
+{{- define "nudgebee-agent.prometheusSelectorLabels" -}}
+{{- with .Values.prometheusStack }}
+{{- with .selectorLabels }}
+{{- toYaml . }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse subchart
 */}}
 {{- define "nudgebee-agent.clickhouse.servicename" -}}

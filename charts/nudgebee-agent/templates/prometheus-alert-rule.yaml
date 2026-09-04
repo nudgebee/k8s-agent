@@ -63,6 +63,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    {{- include "nudgebee-agent.prometheusSelectorLabels" . | nindent 4 }}
     component: prometheus-rules
 spec:
   groups:
