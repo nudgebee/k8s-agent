@@ -6,14 +6,28 @@
 // Reconnect strategy: after any read/write error or close, sleep
 // ReconnectDelay seconds and dial again. Matches the legacy
 // run_forever loop.
+//
+// Liveness: a bare ReadMessage loop cannot detect a half-open connection.
+// If the TCP connection dies without a FIN/RST reaching us (LB idle timeout,
+// NAT table eviction, node network partition) the read blocks forever, the
+// session never ends, and the reconnect loop above never runs — the agent
+// looks healthy (pod Running, no restarts, no logs) while the relay has long
+// since marked it NOT_CONNECTED. Only a pod restart recovered it.
+//
+// So the client both sends its own pings every PingInterval and holds a
+// PongWait read deadline that any traffic from the relay — a pong, a ping, or
+// a real message — pushes forward. A dead connection now surfaces as a read
+// timeout within PongWait and reconnects like any other session error.
 package relay
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -40,7 +54,14 @@ type Config struct {
 	Greeting       Greeting      // sent on every (re)connect
 	ReconnectDelay time.Duration // default 3s
 	WriteTimeout   time.Duration // default 30s
-	Logger         *slog.Logger
+	// PingInterval is how often we send a WebSocket ping. Default 30s.
+	PingInterval time.Duration
+	// PongWait is the read deadline, refreshed on every frame the relay
+	// sends us. Default 90s — deliberately several ping intervals wide, so a
+	// CPU-starved node that delays our read goroutine drops a ping rather
+	// than the whole session.
+	PongWait time.Duration
+	Logger   *slog.Logger
 	// HandlerPoolSize is a soft outer bound on concurrent inbound-message
 	// handler goroutines, guarding against goroutine pile-up when the
 	// dispatcher's own pools are saturated. <=0 leaves it unbounded (the
@@ -70,6 +91,12 @@ func NewClient(cfg Config, h Handler) *Client {
 	}
 	if cfg.WriteTimeout == 0 {
 		cfg.WriteTimeout = 30 * time.Second
+	}
+	if cfg.PingInterval == 0 {
+		cfg.PingInterval = 30 * time.Second
+	}
+	if cfg.PongWait == 0 {
+		cfg.PongWait = 90 * time.Second
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -131,6 +158,46 @@ func (c *Client) runOnce(ctx context.Context) error {
 		c.mu.Unlock()
 	}()
 
+	// Keepalive. Every handler below runs on this goroutine (gorilla calls
+	// them from ReadMessage), so SetReadDeadline here is safe.
+	resetDeadline := func() {
+		_ = conn.SetReadDeadline(time.Now().Add(c.cfg.PongWait))
+	}
+	resetDeadline()
+	conn.SetPongHandler(func(string) error {
+		resetDeadline()
+		return nil
+	})
+	// Replaces gorilla's default ping handler, which replies with a pong but
+	// does not refresh the read deadline. The relay pings every 30s, so its
+	// pings alone keep an idle session alive.
+	conn.SetPingHandler(func(appData string) error {
+		resetDeadline()
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(c.cfg.WriteTimeout))
+		if errors.Is(err, websocket.ErrCloseSent) {
+			return nil
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return nil
+		}
+		return err
+	})
+
+	// Pinger. Bound to this session: cancelled and joined before the
+	// deferred Close above runs, so it never writes to a closed conn.
+	sessionCtx, endSession := context.WithCancel(ctx)
+	var pinger sync.WaitGroup
+	pinger.Add(1)
+	go func() {
+		defer pinger.Done()
+		c.pingLoop(sessionCtx, conn)
+	}()
+	defer func() {
+		endSession()
+		pinger.Wait()
+	}()
+
 	if err := c.send(&Greeting{
 		Action:         "auth",
 		Version:        c.cfg.Greeting.Version,
@@ -151,6 +218,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
+		resetDeadline()
 		if c.sem == nil {
 			go c.handler(ctx, msg, send)
 			continue
@@ -169,6 +237,30 @@ func (c *Client) runOnce(ctx context.Context) error {
 			defer c.sem.Release(1)
 			c.handler(ctx, msg, send)
 		}()
+	}
+}
+
+// pingLoop sends a ping every PingInterval until the session ends. A failed
+// write means the connection is gone; returning unblocks nothing by itself,
+// but the read loop sees the same failure (or times out on PongWait) and ends
+// the session.
+//
+// WriteControl is safe to call concurrently with the WriteMessage in send(),
+// so this deliberately does not take c.mu — a pinger blocked behind a slow
+// response write is a pinger that cannot do its job.
+func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
+	ticker := time.NewTicker(c.cfg.PingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(c.cfg.WriteTimeout)); err != nil {
+				c.cfg.Logger.Warn("relay ping failed", "err", err)
+				return
+			}
+		}
 	}
 }
 
