@@ -366,6 +366,13 @@ func TestPodOOMKilled_FingerprintIsStableForTheSameOOM(t *testing.T) {
 	if a, b := fpFn(same), fpFn(podAt("2026-05-07T11:00:01Z")); a == b {
 		t.Error("an OOM in a later hour must get a fresh fingerprint")
 	}
+	// metav1.Time marshals at second precision, so the API server never
+	// emits a fractional finishedAt — but time.RFC3339 parses one anyway
+	// (Go accepts an optional fractional second on that layout), so the
+	// bucket must not silently fall back to the wall clock if one shows up.
+	if a, b := fpFn(same), fpFn(podAt("2026-05-07T10:53:50.123456789Z")); a != b {
+		t.Errorf("a fractional-second finishedAt must bucket like its whole-second form; got %s vs %s", a, b)
+	}
 }
 
 func TestPodOOMKilled_FiresOnStateTerminatedWithoutRestart(t *testing.T) {
