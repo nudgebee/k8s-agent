@@ -122,6 +122,9 @@ func TestClient_RoundTrip(t *testing.T) {
 func TestClient_ReconnectsWhenRelayGoesSilent(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	dials := make(chan struct{}, 4)
+	// Closed when the test ends, so the silent handlers below return instead
+	// of holding srv.Close() open for a fixed sleep.
+	testOver := make(chan struct{})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -137,9 +140,11 @@ func TestClient_ReconnectsWhenRelayGoesSilent(t *testing.T) {
 		// Go silent: never read again, so the client's pings are never
 		// answered, and never write. The connection stays open at the TCP
 		// level — exactly the half-open case.
-		time.Sleep(5 * time.Second)
+		<-testOver
 	}))
+	// LIFO: testOver closes first, releasing the handlers, then Close returns.
 	defer srv.Close()
+	defer close(testOver)
 
 	client := NewClient(Config{
 		URL:            "ws" + strings.TrimPrefix(srv.URL, "http"),
