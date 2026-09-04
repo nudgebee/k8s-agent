@@ -330,7 +330,7 @@ if [ "$disable_prometheus_stack" != "true" ]; then
     k=${kv%%=*}
     v=${kv#*=}
     # Helm --set treats '.' as a path separator, so escape dots inside the label key.
-    k_escaped=$(printf '%s' "$k" | sed 's/\./\\./g')
+    k_escaped=$(printf '%s\n' "$k" | sed 's/\./\\./g')
     prometheus_selector_args+=(--set-string "prometheusStack.selectorLabels.$k_escaped=$v")
   done <<< "$prom_labels"
   if [ ${#prometheus_selector_args[@]} -gt 0 ]; then
