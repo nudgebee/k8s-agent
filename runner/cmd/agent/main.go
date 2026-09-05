@@ -105,6 +105,12 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 	return out
 }
 
+// promDiscoveryInterval is how often the agent re-looks for a Prometheus
+// Service when it started without one. Five minutes keeps a freshly installed
+// Prometheus usable within a scrape interval or two, at the cost of one
+// label-filtered Service LIST per interval until it is found.
+const promDiscoveryInterval = 5 * time.Minute
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -255,97 +261,105 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
 	}
 
-	var promClient *prometheus.Client
-	if cfg.PrometheusURL != "" {
-		promClient = prometheus.New(cfg.PrometheusURL, nil)
-		promClient.ExtraHeaders = config.ParseHeaders(cfg.PrometheusHeaders)
-		// Managed-provider auth, same precedence as the legacy
-		// generate_prometheus_config: AWS SigV4 → Coralogix token → Azure AD.
-		// Plain header/basic auth stays in PROMETHEUS_HEADERS above.
-		switch {
-		case cfg.AWSAccessKey != "":
-			promClient.Auth = prometheus.NewAWSAuth(cfg.AWSAccessKey, cfg.AWSSecretAccessKey, cfg.AWSRegion, cfg.AWSServiceName)
-			logger.Info("prometheus auth: AWS SigV4", "service", cfg.AWSServiceName, "region", cfg.AWSRegion)
-		case cfg.CoralogixPrometheusToken != "":
-			promClient.Auth = prometheus.NewCoralogixAuth(cfg.CoralogixPrometheusToken)
-			logger.Info("prometheus auth: Coralogix token")
-		case cfg.AzureUseManagedID != "" || cfg.AzureClientSecret != "":
-			if a := prometheus.NewAzureAuth(prometheus.AzureAuthConfig{
-				UseManagedID:     cfg.AzureUseManagedID,
-				ClientID:         cfg.AzureClientID,
-				ClientSecret:     cfg.AzureClientSecret,
-				TenantID:         cfg.AzureTenantID,
-				Resource:         cfg.AzureResource,
-				MetadataEndpoint: cfg.AzureMetadataEndpoint,
-				TokenEndpoint:    cfg.AzureTokenEndpoint,
-			}, nil); a != nil {
-				promClient.Auth = a
-				logger.Info("prometheus auth: Azure AD")
-			} else {
-				logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
-			}
+	// The client is built whether or not we have a URL yet. Its actions stay
+	// registered either way and begin working the moment one is discovered
+	// (see the watcher below); until then calls fail with a clear
+	// "prometheus: base URL not configured". Gating registration on a URL
+	// known at boot is what made a late-installed Prometheus invisible for the
+	// life of the process.
+	promClient := prometheus.New(cfg.PrometheusURL, nil)
+	promClient.ExtraHeaders = config.ParseHeaders(cfg.PrometheusHeaders)
+	// Managed-provider auth, same precedence as the legacy
+	// generate_prometheus_config: AWS SigV4 → Coralogix token → Azure AD.
+	// Plain header/basic auth stays in PROMETHEUS_HEADERS above.
+	switch {
+	case cfg.AWSAccessKey != "":
+		promClient.Auth = prometheus.NewAWSAuth(cfg.AWSAccessKey, cfg.AWSSecretAccessKey, cfg.AWSRegion, cfg.AWSServiceName)
+		logger.Info("prometheus auth: AWS SigV4", "service", cfg.AWSServiceName, "region", cfg.AWSRegion)
+	case cfg.CoralogixPrometheusToken != "":
+		promClient.Auth = prometheus.NewCoralogixAuth(cfg.CoralogixPrometheusToken)
+		logger.Info("prometheus auth: Coralogix token")
+	case cfg.AzureUseManagedID != "" || cfg.AzureClientSecret != "":
+		if a := prometheus.NewAzureAuth(prometheus.AzureAuthConfig{
+			UseManagedID:     cfg.AzureUseManagedID,
+			ClientID:         cfg.AzureClientID,
+			ClientSecret:     cfg.AzureClientSecret,
+			TenantID:         cfg.AzureTenantID,
+			Resource:         cfg.AzureResource,
+			MetadataEndpoint: cfg.AzureMetadataEndpoint,
+			TokenEndpoint:    cfg.AzureTokenEndpoint,
+		}, nil); a != nil {
+			promClient.Auth = a
+			logger.Info("prometheus auth: Azure AD")
+		} else {
+			logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
 		}
-		ph := prometheus.Handlers(promClient)
-		maps.Copy(handlers, ph)
-		for name := range ph {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("prometheus enabled", "url", cfg.PrometheusURL, "actions", len(ph))
+	}
+	ph := prometheus.Handlers(promClient)
+	maps.Copy(handlers, ph)
+	for name := range ph {
+		lightActions[name] = struct{}{}
+	}
+	logger.Info("prometheus actions registered", "url", promClient.URL(), "actions", len(ph))
 
-		// Enrichers: prometheus_enricher / prometheus_queries_enricher
-		// produce Finding-shaped responses; api-server's relay.ExecuteAndExtractResponse
-		// walks findings[].evidence[].data.
-		promEnr := enrichers.NewPrometheusEnricher(promClient, cfg.AccountID)
-		handlers["prometheus_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
-			return promEnr.HandleEnricher(ctx, p)
-		}
-		handlers["prometheus_queries_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
-			return promEnr.HandleQueriesEnricher(ctx, p)
-		}
-		// `prometheus_labels` returns label *values* for one
-		// label_name in a Finding-wrapped JsonBlock. Overrides the raw passthrough
-		// merged in via Handlers(c) above (now exposed under `prometheus_label_names`
-		// since /api/v1/labels lists names, not values). All production callers —
-		// api-server services/observability/{prometheus,chronosphere}.go and
-		// llm/rag-server — send {label_name} and unwrap result_type/data/error.
-		handlers["prometheus_labels"] = func(ctx context.Context, p map[string]any) (any, error) {
-			return promEnr.HandleLabels(ctx, p)
-		}
-		lightActions["prometheus_enricher"] = struct{}{}
-		lightActions["prometheus_queries_enricher"] = struct{}{}
-		lightActions["prometheus_labels"] = struct{}{}
+	// Enrichers: prometheus_enricher / prometheus_queries_enricher
+	// produce Finding-shaped responses; api-server's relay.ExecuteAndExtractResponse
+	// walks findings[].evidence[].data.
+	promEnr := enrichers.NewPrometheusEnricher(promClient, cfg.AccountID)
+	handlers["prometheus_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
+		return promEnr.HandleEnricher(ctx, p)
+	}
+	handlers["prometheus_queries_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
+		return promEnr.HandleQueriesEnricher(ctx, p)
+	}
+	// `prometheus_labels` returns label *values* for one
+	// label_name in a Finding-wrapped JsonBlock. Overrides the raw passthrough
+	// merged in via Handlers(c) above (now exposed under `prometheus_label_names`
+	// since /api/v1/labels lists names, not values). All production callers —
+	// api-server services/observability/{prometheus,chronosphere}.go and
+	// llm/rag-server — send {label_name} and unwrap result_type/data/error.
+	handlers["prometheus_labels"] = func(ctx context.Context, p map[string]any) (any, error) {
+		return promEnr.HandleLabels(ctx, p)
+	}
+	lightActions["prometheus_enricher"] = struct{}{}
+	lightActions["prometheus_queries_enricher"] = struct{}{}
+	lightActions["prometheus_labels"] = struct{}{}
 
-		// application_stats: thin {success,data} shape. Same Prometheus client.
-		appStats := enrichers.NewAppStatsEnricher(promClient)
-		handlers["application_stats"] = appStats.Handler()
-		lightActions["application_stats"] = struct{}{}
+	// application_stats: thin {success,data} shape. Same Prometheus client.
+	appStats := enrichers.NewAppStatsEnricher(promClient)
+	handlers["application_stats"] = appStats.Handler()
+	lightActions["application_stats"] = struct{}{}
 
-		// slo_generator: thin {success,data} shape. Same client.
-		sloGen := enrichers.NewSLOEnricher(promClient)
-		handlers["slo_generator"] = sloGen.Handler()
-		lightActions["slo_generator"] = struct{}{}
+	// slo_generator: thin {success,data} shape. Same client.
+	sloGen := enrichers.NewSLOEnricher(promClient)
+	handlers["slo_generator"] = sloGen.Handler()
+	lightActions["slo_generator"] = struct{}{}
 
-		logger.Info("prometheus compat enrichers enabled", "actions", 4)
-	} else {
-		// Loud, explicit signal so a missing URL is obvious in the logs rather
-		// than inferred from the absence of "prometheus enabled". Common cause:
-		// migrating from the legacy agent (which read prometheus_url from the
-		// Robusta global_config ConfigMap) by only bumping the image tag on the
-		// old chart, which never sets the PROMETHEUS_URL env the Go agent reads.
-		logger.Warn("prometheus disabled: PROMETHEUS_URL not set and none autodiscovered; prometheus_* actions, rightsizing, service-map, and the Prometheus health badge are unavailable")
+	logger.Info("prometheus compat enrichers enabled", "actions", 4)
+
+	// No URL yet: say so loudly rather than leaving it to be inferred from the
+	// absence of a "prometheus actions registered" url, and keep looking. Common
+	// causes are a Prometheus installed alongside or after the agent (the Service
+	// does not exist yet when we look at boot), and migrating from the legacy
+	// agent — which read prometheus_url from the Robusta global_config ConfigMap
+	// — by bumping only the image tag on the old chart, which never sets the
+	// PROMETHEUS_URL env the Go agent reads.
+	watchForPrometheus := promClient.URL() == ""
+	if watchForPrometheus {
+		logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
+			"retry_interval", promDiscoveryInterval)
 	}
 
 	// Service map needs the same Prometheus client (queries Coroot eBPF
-	// metrics in-cluster). Gated on PROMETHEUS_URL being set.
-	if promClient != nil {
-		smSvc := servicemap.New(promClient, cfg.ClusterName)
-		smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
-		maps.Copy(handlers, smHandlers)
-		for name := range smHandlers {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("service_map enabled", "actions", len(smHandlers))
+	// metrics in-cluster). Registered unconditionally; the handlers report
+	// the missing URL themselves until one is found.
+	smSvc := servicemap.New(promClient, cfg.ClusterName)
+	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
+	maps.Copy(handlers, smHandlers)
+	for name := range smHandlers {
+		lightActions[name] = struct{}{}
 	}
+	logger.Info("service_map actions registered", "actions", len(smHandlers))
 
 	if cfg.LokiURL != "" {
 		lc := loki.New(cfg.LokiURL, nil)
@@ -653,7 +667,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// unsigned, same trust posture as the alert-rule mutations carved in above —
 	// so it goes in lightActions. Skipped when either client is unavailable
 	// rather than registered as a fail-auth stub.
-	if promClient != nil && dynamicKube != nil {
+	if dynamicKube != nil {
 		// typedKube (may be nil) enables zero-downtime in-place pod resize; the
 		// rightsizer falls back to the template rollout when it's unavailable or
 		// the cluster is < 1.33.
@@ -662,8 +676,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		lightActions["continuous_rightsizing"] = struct{}{}
 		logger.Info("continuous_rightsizing enabled")
 	} else {
-		logger.Warn("continuous_rightsizing disabled — needs both Prometheus and a dynamic K8s client",
-			"prometheus", promClient != nil, "dynamic_client", dynamicKube != nil)
+		logger.Warn("continuous_rightsizing disabled — needs a dynamic K8s client")
 	}
 
 	// rightsizing_resource: applies a backend-computed recommendation (explicit
@@ -767,7 +780,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			cfg.PrometheusURL, config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			promClient.URL(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
+		// Read the URL per request rather than pinning the one we had at
+		// startup, so the /prometheus-v2/* route works on a Prometheus that
+		// only shows up later.
+		gp.PrometheusURLFn = promClient.URL
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
 			logger.Info("grafana proxy enabled", "url", grafanaURL)
@@ -799,6 +816,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
+
+	// Keep looking for a Prometheus we could not find at boot, and point the
+	// client at the first one that appears. Everything downstream reads the URL
+	// per request, so no restart and no re-registration is needed.
+	if watchForPrometheus && typedKube != nil {
+		g.Go(func() error {
+			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
+				promClient.SetURL(u)
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", u)
+			})
+			return nil
+		})
+	}
 
 	// Pod-shell idle-session reaper. Closes sessions that haven't been touched
 	// in IdleTimeout.
@@ -1001,7 +1031,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
-					PrometheusURL:              cfg.PrometheusURL,
+					PrometheusURL:              promClient.URL(),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
 					OpencostURL:                opencostURL,
@@ -1099,24 +1129,21 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 		// Alert-rules push: feeds the collector's `event_rules` table so the
 		// UI's eventrules + runbook-fire paths know about every alert in the
-		// cluster. Skipped when neither a Prom client nor a dynamic K8s client
-		// is available — both sources would be empty.
-		if promClient != nil || dynamicKube != nil {
-			var kubeForRules *kube.Client
-			if dynamicKube != nil {
-				kubeForRules = kube.NewClient(dynamicKube, typedKube)
-			}
-			ar := &discovery.AlertRulesCollector{
-				Prom:   promClient,
-				Kube:   kubeForRules,
-				Sink:   discoverySink,
-				Logger: logger,
-			}
-			g.Go(func() error {
-				logger.Info("starting alert_rules collector", "interval", cfg.AlertRulesInterval)
-				return ar.Run(gctx, cfg.AlertRulesInterval)
-			})
+		// cluster. The Prometheus source skips itself while no URL is known.
+		var kubeForRules *kube.Client
+		if dynamicKube != nil {
+			kubeForRules = kube.NewClient(dynamicKube, typedKube)
 		}
+		ar := &discovery.AlertRulesCollector{
+			Prom:   promClient,
+			Kube:   kubeForRules,
+			Sink:   discoverySink,
+			Logger: logger,
+		}
+		g.Go(func() error {
+			logger.Info("starting alert_rules collector", "interval", cfg.AlertRulesInterval)
+			return ar.Run(gctx, cfg.AlertRulesInterval)
+		})
 	}
 
 	return g.Wait()
@@ -1191,7 +1218,7 @@ func (a *grafanaAdapter) HandlePrometheus(ctx context.Context, r *dispatch.Grafa
 // are reported Connected when metric queries work. Returns false on any error
 // so a broken backend shows Disconnected rather than panicking the tick.
 func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) (ok bool, reason string) {
-	if c == nil || c.BaseURL == "" {
+	if c == nil || c.URL() == "" {
 		return false, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1224,7 +1251,7 @@ func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog
 // agent. Our local probe runs against the agent's own cluster so we drop
 // the token entirely.
 func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog.Logger) int {
-	if c == nil || c.BaseURL == "" {
+	if c == nil || c.URL() == "" {
 		return 0
 	}
 	const q = `up{job=~"(.+/)?nudgebee(-.*)?-node-agent"}`

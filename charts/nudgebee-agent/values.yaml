@@ -84,7 +84,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-09-04T08-06-27_75919bfc237666cb1cf6468c84a307e1343888aa
+    tag: 2026-09-04T10-11-35_e412f561f01ab25c5d75acbadceccb2a37cc0fbb
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -331,7 +331,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.6-rc.4
+    tag: ""
   resources:
     requests:
       cpu: "100m"
