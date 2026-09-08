@@ -163,10 +163,12 @@ type Config struct {
 	ScannerServiceAccount string
 
 	// ScannerAutoCopyPullSecrets lets image scans pull private images by copying
-	// the scanned workload's imagePullSecrets into the scanner namespace. Off by
-	// default (least privilege): when off, the agent never reads/copies registry
-	// credentials and private-image scans rely on the scanner SA's own pull
-	// secrets. Paired with the chart's conditional secret-write RBAC.
+	// the scanned workload's imagePullSecrets into the scanner namespace. On by
+	// default: the node-local image copy a scan reuses is routinely gone by scan
+	// time, and an unauthenticated re-pull leaves private images unscannable.
+	// When off, the agent never reads/copies registry credentials and
+	// private-image scans rely on the scanner SA's own pull secrets. Paired with
+	// the chart's conditional secret-write RBAC; read-only installs force it off.
 	ScannerAutoCopyPullSecrets bool
 
 	// PodExecEnabled (group D): pod_bash_enricher / pod_script_run_enricher.
@@ -290,10 +292,18 @@ func FromEnv() (*Config, error) {
 		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
-		ScannersEnabled:            envBool("SCANNERS_ENABLED", false),
-		ScannerNamespace:           cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
-		ScannerServiceAccount:      os.Getenv("SCANNER_SERVICE_ACCOUNT"),
-		ScannerAutoCopyPullSecrets: envBool("SCANNER_AUTO_COPY_PULL_SECRETS", false),
+		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
+		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
+		ScannerServiceAccount: os.Getenv("SCANNER_SERVICE_ACCOUNT"),
+		// On by default: an image scan runs the target image as its own container,
+		// and the node-local copy it relies on is routinely gone by scan time
+		// (containerd GCs the image record, the workload rolled, a spot node was
+		// replaced). Without the workload's own pull credentials the re-pull is
+		// unauthenticated and every private image is permanently unscannable. The
+		// copies are namespaced to the scanner namespace and owned by the scan Job,
+		// so they are GC'd with it. Set to false to keep the agent from reading any
+		// registry credential; readOnly installs force it off via the chart.
+		ScannerAutoCopyPullSecrets: envBool("SCANNER_AUTO_COPY_PULL_SECRETS", true),
 		MutateEnabled:              envBool("MUTATE_ENABLED", false),
 		AlertManagerURL:            os.Getenv("ALERTMANAGER_URL"),
 		RSAPrivateKeyPath:          os.Getenv("RSA_PRIVATE_KEY_PATH"),
