@@ -169,8 +169,9 @@ runner:
   # private-image scan pull-secret auto-copy. Helm release inventory is
   # unaffected (the Go runner does not read Helm secrets).
   #
-  # Mutually exclusive with enableWritePermissions and
-  # scannerAutoCopyPullSecrets — helm template fails if both are set.
+  # Mutually exclusive with enableWritePermissions — helm template fails if
+  # both are set. It also forces scannerAutoCopyPullSecrets off (that path
+  # needs to read Secrets in workload namespaces).
   # The full read-only RBAC lives in a single reviewable file:
   # templates/runner-service-account-readonly.yaml.
   readOnly: false
@@ -183,13 +184,19 @@ runner:
   mutateEnabled: true
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
-  # Job. Off by default (least privilege): when off, the agent never reads or
-  # copies registry credentials, and private-image scans rely on whatever pull
-  # secrets the runner service account already carries
-  # (runnerServiceAccount.imagePullSecrets). Enabling this also grants the
-  # runner secret update/patch/delete in the release namespace (for GC of the
-  # copies) — see runner-service-account.yaml.
-  scannerAutoCopyPullSecrets: false
+  # Job. On by default: an image scan runs the target image as its own
+  # container, and the node-local copy it reuses is often already gone at scan
+  # time, so without the workload's credentials every private image is
+  # permanently unscannable. The copies live only in the release namespace and
+  # are owned by the scan Job, so they are garbage-collected with it, and this
+  # also grants the runner secret update/patch/delete in the release namespace
+  # (for GC of the copies) — see runner-service-account.yaml.
+  #
+  # Set to false to keep the agent from reading any registry credential;
+  # private-image scans then rely on whatever pull secrets the runner service
+  # account already carries (runnerServiceAccount.imagePullSecrets).
+  # runner.readOnly=true forces it off regardless of this setting.
+  scannerAutoCopyPullSecrets: true
   customClusterRoleRules: []
   imagePullSecrets: []
   extraVolumes: []
