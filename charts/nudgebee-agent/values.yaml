@@ -202,9 +202,11 @@ runner:
   # Extra volumes on the runner pod. The common use is trusting a private CA
   # when the collector/relay serve internally-issued certificates: mount the CA
   # PEM here and add SSL_CERT_DIR=/etc/ssl/certs:<mountPath> to
-  # additional_env_vars. That covers every outbound connection (discovery POSTs,
-  # relay WebSocket, task polling). Keep /etc/ssl/certs in the list — and do not
-  # use SSL_CERT_FILE, which replaces the trust store rather than adding to it.
+  # additional_env_vars. Go splits SSL_CERT_DIR on ":" and reads every listed
+  # directory (crypto/x509/root_unix.go), so the system roots and the private CA
+  # both load; that covers every outbound connection (discovery POSTs, relay
+  # WebSocket, task polling). SSL_CERT_FILE is the wrong knob: it takes a single
+  # path and replaces the default CA bundle rather than adding to it.
   extraVolumes: []
   extraVolumeMounts: []
   relay_address: wss://relay.nudgebee.com/register
