@@ -199,6 +199,12 @@ runner:
   scannerAutoCopyPullSecrets: true
   customClusterRoleRules: []
   imagePullSecrets: []
+  # Extra volumes on the runner pod. The common use is trusting a private CA
+  # when the collector/relay serve internally-issued certificates: mount the CA
+  # PEM here and add SSL_CERT_DIR=/etc/ssl/certs:<mountPath> to
+  # additional_env_vars. That covers every outbound connection (discovery POSTs,
+  # relay WebSocket, task polling). Keep /etc/ssl/certs in the list — and do not
+  # use SSL_CERT_FILE, which replaces the trust store rather than adding to it.
   extraVolumes: []
   extraVolumeMounts: []
   relay_address: wss://relay.nudgebee.com/register
