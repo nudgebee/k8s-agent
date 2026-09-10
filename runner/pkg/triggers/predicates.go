@@ -35,6 +35,10 @@ func Builtins() []MatcherSpec {
 	for _, kind := range []string{"Deployment", "DaemonSet", "StatefulSet", "Ingress", "Rollout"} {
 		out = append(out, babysitterChangeMatcher(kind))
 	}
+	// ConfigMaps get their own spec: the payload lives in data /
+	// binaryData, so the babysitter kinds' "spec"-rooted diff filter
+	// never produces a diff for one.
+	out = append(out, configMapChangeMatcher())
 	return out
 }
 
@@ -666,6 +670,83 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 			}
 		},
 	}
+}
+
+// ------- ConfigMap data change -------
+
+// configMapChangeMatcher fires when a ConfigMap's data or binaryData
+// changes. It shares the babysitter aggregation key — a config change is
+// a config change as far as the UI's change history and the "what
+// changed before this alert" correlation are concerned — but filters on
+// the fields a ConfigMap actually stores its payload in.
+//
+// The gap this closes: a value consumed with `envFrom` (or mounted as a
+// file) appears nowhere in the consuming pod template, so editing it
+// leaves the Deployment spec byte-identical. `kubectl rollout history`
+// has no revision to diff, ConfigMap edits emit no Kubernetes events at
+// all, and `metadata.managedFields` records a timestamp but never the
+// previous value. This event is the only place the old value survives.
+func configMapChangeMatcher() MatcherSpec {
+	diffOpt := ConfigMapDiffOptions()
+	return MatcherSpec{
+		Name:           "babysitter_configmap",
+		Kind:           "ConfigMap",
+		Operations:     []string{"update"},
+		AggregationKey: "ConfigurationChange/KubernetesResource/Change",
+		Priority:       "INFO",
+		FindingType:    "configuration_change",
+		RateLimit:      30 * time.Second,
+		Predicate: func(obj, oldObj map[string]any) bool {
+			if oldObj == nil || isNoisyConfigMap(obj) {
+				return false
+			}
+			return len(ComputeSpecDiff(obj, oldObj, diffOpt)) > 0
+		},
+		FingerprintFn: func(obj map[string]any) string {
+			// Same identity rule as the babysitter kinds: the resource
+			// that changed, not the individual change, so repeat edits
+			// to one ConfigMap chain into a recurring entry.
+			return fp("ConfigurationChange/KubernetesResource/Change",
+				metaNS(obj), "configmap", metaName(obj))
+		},
+		EnrichBlocks: func(obj, oldObj map[string]any, _ EnrichContext) []EvidenceBlock {
+			diffs := ComputeSpecDiff(obj, oldObj, diffOpt)
+			if len(diffs) == 0 {
+				return nil
+			}
+			return []EvidenceBlock{BuildConfigMapDiffBlock(obj, oldObj, diffs)}
+		},
+	}
+}
+
+// isNoisyConfigMap drops ConfigMaps that rewrite themselves as part of
+// normal cluster operation. Without this the change feed fills with
+// coordination traffic that no operator wants to read, and the signal —
+// somebody edited a value an application depends on — drowns in it.
+func isNoisyConfigMap(obj map[string]any) bool {
+	// Written into every namespace by the root-CA controller.
+	if metaName(obj) == "kube-root-ca.crt" {
+		return true
+	}
+	meta, _ := obj["metadata"].(map[string]any)
+	if meta == nil {
+		return false
+	}
+	// Pre-Lease leader election stores the current holder in this
+	// annotation and rewrites it every few seconds, indefinitely.
+	annotations, _ := meta["annotations"].(map[string]any)
+	if _, held := annotations["control-plane.alpha.kubernetes.io/leader"]; held {
+		return true
+	}
+	// Helm/Tiller release bookkeeping. Modern Helm keeps release state in
+	// Secrets, but charts and operators carrying the legacy label still
+	// exist, and that state is not user-facing configuration.
+	labels, _ := meta["labels"].(map[string]any)
+	switch owner, _ := labels["OWNER"].(string); owner {
+	case "TILLER", "HELM":
+		return true
+	}
+	return false
 }
 
 // -------- helpers --------

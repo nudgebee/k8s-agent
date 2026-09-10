@@ -49,6 +49,30 @@ func DefaultSpecDiffOptions() SpecDiffOptions {
 	}
 }
 
+// ConfigMapDiffOptions returns the diff filter for ConfigMap change
+// tracking. A ConfigMap has no `spec` — its payload lives in `data` /
+// `binaryData` — so the babysitter defaults never produce a diff for one.
+//
+// Nothing under `metadata` is monitored, and that is the whole filter:
+// it drops resourceVersion/managedFields churn AND
+// `kubectl.kubernetes.io/last-applied-configuration`, whose value is a
+// full copy of the object. Monitoring that annotation would report every
+// `kubectl apply` twice — once as the real data change and once as the
+// annotation carrying the same change.
+func ConfigMapDiffOptions() SpecDiffOptions {
+	return SpecDiffOptions{
+		FieldsToMonitor: []string{"data", "binaryData"},
+	}
+}
+
+// maxConfigMapValueBytes caps a single ConfigMap value in the rendered
+// evidence. A ConfigMap holds up to 1 MiB and routinely carries whole
+// files (an app script, a Prometheus config); the diff block renders the
+// old AND new object, so an uncapped change to one of those ships ~2 MiB
+// of evidence per event. The changed key is what carries the diagnostic
+// signal — the full file body does not.
+const maxConfigMapValueBytes = 2048
+
 // ComputeSpecDiff walks obj + oldObj recursively and returns the filtered
 // path-level diffs. Returns nil when oldObj is nil (no diff possible) or
 // when no monitored field changed.
@@ -234,6 +258,98 @@ func BuildKubernetesDiffBlock(obj, oldObj map[string]any, kind string, diffs []D
 		},
 		"additional_info": nil,
 	}
+}
+
+// BuildConfigMapDiffBlock is BuildKubernetesDiffBlock for ConfigMaps:
+// same block shape, but every `data` / `binaryData` value — in the
+// rendered YAML and in the per-path old/new entries — is capped at
+// maxConfigMapValueBytes. Also strips
+// `kubectl.kubernetes.io/last-applied-configuration`, which duplicates
+// the entire object into the rendered YAML for anything applied with
+// `kubectl apply`.
+func BuildConfigMapDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
+	return BuildKubernetesDiffBlock(
+		truncateConfigMapValues(obj),
+		truncateConfigMapValues(oldObj),
+		"ConfigMap",
+		truncateDiffValues(diffs),
+	)
+}
+
+// lastAppliedAnnotation is kubectl's copy of the whole object, kept on
+// the object itself. Rendering it inside a diff of that same object
+// doubles the payload and shows the change twice.
+const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+
+// truncateConfigMapValues returns a shallow-copied obj whose data /
+// binaryData values are capped and whose last-applied annotation is
+// dropped. The input is left untouched — the same map is handed to every
+// matcher the engine evaluates.
+func truncateConfigMapValues(obj map[string]any) map[string]any {
+	if obj == nil {
+		return nil
+	}
+	out := make(map[string]any, len(obj))
+	for k, v := range obj {
+		out[k] = v
+	}
+	for _, field := range []string{"data", "binaryData"} {
+		src, _ := out[field].(map[string]any)
+		if src == nil {
+			continue
+		}
+		capped := make(map[string]any, len(src))
+		for k, v := range src {
+			capped[k] = truncateValue(v)
+		}
+		out[field] = capped
+	}
+	if meta, _ := out["metadata"].(map[string]any); meta != nil {
+		if ann, _ := meta["annotations"].(map[string]any); ann != nil {
+			if _, present := ann[lastAppliedAnnotation]; present {
+				metaCopy := make(map[string]any, len(meta))
+				for k, v := range meta {
+					metaCopy[k] = v
+				}
+				annCopy := make(map[string]any, len(ann))
+				for k, v := range ann {
+					if k == lastAppliedAnnotation {
+						continue
+					}
+					annCopy[k] = v
+				}
+				metaCopy["annotations"] = annCopy
+				out["metadata"] = metaCopy
+			}
+		}
+	}
+	return out
+}
+
+// truncateDiffValues caps the before/after values carried in
+// updated_values. Paths are never truncated — the changed key is the
+// part that has to survive intact.
+func truncateDiffValues(diffs []DiffEntry) []DiffEntry {
+	out := make([]DiffEntry, 0, len(diffs))
+	for _, d := range diffs {
+		d.Before = truncateValue(d.Before)
+		d.After = truncateValue(d.After)
+		out = append(out, d)
+	}
+	return out
+}
+
+// truncateValue caps an over-long string value, annotating what was cut
+// so a reader (or the model) doesn't mistake the truncation for the
+// value. Non-string values pass through: only ConfigMap payloads reach
+// this, and those are always strings.
+func truncateValue(v any) any {
+	s, ok := v.(string)
+	if !ok || len(s) <= maxConfigMapValueBytes {
+		return v
+	}
+	return fmt.Sprintf("%s\n... [truncated: %d of %d bytes shown]",
+		s[:maxConfigMapValueBytes], maxConfigMapValueBytes, len(s))
 }
 
 // objectToYAML returns YAML for a K8s object: omitted fields stripped,
