@@ -704,6 +704,7 @@ func configMapChangeMatcher() MatcherSpec {
 		Name:           "babysitter_configmap",
 		Kind:           "ConfigMap",
 		Operations:     []string{"update"},
+		SuppressChurn:  true,
 		AggregationKey: "ConfigurationChange/KubernetesResource/Change",
 		Priority:       "INFO",
 		FindingType:    "configuration_change",
@@ -740,6 +741,9 @@ func isNoisyConfigMap(obj map[string]any) bool {
 	if metaName(obj) == "kube-root-ca.crt" {
 		return true
 	}
+	if inExcludedNamespace(metaNS(obj)) && !isTrackedSystemConfigMap(metaNS(obj), metaName(obj)) {
+		return true
+	}
 	meta, _ := obj["metadata"].(map[string]any)
 	if meta == nil {
 		return false
@@ -759,6 +763,62 @@ func isNoisyConfigMap(obj map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// ConfigMapExcludedNamespaces are the namespaces whose ConfigMap changes are
+// dropped by default. These hold the platform's own moving parts — an
+// autoscaler's status, a webhook heartbeat — which are state stored in a
+// ConfigMap rather than configuration anyone edits.
+//
+// Overridable at boot from CONFIGMAP_CHANGE_EXCLUDED_NAMESPACES, because
+// "system namespace" is a cluster-by-cluster judgement: an operator who runs
+// their platform config out of kube-system needs to turn this off.
+var ConfigMapExcludedNamespaces = []string{
+	"kube-system",
+	"kube-public",
+	"kube-node-lease",
+	"gke-managed-system",
+	"gke-managed-cim",
+	"gmp-system",
+	"gke-gmp-system",
+}
+
+// trackedSystemConfigMaps are reported even inside an excluded namespace.
+//
+// Excluding kube-system wholesale would drop some of the highest-consequence
+// configuration in the cluster along with the noise. Editing coredns' Corefile
+// breaks name resolution cluster-wide; aws-auth governs who can reach the API
+// at all; kube-proxy's config decides how traffic is forwarded. Those are
+// exactly the changes worth waking someone for, and they are edited by hand,
+// rarely — the opposite profile to the churn this filter exists to remove.
+var trackedSystemConfigMaps = map[string]bool{
+	"coredns":                              true,
+	"kube-dns":                             true,
+	"aws-auth":                             true,
+	"kube-proxy":                           true,
+	"kubelet-config":                       true,
+	"cluster-autoscaler-priority-expander": true,
+}
+
+func inExcludedNamespace(namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+	for _, ns := range ConfigMapExcludedNamespaces {
+		if ns == namespace {
+			return true
+		}
+		// OpenShift spreads its platform across dozens of openshift-* names;
+		// matching the prefix avoids enumerating them.
+		if strings.HasSuffix(ns, "*") && strings.HasPrefix(namespace, strings.TrimSuffix(ns, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTrackedSystemConfigMap(namespace, name string) bool {
+	return trackedSystemConfigMaps[name]
 }
 
 // -------- helpers --------

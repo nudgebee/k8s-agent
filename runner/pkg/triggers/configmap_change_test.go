@@ -297,3 +297,45 @@ func TestEngine_MatchesConfigMapKindRegardlessOfCase(t *testing.T) {
 		})
 	}
 }
+
+// System namespaces hold the platform's own moving parts — an autoscaler's
+// status, a webhook heartbeat — which are state in a ConfigMap, not config.
+func TestConfigMapChange_SkipsSystemNamespaces(t *testing.T) {
+	mk := func(ns, name, v string) map[string]any {
+		return mustObj(t, `{"metadata":{"name":"`+name+`","namespace":"`+ns+`"},"data":{"k":"`+v+`"}}`)
+	}
+	for _, ns := range []string{"kube-system", "kube-public", "kube-node-lease", "gmp-system"} {
+		if configMapChangeMatcher().Predicate(mk(ns, "some-status", "b"), mk(ns, "some-status", "a")) {
+			t.Errorf("%s must be excluded by default", ns)
+		}
+	}
+	if !configMapChangeMatcher().Predicate(mk("payments", "app-config", "b"), mk("payments", "app-config", "a")) {
+		t.Error("an ordinary namespace must still be tracked")
+	}
+}
+
+// Excluding kube-system wholesale would drop the highest-consequence config in
+// the cluster with the noise: coredns decides name resolution, aws-auth decides
+// who can reach the API at all.
+func TestConfigMapChange_TracksCriticalSystemConfigMaps(t *testing.T) {
+	mk := func(name, v string) map[string]any {
+		return mustObj(t, `{"metadata":{"name":"`+name+`","namespace":"kube-system"},"data":{"Corefile":"`+v+`"}}`)
+	}
+	for _, name := range []string{"coredns", "aws-auth", "kube-proxy"} {
+		if !configMapChangeMatcher().Predicate(mk(name, "b"), mk(name, "a")) {
+			t.Errorf("%s must be reported despite living in kube-system", name)
+		}
+	}
+}
+
+// The matcher must opt into frequency suppression; without it the namespace
+// filter alone leaves the churn in other namespaces (datadog-token produced 46
+// changes in 30 minutes from the `datadog` namespace).
+func TestConfigMapChange_OptsIntoChurnSuppression(t *testing.T) {
+	if !configMapChangeMatcher().SuppressChurn {
+		t.Error("ConfigMap changes must opt into churn suppression")
+	}
+	if babysitterChangeMatcher("Deployment").SuppressChurn {
+		t.Error("workload changes do not churn and must not be suppressed by frequency")
+	}
+}

@@ -838,7 +838,21 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// so the engine appends a "Recent <Kind> events" table to every
 		// matched Finding (kubelet BackOff / Killing / OOMKilling /
 		// FailedScheduling / image-pull errors etc.) for free.
-		eng := triggers.NewEngine(triggers.Builtins(), time.Now())
+		// A cluster that keeps its platform config in kube-system needs the
+		// default namespace exclusions off; one with more system namespaces
+		// than we listed needs them extended. Either way it is their call.
+		if raw := os.Getenv("CONFIGMAP_CHANGE_EXCLUDED_NAMESPACES"); raw != "" {
+			var namespaces []string
+			for _, ns := range strings.Split(raw, ",") {
+				if ns = strings.TrimSpace(ns); ns != "" {
+					namespaces = append(namespaces, ns)
+				}
+			}
+			triggers.ConfigMapExcludedNamespaces = namespaces
+			logger.Info("configmap change namespace exclusions overridden",
+				"namespaces", triggers.ConfigMapExcludedNamespaces)
+		}
+		eng := triggers.NewEngine(triggers.Builtins(), time.Now()).WithLogger(logger)
 		if typedKube != nil {
 			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
 			// Service-backends lister lets service_no_endpoints resolve a
