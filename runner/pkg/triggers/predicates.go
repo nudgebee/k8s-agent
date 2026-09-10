@@ -620,6 +620,18 @@ func podUnschedulableMatcher() MatcherSpec {
 // server-side enricher needed.
 func babysitterChangeMatcher(kind string) MatcherSpec {
 	diffOpt := DefaultSpecDiffOptions()
+	buildBlock := BuildKubernetesDiffBlock
+	if strings.EqualFold(kind, "Ingress") {
+		// An Ingress keeps its routing rules in spec, but how traffic is
+		// actually handled — body-size ceilings, timeouts, buffering,
+		// SSL redirect, injected nginx snippets — lives in annotations.
+		// The spec-only filter reports nothing for the change most
+		// likely to have broken traffic.
+		diffOpt = IngressDiffOptions()
+		buildBlock = func(obj, oldObj map[string]any, _ string, diffs []DiffEntry) EvidenceBlock {
+			return BuildIngressDiffBlock(obj, oldObj, diffs)
+		}
+	}
 	return MatcherSpec{
 		Name:           "babysitter_" + strings.ToLower(kind),
 		Kind:           kind,
@@ -666,7 +678,7 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 			// CodeMirrorDiffViewer; any other block ("markdown", etc.) shows
 			// "No diff available."
 			return []EvidenceBlock{
-				BuildKubernetesDiffBlock(obj, oldObj, kind, diffs),
+				buildBlock(obj, oldObj, kind, diffs),
 			}
 		},
 	}

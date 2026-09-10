@@ -66,6 +66,33 @@ func ConfigMapDiffOptions() SpecDiffOptions {
 	}
 }
 
+// IngressDiffOptions returns the diff filter for Ingress changes.
+//
+// An Ingress carries its routing rules in `spec`, but nearly everything
+// about how traffic is actually handled — body-size ceilings, read and
+// send timeouts, buffering, SSL redirect, snippets injected into the
+// nginx config — lives in `metadata.annotations`. Tightening
+// proxy-body-size until uploads start returning 413 leaves the Ingress
+// spec byte-identical, so a spec-only filter reports nothing for the
+// change most likely to have broken traffic.
+//
+// last-applied-configuration is excluded because kubectl stores a full
+// copy of the object there: monitoring it would report every
+// `kubectl apply` twice, once as the real change and once as the
+// annotation carrying the same change.
+func IngressDiffOptions() SpecDiffOptions {
+	return SpecDiffOptions{
+		FieldsToMonitor: []string{"spec", "metadata.annotations"},
+		FieldsToOmit: []string{
+			"status",
+			"metadata.generation",
+			"metadata.resourceVersion",
+			"metadata.managedFields",
+			"metadata.annotations." + lastAppliedAnnotation,
+		},
+	}
+}
+
 // maxConfigMapValueBytes caps a single ConfigMap value in the rendered
 // evidence. A ConfigMap holds up to 1 MiB and routinely carries whole
 // files (an app script, a Prometheus config); the diff block renders the
@@ -277,6 +304,20 @@ func BuildConfigMapDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) Evid
 	)
 }
 
+// BuildIngressDiffBlock is BuildKubernetesDiffBlock for Ingresses: same
+// block, with kubectl's last-applied annotation stripped from the
+// rendered YAML. Ingress annotations are monitored, so without this the
+// annotation carrying a copy of the whole object is rendered alongside
+// the change it duplicates.
+func BuildIngressDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
+	return BuildKubernetesDiffBlock(
+		withoutLastAppliedAnnotation(obj),
+		withoutLastAppliedAnnotation(oldObj),
+		"Ingress",
+		diffs,
+	)
+}
+
 // lastAppliedAnnotation is kubectl's copy of the whole object, kept on
 // the object itself. Rendering it inside a diff of that same object
 // doubles the payload and shows the change twice.
@@ -287,12 +328,9 @@ const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 // dropped. The input is left untouched — the same map is handed to every
 // matcher the engine evaluates.
 func truncateConfigMapValues(obj map[string]any) map[string]any {
-	if obj == nil {
+	out := withoutLastAppliedAnnotation(obj)
+	if out == nil {
 		return nil
-	}
-	out := make(map[string]any, len(obj))
-	for k, v := range obj {
-		out[k] = v
 	}
 	for _, field := range []string{"data", "binaryData"} {
 		src, _ := out[field].(map[string]any)
@@ -305,25 +343,45 @@ func truncateConfigMapValues(obj map[string]any) map[string]any {
 		}
 		out[field] = capped
 	}
-	if meta, _ := out["metadata"].(map[string]any); meta != nil {
-		if ann, _ := meta["annotations"].(map[string]any); ann != nil {
-			if _, present := ann[lastAppliedAnnotation]; present {
-				metaCopy := make(map[string]any, len(meta))
-				for k, v := range meta {
-					metaCopy[k] = v
-				}
-				annCopy := make(map[string]any, len(ann))
-				for k, v := range ann {
-					if k == lastAppliedAnnotation {
-						continue
-					}
-					annCopy[k] = v
-				}
-				metaCopy["annotations"] = annCopy
-				out["metadata"] = metaCopy
-			}
-		}
+	return out
+}
+
+// withoutLastAppliedAnnotation shallow-copies obj with kubectl's
+// last-applied annotation removed from metadata.annotations.
+//
+// The generic omit list can't express this: stripOmittedFields splits an
+// omit path on ".", and annotation keys are themselves dotted
+// ("kubectl.kubernetes.io/..."), so the path never resolves. The input is
+// left untouched — the engine hands the same map to every matcher.
+func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
+	if obj == nil {
+		return nil
 	}
+	out := make(map[string]any, len(obj))
+	for k, v := range obj {
+		out[k] = v
+	}
+	meta, _ := out["metadata"].(map[string]any)
+	if meta == nil {
+		return out
+	}
+	ann, _ := meta["annotations"].(map[string]any)
+	if _, present := ann[lastAppliedAnnotation]; !present {
+		return out
+	}
+	metaCopy := make(map[string]any, len(meta))
+	for k, v := range meta {
+		metaCopy[k] = v
+	}
+	annCopy := make(map[string]any, len(ann))
+	for k, v := range ann {
+		if k == lastAppliedAnnotation {
+			continue
+		}
+		annCopy[k] = v
+	}
+	metaCopy["annotations"] = annCopy
+	out["metadata"] = metaCopy
 	return out
 }
 
