@@ -72,6 +72,10 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		KubeEnabled:          true,
 		PodExecEnabled:       true,
 		ScannerNamespace:     "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
+		// Pull-secret copy is on unless SCANNER_AUTO_COPY_PULL_SECRETS says
+		// otherwise: without it, a private image whose node-local copy is gone
+		// can never be scanned.
+		ScannerAutoCopyPullSecrets: true,
 		// ClickHouse defaults: enabled, port 8123, db "default" — so the
 		// chart's existing CH config (CLICKHOUSE_HOST in runner-secret)
 		// just works.
