@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"sigs.k8s.io/yaml"
 
@@ -343,13 +344,21 @@ func truncateDiffValues(diffs []DiffEntry) []DiffEntry {
 // so a reader (or the model) doesn't mistake the truncation for the
 // value. Non-string values pass through: only ConfigMap payloads reach
 // this, and those are always strings.
+//
+// The cut is walked back to a rune boundary. Slicing bytes blindly can
+// split a multi-byte character, and ConfigMaps routinely hold UTF-8 —
+// the half rune then travels through JSON and YAML encoding into the UI.
 func truncateValue(v any) any {
 	s, ok := v.(string)
 	if !ok || len(s) <= maxConfigMapValueBytes {
 		return v
 	}
+	limit := maxConfigMapValueBytes
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
 	return fmt.Sprintf("%s\n... [truncated: %d of %d bytes shown]",
-		s[:maxConfigMapValueBytes], maxConfigMapValueBytes, len(s))
+		s[:limit], limit, len(s))
 }
 
 // objectToYAML returns YAML for a K8s object: omitted fields stripped,

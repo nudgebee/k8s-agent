@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // The shape this matcher exists for: a value consumed with `envFrom`.
@@ -187,6 +188,34 @@ func TestConfigMapChange_CapsLargeValues(t *testing.T) {
 	// The path is what identifies the change — it must never be cut.
 	if entry["path"] != "data.app.py" {
 		t.Errorf("path = %v; want data.app.py", entry["path"])
+	}
+}
+
+// ConfigMaps routinely hold UTF-8 — a properties file with accented text,
+// a message catalogue. Cutting at a byte boundary can split a rune, and the
+// half character then travels through JSON and YAML encoding into the UI.
+func TestConfigMapChange_TruncationCutsAtARuneBoundary(t *testing.T) {
+	// "é" is two bytes, so a run of them puts a rune boundary at every
+	// second byte and guarantees the cap lands mid-character for one of
+	// these two lengths.
+	for _, pad := range []int{0, 1} {
+		body := strings.Repeat("a", pad) + strings.Repeat("é", maxConfigMapValueBytes)
+		old := mustObj(t, `{"metadata":{"name":"c","namespace":"prod"},"data":{"k":"short"}}`)
+		updated := mustObj(t, `{"metadata":{"name":"c","namespace":"prod"},"data":{"k":"`+body+`"}}`)
+
+		blocks := configMapChangeMatcher().EnrichBlocks(updated, old, EnrichContext{})
+		data, _ := blocks[0]["data"].(map[string]any)
+		values, _ := data["updated_values"].([]any)
+		entry, _ := values[0].(map[string]any)
+		after, _ := entry["new"].(string)
+
+		if !utf8.ValidString(after) {
+			t.Errorf("pad=%d: truncated value is not valid UTF-8", pad)
+		}
+		newYAML, _ := data["new"].(string)
+		if !utf8.ValidString(newYAML) {
+			t.Errorf("pad=%d: rendered YAML is not valid UTF-8", pad)
+		}
 	}
 }
 
