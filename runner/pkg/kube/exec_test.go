@@ -340,3 +340,110 @@ func TestKubectl_RejectsEmptySegments(t *testing.T) {
 		}
 	}
 }
+
+func TestKubectl_AcceptsReadOnlySubcommands(t *testing.T) {
+	// rollout history/status are read-only and llm-server sends them constantly
+	// (74 of 77 prod `kubectl rollout` calls in a 60-day sample were `history`).
+	// The verb-level allowlist used to reject all of them.
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl rollout history deployment/api",
+		"kubectl rollout history deployment api -n prod --revision=297",
+		"kubectl -n prod rollout status deployment/api",
+		"kubectl config view",
+		"kubectl config current-context",
+		"kubectl auth can-i get pods",
+	} {
+		out, err := k.Run(context.Background(), cmd)
+		if err != nil {
+			t.Errorf("%s: unexpected rejection: %v", cmd, err)
+			continue
+		}
+		if out["exit_code"] != 0 {
+			t.Errorf("%s: exit_code = %v; want 0", cmd, out["exit_code"])
+		}
+	}
+}
+
+func TestKubectl_RejectsMutatingSubcommands(t *testing.T) {
+	// The sibling subcommands of the same verbs mutate, and must stay rejected —
+	// otherwise scoping the verb would have widened write access rather than
+	// narrowed it.
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl rollout undo deployment/api",
+		"kubectl rollout restart deployment/api",
+		"kubectl rollout pause deployment/api",
+		"kubectl -n prod rollout resume deployment/api",
+		"kubectl config set-context foo",
+		"kubectl config delete-context foo",
+		"kubectl auth reconcile -f rbac.yaml",
+		"kubectl rollout", // no subcommand at all
+	} {
+		if _, err := k.Run(context.Background(), cmd); err == nil {
+			t.Errorf("%s: expected rejection (mutating or missing subcommand)", cmd)
+		} else if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%s: error %q does not explain the read-only restriction", cmd, err.Error())
+		}
+	}
+}
+
+func TestKubectl_AllowWriteSkipsSubcommandScoping(t *testing.T) {
+	// enableWritePermissions hands enforcement to the API server's RBAC, so the
+	// subcommand scope must lift with the verb allowlist rather than outliving it.
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true", AllowWrite: true}
+	for _, cmd := range []string{
+		"kubectl rollout undo deployment/api",
+		"kubectl config set-context foo",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err != nil {
+			t.Errorf("%s: unexpected rejection with AllowWrite: %v", cmd, err)
+		}
+	}
+}
+
+// llmServerReadCommands mirrors what llm-server classifies as a read request and
+// therefore routes to this agent: kubectlReadVerbs plus the subcommand-scoped
+// reads, both in llm/llm-server/tools/tool_kubectl.go (kubectlReadVerbs and
+// kubectlRequestType) in the nudgebee repo.
+//
+// The two lists are maintained in separate repos and have drifted before: this
+// agent rejected `rollout history` while llm-server sent it as a read, and 15 of
+// 61 production verb rejections over 60 days were that one command — recorded as
+// successes, so nothing counted them. Anything llm-server calls a read must be
+// accepted here, or it fails at the agent with no signal. Update both sides
+// together.
+//
+// KNOWN AND DELIBERATE EXCLUSIONS — llm-server's kubectlReadVerbs also holds
+// `diff`, `wait` and `options`, which this agent does not accept. They are left
+// out rather than added because the same 60-day production sample shows `diff`
+// and `options` were never called and `wait` once, so widening the allowlist
+// buys nothing; `wait` additionally blocks, and `--timeout=0` blocks forever.
+// Add them here and to allowedKubectlVerbs together if that ever changes.
+var llmServerReadCommands = []string{
+	"kubectl api-resources",
+	"kubectl api-versions",
+	"kubectl cluster-info",
+	"kubectl describe pod foo",
+	"kubectl explain pod.spec",
+	"kubectl get pods",
+	"kubectl logs pod/foo",
+	"kubectl top nodes",
+	"kubectl version",
+	"kubectl config view",
+	"kubectl config current-context",
+	"kubectl config get-contexts",
+	"kubectl config get-clusters",
+	"kubectl rollout history deployment/api",
+	"kubectl rollout status deployment/api",
+	"kubectl auth can-i get pods",
+}
+
+func TestKubectl_AcceptsEverythingLLMServerCallsARead(t *testing.T) {
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range llmServerReadCommands {
+		if _, err := k.Run(context.Background(), cmd); err != nil {
+			t.Errorf("llm-server classifies %q as a read but the agent rejects it: %v", cmd, err)
+		}
+	}
+}
