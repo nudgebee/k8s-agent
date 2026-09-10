@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -23,6 +24,8 @@ type Engine struct {
 	now             func() time.Time      // injectable for tests
 	eventsLister    K8sEventsLister       // optional; threaded into EnrichBlocks
 	serviceBackends ServiceBackendsLister // optional; threaded into PredicateCtx + EnrichBlocks
+	churn           *ChurnSuppressor      // frequency-based suppression for SuppressChurn matchers
+	logger          *slog.Logger          // optional; used to report churn classifications
 }
 
 // NewEngine builds an Engine with the given specs. agentStartTime should
@@ -31,6 +34,7 @@ func NewEngine(specs []MatcherSpec, agentStartTime time.Time) *Engine {
 	return &Engine{
 		specs:       specs,
 		rl:          NewRateLimiter(0),
+		churn:       NewChurnSuppressor(0, 0, 0, 0),
 		startTime:   agentStartTime,
 		graceWindow: DefaultGraceWindow,
 		now:         time.Now,
@@ -54,6 +58,14 @@ func (e *Engine) WithEventsLister(l K8sEventsLister) *Engine {
 // it via EnrichContext; without it they never fire.
 func (e *Engine) WithServiceBackendsLister(l ServiceBackendsLister) *Engine {
 	e.serviceBackends = l
+	return e
+}
+
+// WithLogger returns the engine wired with a logger, used to announce when a
+// resource is classified as churning. Optional: without it the suppression
+// still happens, it just is not announced.
+func (e *Engine) WithLogger(l *slog.Logger) *Engine {
+	e.logger = l
 	return e
 }
 
@@ -153,6 +165,22 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		}
 		if !e.rl.Allow(spec.Name+":"+fingerprint, spec.RateLimit) {
 			continue
+		}
+		if spec.SuppressChurn {
+			allowed, classified := e.churn.Allow(spec.Name + ":" + fingerprint)
+			if classified && e.logger != nil {
+				// Announced once per cooldown. A resource that silently stops
+				// producing events looks identical to one that stopped
+				// changing, which is an expensive ambiguity mid-incident.
+				name, namespace, _, _ := SubjectFromObj(ev.Kind, ev.Obj)
+				e.logger.Info("change suppressed: resource rewrites itself continuously",
+					"matcher", spec.Name, "namespace", namespace, "name", name,
+					"threshold", e.churn.threshold, "window", e.churn.window,
+					"cooldown", e.churn.cooldown)
+			}
+			if !allowed {
+				continue
+			}
 		}
 
 		name, namespace, lowerKind, node := SubjectFromObj(ev.Kind, ev.Obj)

@@ -86,6 +86,15 @@ type MatcherSpec struct {
 	// one Finding forever. Each builtin matcher provides its own.
 	FingerprintFn func(obj map[string]any) string
 
+	// SuppressChurn opts the matcher into frequency-based suppression: a
+	// resource that keeps re-firing is classified as machine-written and
+	// dropped for a cooldown. Set for ConfigMap changes, where a controller
+	// using a ConfigMap as a state store produces thousands of "changes" a
+	// day that no one will ever read. Not set for workload changes, which
+	// do not churn — measured on the dev cluster, the busiest Deployment
+	// managed two changes in thirty minutes.
+	SuppressChurn bool
+
 	// SuppressOnResync controls the restart grace window. When true,
 	// the engine drops fires for objects whose creationTimestamp is
 	// older than (agentStartTime - GraceWindow). The legacy runner got
