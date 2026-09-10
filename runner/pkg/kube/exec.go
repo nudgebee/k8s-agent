@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/google/shlex"
@@ -28,8 +29,47 @@ var allowedKubectlVerbs = map[string]struct{}{
 	"api-versions":  {},
 	"version":       {},
 	"cluster-info":  {},
-	"config":        {}, // only read subcommands, but kubectl config can also write — caller must scope further
-	"auth":          {}, // can-i, whoami; both read-only
+	// `kubectl events` is the dedicated events command that superseded `kubectl get events`
+	// in 1.25. It reads the same objects `get` already reads here, with the filtering an
+	// investigation actually wants (--for pod/x, --types=Warning), and has no mutating form
+	// or subcommand. Leaving it out only pushes callers back to the clumsier spelling.
+	"events": {},
+
+	// Verbs below are read-only only for SOME subcommands; readOnlySubcommands
+	// scopes each one. Listing them here alone would admit `config set-context`,
+	// `auth reconcile` and `rollout undo`.
+	"config":  {},
+	"auth":    {},
+	"rollout": {},
+}
+
+// readOnlySubcommands scopes the verbs whose subcommands are not uniformly
+// read-only. A verb present here is accepted only when its subcommand is in the
+// set; a verb in allowedKubectlVerbs but absent here is accepted whatever
+// follows it (`get`, `describe`, `logs` … take resources, not subcommands).
+//
+// `rollout history` and `rollout status` are the reason this map exists.
+// llm-server classifies both as reads and sends them (tool_kubectl.go,
+// kubectlRequestType), while the verb-level check here rejected the whole
+// `rollout` verb — so the agent returned "verb not in read-only allowlist" for
+// a genuinely read-only command. Worse, that rejection reaches the model inside
+// a successful-looking response, so it reads as data rather than as a failure.
+var readOnlySubcommands = map[string]map[string]struct{}{
+	"rollout": {
+		"history": {},
+		"status":  {},
+	},
+	"config": {
+		"view":            {},
+		"current-context": {},
+		"get-contexts":    {},
+		"get-clusters":    {},
+		"get-users":       {},
+	},
+	"auth": {
+		"can-i":  {},
+		"whoami": {},
+	},
 }
 
 // KubectlExecutor runs kubectl as an external process. It expects the kubectl
@@ -47,57 +87,112 @@ type KubectlExecutor struct {
 	AllowWrite bool
 }
 
-// firstVerb returns the kubectl subcommand from args, skipping any leading
-// global flags (`-n ns`, `--namespace=ns`, `--context c`, `-o yaml`, ...).
-// kubectl accepts global flags before the verb, so `kubectl -n foo get pods`
-// has verb "get", not "-n". Returns "" if no non-flag token is found.
+// firstVerbAndSubcommand returns the kubectl verb and, only when it is the very next
+// token, the subcommand. Leading global flags are skipped (`-n ns`, `--namespace=ns`,
+// `--context c`, `-o yaml`, ...): kubectl accepts them before the verb, so
+// `kubectl -n foo get pods` has verb "get", not "-n". Both are "" when no such token
+// is found.
+//
+// The subcommand is REQUIRED to be adjacent to the verb, and a flag between the two
+// yields "". Anything looser lets a mutation through: real kubectl resolves
+// `kubectl rollout --selector history restart deployment` to `rollout restart`, because
+// Cobra assumes an unrecognized flag at the level it is resolving takes a value and
+// swallows the next token. A parser that instead scans for "the next token that does not
+// start with a dash" reads `history` there and calls the command a read. verbFlagsWithValue
+// cannot save this: it lists the GLOBAL flags, while the flag doing the damage belongs to
+// the mutating subcommand (--to-revision, --selector, --current), and enumerating every
+// local flag of every kubectl subcommand is exactly the drift-prone table this avoids.
+//
+// Rejecting `kubectl rollout -n ns history deploy/x` is the cost. It is valid kubectl and
+// nobody writes it; on a security boundary, refusing what we cannot parse the way kubectl
+// does beats guessing.
+//
+// The second value is meaningful only for the verbs in readOnlySubcommands; for every
+// other verb it is a resource name and is ignored.
 //
 // Flags that take a separate-token value (`-n foo`, `--context bar`) would
 // otherwise leave the value looking like a verb; verbFlagsWithValue lists the
 // global flags whose value is a following token so we can skip it. Flags using
 // `=` (`--namespace=foo`) carry their value inline and need no lookahead.
-func firstVerb(args []string) string {
+func firstVerbAndSubcommand(args []string) (verb, subcommand string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !strings.HasPrefix(a, "-") {
-			return a
+			verb = a
+			// The subcommand must be ADJACENT. A flag here yields "", which
+			// validateSegment rejects for a scoped verb — see the note above.
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				subcommand = args[i+1]
+			}
+			return verb, subcommand, nil
 		}
-		// A `--flag=value` / `-o=value` token is self-contained.
+		// A `--flag=value` / `-o=value` token is self-contained: it consumes no following
+		// token, so it cannot shift which token we read as the verb. Safe even when the flag
+		// itself is one we do not know.
 		if strings.Contains(a, "=") {
 			continue
 		}
-		// A bare global flag taking a separate value consumes the next token.
-		if _, takesValue := verbFlagsWithValue[a]; takesValue {
+		takesValue, known := globalFlags[a]
+		if !known {
+			// Fail closed. We cannot tell whether an unknown flag swallows the next token, and
+			// guessing either way picks the wrong verb for half the inputs — one of which is a
+			// mutation approved as a read.
+			return "", "", fmt.Errorf("kubectl: unrecognized flag %q before the verb; write it as %s=VALUE, or move it after the verb", a, a)
+		}
+		if takesValue {
 			i++
 		}
 	}
-	return ""
+	return "", "", nil
 }
 
-// verbFlagsWithValue are the kubectl global flags that may legitimately precede
-// the verb and consume a following token as their value. Boolean global flags
-// (e.g. --insecure-skip-tls-verify) are absent because they take no value.
-var verbFlagsWithValue = map[string]struct{}{
-	"-n": {}, "--namespace": {},
-	"--context": {},
-	"--cluster": {},
-	"--user":    {},
-	"-o":        {}, "--output": {},
-	"-s": {}, "--server": {},
-	"-v": {}, "--v": {}, // log verbosity, e.g. `-v 6`
-	"--kubeconfig":            {},
-	"--token":                 {},
-	"--as":                    {},
-	"--as-group":              {},
-	"--as-uid":                {},
-	"--username":              {},
-	"--password":              {},
-	"--vmodule":               {},
-	"--request-timeout":       {},
-	"--cache-dir":             {},
-	"--certificate-authority": {},
-	"--client-certificate":    {},
-	"--client-key":            {},
+// globalFlags are the kubectl flags that may legitimately precede the verb, mapped to whether
+// each consumes the FOLLOWING token as its value. Sourced from `kubectl options` (v1.34), plus
+// -o/--output, which is not global but is written that way often enough to accept.
+//
+// Completeness is deliberately not a security property here. An unrecognized flag before the
+// verb is REFUSED (see firstVerbAndSubcommand), so a flag kubectl adds in a later release costs
+// a clear error rather than a silent bypass. That inversion is the whole point: the previous
+// table was missing --tls-server-name, and
+//
+//	kubectl --tls-server-name get rollout undo deployment/api
+//
+// parsed here as verb "get" with resource "rollout" — allowed — while kubectl swallowed `get`
+// as the flag's value and ran `rollout undo`. Any value-taking flag absent from a
+// skip-what-I-know table does the same, so the table had to stop being the thing that decides.
+//
+// (`--profile get ...`, the shape first reported, does NOT execute: kubectl validates the
+// profile name and dies with "unknown profile 'get'". --tls-server-name and --log-file take
+// arbitrary strings and do.)
+var globalFlags = map[string]bool{
+	// Value-taking.
+	"--as": true, "--as-group": true, "--as-uid": true, "--as-user-extra": true,
+	"--cache-dir": true, "--certificate-authority": true,
+	"--client-certificate": true, "--client-key": true,
+	"--cluster": true, "--context": true,
+	"--kubeconfig": true, "--kuberc": true,
+	"--log-flush-frequency": true,
+	"-n":                    true, "--namespace": true,
+	"--password": true,
+	"--profile":  true, "--profile-output": true,
+	"--request-timeout": true,
+	"-s":                true, "--server": true,
+	"--tls-server-name": true,
+	"--token":           true,
+	"--user":            true, "--username": true,
+	"-v": true, "--v": true,
+	"--vmodule": true,
+	"-o":        true, "--output": true,
+	// Legacy klog flags, still accepted by some builds; all take a value.
+	"--log-file": true, "--log-dir": true, "--log-file-max-size": true,
+	"--log-backtrace-at": true, "--stderrthreshold": true, "--logging-format": true,
+
+	// Boolean — consume no following token.
+	"--disable-compression": false, "--insecure-skip-tls-verify": false,
+	"--match-server-version": false, "--warnings-as-errors": false,
+	"--alsologtostderr": false, "--logtostderr": false,
+	"--skip-headers": false, "--skip-log-headers": false,
+	"--add-dir-header": false, "--one-output": false,
 }
 
 // rejectedShellTokens are shell metacharacters we refuse rather than silently
@@ -216,16 +311,39 @@ func splitSegments(tokens []string) ([]cmdSegment, error) {
 // validateSegment resolves the verb past leading global flags and enforces the
 // read-only allowlist when write mode is off.
 func (k *KubectlExecutor) validateSegment(args []string) error {
-	verb := firstVerb(args)
+	verb, subcommand, err := firstVerbAndSubcommand(args)
+	if err != nil {
+		return err
+	}
 	if verb == "" {
 		return errors.New("kubectl: no verb found (only flags supplied)")
 	}
-	if !k.AllowWrite {
-		if _, ok := allowedKubectlVerbs[verb]; !ok {
-			return fmt.Errorf("kubectl: verb %q not in read-only allowlist; enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", verb)
+	if k.AllowWrite {
+		return nil
+	}
+	if _, ok := allowedKubectlVerbs[verb]; !ok {
+		return fmt.Errorf("kubectl: verb %q not in read-only allowlist; enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", verb)
+	}
+	if subcommands, scoped := readOnlySubcommands[verb]; scoped {
+		if _, ok := subcommands[subcommand]; !ok {
+			if subcommand == "" {
+				return fmt.Errorf("kubectl: %q needs one of its read-only subcommands (%s) immediately after it, with no flag in between", verb, strings.Join(sortedKeys(subcommands), ", "))
+			}
+			return fmt.Errorf("kubectl: %q is not a read-only subcommand of %q (allowed: %s); enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", subcommand, verb, strings.Join(sortedKeys(subcommands), ", "))
 		}
 	}
 	return nil
+}
+
+// sortedKeys gives the error message a stable subcommand list; map iteration
+// order would otherwise reorder it on every call.
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // shouldRunSegment applies shell short-circuit semantics: a segment after && runs
