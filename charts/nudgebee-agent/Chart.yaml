@@ -26,11 +26,16 @@ annotations:
       url: https://app.nudgebee.com/help/docs/installation/agent/installation/
     - name: Source
       url: https://github.com/nudgebee/k8s-agent
-# these are set to the right value by .github/workflows/release.yaml
-# we use 0.0.1 as a placeholder for the version` because Helm wont allow `0.0.0` and we want to be able to run
-# `helm install` on development checkouts without updating this file. the version doesn't matter in that case anyway
+# version and appVersion MUST stay identical. The agent reports appVersion to the
+# server as RUNNER_VERSION (see _helpers.tpl), and the server compares that
+# against the newest released *chart* version to decide whether to show "Please
+# update your agent version" in the UI. Let them drift and every up-to-date
+# cluster is told, permanently, to upgrade to a version it already runs.
+# release-rc.yaml stamps both for RCs; release.yaml uses whatever is committed
+# here, so a GA release ships exactly these two lines. helm-dev-lint.yml fails
+# the PR if they differ.
 version: 0.1.24
-appVersion: 0.1.21
+appVersion: 0.1.24
 dependencies:
 - name: opencost
   version: 2.0.1

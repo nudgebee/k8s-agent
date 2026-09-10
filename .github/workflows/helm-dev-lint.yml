@@ -41,6 +41,22 @@ jobs:
       - name: Run chart-testing (lint)
         run: ct lint --debug --config ./.github/configs/ct.yaml --lint-conf ./.github/configs/lintconf.yaml --check-version-increment=false
 
+      # The agent reports appVersion to the server as RUNNER_VERSION, and the
+      # server compares it against the newest released *chart* version to decide
+      # whether to show "Please update your agent version". A PR that bumps
+      # version without appVersion ships a chart that under-reports itself, so
+      # every cluster on the newest chart is told forever to upgrade to what it
+      # already runs — and upgrading changes nothing, so it never clears.
+      - name: Assert Chart version and appVersion match
+        run: |
+          version=$(yq '.version' charts/nudgebee-agent/Chart.yaml)
+          app_version=$(yq '.appVersion' charts/nudgebee-agent/Chart.yaml)
+          if [ "$version" != "$app_version" ]; then
+            echo "::error file=charts/nudgebee-agent/Chart.yaml::version ($version) != appVersion ($app_version) — bump both together, or the agent reports $app_version while the release is $version."
+            exit 1
+          fi
+          echo "ok: version == appVersion == $version"
+
       - name: Build chart dependencies
         run: helm dependency build charts/nudgebee-agent
 
