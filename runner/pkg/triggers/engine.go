@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"strings"
 	"time"
 )
 
@@ -208,11 +209,17 @@ func (e *Engine) suppressedByResync(obj map[string]any) bool {
 	return t.Before(e.startTime.Add(-e.graceWindow))
 }
 
+// kindMatches compares a spec's Kind against the kind kubewatch reported.
+// Case-insensitive: kubewatch's per-resource handlers are not consistent
+// about casing across kinds ("Deployment" but "configmap"), and a spec
+// that silently never fires because of a capital letter is invisible —
+// the events just land in the unmatched counter. No two K8s kinds differ
+// only by case, so folding cannot collide.
 func kindMatches(specKind, eventKind string) bool {
 	if specKind == "" || specKind == "Any" {
 		return true
 	}
-	return specKind == eventKind
+	return strings.EqualFold(specKind, eventKind)
 }
 
 func operationMatches(specOps []string, eventOp string) bool {
