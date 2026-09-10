@@ -114,7 +114,7 @@ type KubectlExecutor struct {
 // otherwise leave the value looking like a verb; verbFlagsWithValue lists the
 // global flags whose value is a following token so we can skip it. Flags using
 // `=` (`--namespace=foo`) carry their value inline and need no lookahead.
-func firstVerbAndSubcommand(args []string) (verb, subcommand string) {
+func firstVerbAndSubcommand(args []string) (verb, subcommand string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !strings.HasPrefix(a, "-") {
@@ -124,44 +124,75 @@ func firstVerbAndSubcommand(args []string) (verb, subcommand string) {
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				subcommand = args[i+1]
 			}
-			return verb, subcommand
+			return verb, subcommand, nil
 		}
-		// A `--flag=value` / `-o=value` token is self-contained.
+		// A `--flag=value` / `-o=value` token is self-contained: it consumes no following
+		// token, so it cannot shift which token we read as the verb. Safe even when the flag
+		// itself is one we do not know.
 		if strings.Contains(a, "=") {
 			continue
 		}
-		// A bare global flag taking a separate value consumes the next token.
-		if _, takesValue := verbFlagsWithValue[a]; takesValue {
+		takesValue, known := globalFlags[a]
+		if !known {
+			// Fail closed. We cannot tell whether an unknown flag swallows the next token, and
+			// guessing either way picks the wrong verb for half the inputs — one of which is a
+			// mutation approved as a read.
+			return "", "", fmt.Errorf("kubectl: unrecognized flag %q before the verb; write it as %s=VALUE, or move it after the verb", a, a)
+		}
+		if takesValue {
 			i++
 		}
 	}
-	return "", ""
+	return "", "", nil
 }
 
-// verbFlagsWithValue are the kubectl global flags that may legitimately precede
-// the verb and consume a following token as their value. Boolean global flags
-// (e.g. --insecure-skip-tls-verify) are absent because they take no value.
-var verbFlagsWithValue = map[string]struct{}{
-	"-n": {}, "--namespace": {},
-	"--context": {},
-	"--cluster": {},
-	"--user":    {},
-	"-o":        {}, "--output": {},
-	"-s": {}, "--server": {},
-	"-v": {}, "--v": {}, // log verbosity, e.g. `-v 6`
-	"--kubeconfig":            {},
-	"--token":                 {},
-	"--as":                    {},
-	"--as-group":              {},
-	"--as-uid":                {},
-	"--username":              {},
-	"--password":              {},
-	"--vmodule":               {},
-	"--request-timeout":       {},
-	"--cache-dir":             {},
-	"--certificate-authority": {},
-	"--client-certificate":    {},
-	"--client-key":            {},
+// globalFlags are the kubectl flags that may legitimately precede the verb, mapped to whether
+// each consumes the FOLLOWING token as its value. Sourced from `kubectl options` (v1.34), plus
+// -o/--output, which is not global but is written that way often enough to accept.
+//
+// Completeness is deliberately not a security property here. An unrecognized flag before the
+// verb is REFUSED (see firstVerbAndSubcommand), so a flag kubectl adds in a later release costs
+// a clear error rather than a silent bypass. That inversion is the whole point: the previous
+// table was missing --tls-server-name, and
+//
+//	kubectl --tls-server-name get rollout undo deployment/api
+//
+// parsed here as verb "get" with resource "rollout" — allowed — while kubectl swallowed `get`
+// as the flag's value and ran `rollout undo`. Any value-taking flag absent from a
+// skip-what-I-know table does the same, so the table had to stop being the thing that decides.
+//
+// (`--profile get ...`, the shape first reported, does NOT execute: kubectl validates the
+// profile name and dies with "unknown profile 'get'". --tls-server-name and --log-file take
+// arbitrary strings and do.)
+var globalFlags = map[string]bool{
+	// Value-taking.
+	"--as": true, "--as-group": true, "--as-uid": true, "--as-user-extra": true,
+	"--cache-dir": true, "--certificate-authority": true,
+	"--client-certificate": true, "--client-key": true,
+	"--cluster": true, "--context": true,
+	"--kubeconfig": true, "--kuberc": true,
+	"--log-flush-frequency": true,
+	"-n":                    true, "--namespace": true,
+	"--password": true,
+	"--profile":  true, "--profile-output": true,
+	"--request-timeout": true,
+	"-s":                true, "--server": true,
+	"--tls-server-name": true,
+	"--token":           true,
+	"--user":            true, "--username": true,
+	"-v": true, "--v": true,
+	"--vmodule": true,
+	"-o":        true, "--output": true,
+	// Legacy klog flags, still accepted by some builds; all take a value.
+	"--log-file": true, "--log-dir": true, "--log-file-max-size": true,
+	"--log-backtrace-at": true, "--stderrthreshold": true, "--logging-format": true,
+
+	// Boolean — consume no following token.
+	"--disable-compression": false, "--insecure-skip-tls-verify": false,
+	"--match-server-version": false, "--warnings-as-errors": false,
+	"--alsologtostderr": false, "--logtostderr": false,
+	"--skip-headers": false, "--skip-log-headers": false,
+	"--add-dir-header": false, "--one-output": false,
 }
 
 // rejectedShellTokens are shell metacharacters we refuse rather than silently
@@ -280,7 +311,10 @@ func splitSegments(tokens []string) ([]cmdSegment, error) {
 // validateSegment resolves the verb past leading global flags and enforces the
 // read-only allowlist when write mode is off.
 func (k *KubectlExecutor) validateSegment(args []string) error {
-	verb, subcommand := firstVerbAndSubcommand(args)
+	verb, subcommand, err := firstVerbAndSubcommand(args)
+	if err != nil {
+		return err
+	}
 	if verb == "" {
 		return errors.New("kubectl: no verb found (only flags supplied)")
 	}

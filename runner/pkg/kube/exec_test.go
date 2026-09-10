@@ -495,3 +495,72 @@ func TestKubectl_AcceptsEventsVerb(t *testing.T) {
 		}
 	}
 }
+
+// A value-taking global flag missing from the table used to shift which token was read as the
+// verb, so a mutation was approved as a read. Verified against kubectl v1.34:
+//
+//	kubectl --tls-server-name get rollout undo deployment/api
+//
+// kubectl swallows `get` as the flag's value and runs `rollout undo` — it reached the server
+// under test. The parser saw verb "get", resource "rollout", and allowed it.
+//
+// The fix is not a longer table (the next release would reopen it) but refusing what we cannot
+// parse. These must stay rejected even as kubectl's flag set changes.
+func TestKubectl_RejectsUnknownFlagBeforeTheVerb(t *testing.T) {
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl --not-a-real-flag get rollout undo deployment/api",
+		"kubectl --future-kubectl-flag value get pods",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err == nil {
+			t.Errorf("%s: accepted — an unparseable flag must not be guessed at", cmd)
+		} else if !strings.Contains(err.Error(), "unrecognized flag") {
+			t.Errorf("%s: error %q does not name the unrecognized flag", cmd, err.Error())
+		}
+	}
+}
+
+// The flags that caused the bypass are now known and value-taking, so the verb resolves the way
+// kubectl resolves it.
+//
+// The dangerous shape is the one where the flag's VALUE IS OMITTED: kubectl then swallows the
+// following token as the value, and the mutating verb after it becomes the command. With the flag
+// unknown to the old table, the parser skipped nothing and read that swallowed token as the verb.
+func TestKubectl_ResolvesVerbPastValueTakingGlobalFlags(t *testing.T) {
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl --tls-server-name get rollout undo deployment/api",
+		"kubectl --log-file get rollout restart deployment/api",
+		"kubectl --token get rollout pause deployment/api",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err == nil {
+			t.Errorf("%s: accepted — kubectl eats the next token and runs the mutating verb", cmd)
+		} else if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%s: error %q does not explain the read-only restriction", cmd, err.Error())
+		}
+	}
+
+	// With the value actually supplied, the same flags front a genuine read: kubectl sees
+	// `get rollout undo deployment/api`, which reads resources of kind "rollout". The parser must
+	// agree rather than refuse it.
+	for _, cmd := range []string{
+		"kubectl --tls-server-name example.com get rollout undo deployment/api",
+		"kubectl --profile cpu get pods",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err != nil {
+			t.Errorf("%s: unexpected rejection: %v", cmd, err)
+		}
+	}
+
+	// The same flags in front of a genuine read must still work.
+	for _, cmd := range []string{
+		"kubectl --tls-server-name example.com get pods",
+		"kubectl --insecure-skip-tls-verify get pods",
+		"kubectl --profile=cpu get pods",
+		"kubectl --some-unknown-future-flag=value get pods", // self-contained: unambiguous
+	} {
+		if _, err := k.Run(context.Background(), cmd); err != nil {
+			t.Errorf("%s: unexpected rejection: %v", cmd, err)
+		}
+	}
+}
