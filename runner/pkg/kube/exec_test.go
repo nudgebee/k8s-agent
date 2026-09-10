@@ -479,3 +479,19 @@ func TestKubectl_RejectsMutationHiddenBehindAFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestKubectl_AcceptsEventsVerb(t *testing.T) {
+	// `kubectl events` reads the same objects `kubectl get events` does — already allowed —
+	// with the filtering an investigation wants. It has no mutating subcommand, so unlike
+	// rollout/config/auth it needs no scoping.
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl events",
+		"kubectl events --for pod/api -n prod",
+		"kubectl -n prod events --types=Warning",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err != nil {
+			t.Errorf("%s: unexpected rejection: %v", cmd, err)
+		}
+	}
+}

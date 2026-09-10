@@ -29,6 +29,11 @@ var allowedKubectlVerbs = map[string]struct{}{
 	"api-versions":  {},
 	"version":       {},
 	"cluster-info":  {},
+	// `kubectl events` is the dedicated events command that superseded `kubectl get events`
+	// in 1.25. It reads the same objects `get` already reads here, with the filtering an
+	// investigation actually wants (--for pod/x, --types=Warning), and has no mutating form
+	// or subcommand. Leaving it out only pushes callers back to the clumsier spelling.
+	"events": {},
 
 	// Verbs below are read-only only for SOME subcommands; readOnlySubcommands
 	// scopes each one. Listing them here alone would admit `config set-context`,
