@@ -447,3 +447,35 @@ func TestKubectl_AcceptsEverythingLLMServerCallsARead(t *testing.T) {
 		}
 	}
 }
+
+// A flag between a scoped verb and its subcommand is where the verb allowlist can be
+// talked out of its own guarantee. Real kubectl resolves each of these to a MUTATING
+// subcommand, because Cobra assumes an unrecognized flag at the level it is resolving
+// takes a value and swallows the following token. A validator that scans for "the next
+// token that does not start with a dash" instead reads the swallowed token as the
+// subcommand and calls the command a read.
+//
+// Verified against kubectl v1.36.2:
+//   - `rollout --to-revision history undo deployment/api` → kubectl reports
+//     `invalid argument "history" for "--to-revision" flag ... See 'kubectl rollout undo --help'`,
+//     i.e. it resolved rollout undo.
+//   - `rollout --selector history restart deployment` → kubectl proceeds to execute
+//     rollout restart, issuing real discovery and GET calls.
+//   - `config --current view set-context foo` → kubectl reports `Unexpected args: [view foo]`
+//     from the set-context path.
+func TestKubectl_RejectsMutationHiddenBehindAFlag(t *testing.T) {
+	k := &KubectlExecutor{BinaryPath: "/usr/bin/true"}
+	for _, cmd := range []string{
+		"kubectl rollout --to-revision history undo deployment/api",
+		"kubectl rollout --selector history restart deployment",
+		"kubectl config --current view set-context foo",
+		"kubectl auth --namespace can-i reconcile -f rbac.yaml",
+		"kubectl -n prod rollout --selector status undo deployment/api",
+	} {
+		if _, err := k.Run(context.Background(), cmd); err == nil {
+			t.Errorf("%s: accepted — a flag before the subcommand hides a mutation", cmd)
+		} else if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%s: error %q does not explain the read-only restriction", cmd, err.Error())
+		}
+	}
+}

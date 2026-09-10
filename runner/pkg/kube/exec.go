@@ -82,14 +82,28 @@ type KubectlExecutor struct {
 	AllowWrite bool
 }
 
-// firstVerbAndSubcommand returns the kubectl verb and the token following it,
-// skipping any leading global flags (`-n ns`, `--namespace=ns`, `--context c`,
-// `-o yaml`, ...). kubectl accepts global flags before the verb, so
-// `kubectl -n foo get pods` has verb "get", not "-n". Both are "" when no such
-// token is found.
+// firstVerbAndSubcommand returns the kubectl verb and, only when it is the very next
+// token, the subcommand. Leading global flags are skipped (`-n ns`, `--namespace=ns`,
+// `--context c`, `-o yaml`, ...): kubectl accepts them before the verb, so
+// `kubectl -n foo get pods` has verb "get", not "-n". Both are "" when no such token
+// is found.
 //
-// The second value is the subcommand only for the verbs in readOnlySubcommands;
-// for every other verb it is a resource name and is ignored.
+// The subcommand is REQUIRED to be adjacent to the verb, and a flag between the two
+// yields "". Anything looser lets a mutation through: real kubectl resolves
+// `kubectl rollout --selector history restart deployment` to `rollout restart`, because
+// Cobra assumes an unrecognized flag at the level it is resolving takes a value and
+// swallows the next token. A parser that instead scans for "the next token that does not
+// start with a dash" reads `history` there and calls the command a read. verbFlagsWithValue
+// cannot save this: it lists the GLOBAL flags, while the flag doing the damage belongs to
+// the mutating subcommand (--to-revision, --selector, --current), and enumerating every
+// local flag of every kubectl subcommand is exactly the drift-prone table this avoids.
+//
+// Rejecting `kubectl rollout -n ns history deploy/x` is the cost. It is valid kubectl and
+// nobody writes it; on a security boundary, refusing what we cannot parse the way kubectl
+// does beats guessing.
+//
+// The second value is meaningful only for the verbs in readOnlySubcommands; for every
+// other verb it is a resource name and is ignored.
 //
 // Flags that take a separate-token value (`-n foo`, `--context bar`) would
 // otherwise leave the value looking like a verb; verbFlagsWithValue lists the
@@ -99,11 +113,13 @@ func firstVerbAndSubcommand(args []string) (verb, subcommand string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !strings.HasPrefix(a, "-") {
-			if verb == "" {
-				verb = a
-				continue
+			verb = a
+			// The subcommand must be ADJACENT. A flag here yields "", which
+			// validateSegment rejects for a scoped verb — see the note above.
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				subcommand = args[i+1]
 			}
-			return verb, a
+			return verb, subcommand
 		}
 		// A `--flag=value` / `-o=value` token is self-contained.
 		if strings.Contains(a, "=") {
@@ -114,7 +130,7 @@ func firstVerbAndSubcommand(args []string) (verb, subcommand string) {
 			i++
 		}
 	}
-	return verb, ""
+	return "", ""
 }
 
 // verbFlagsWithValue are the kubectl global flags that may legitimately precede
@@ -271,6 +287,9 @@ func (k *KubectlExecutor) validateSegment(args []string) error {
 	}
 	if subcommands, scoped := readOnlySubcommands[verb]; scoped {
 		if _, ok := subcommands[subcommand]; !ok {
+			if subcommand == "" {
+				return fmt.Errorf("kubectl: %q needs one of its read-only subcommands (%s) immediately after it, with no flag in between", verb, strings.Join(sortedKeys(subcommands), ", "))
+			}
 			return fmt.Errorf("kubectl: %q is not a read-only subcommand of %q (allowed: %s); enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate", subcommand, verb, strings.Join(sortedKeys(subcommands), ", "))
 		}
 	}
