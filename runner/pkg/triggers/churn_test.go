@@ -115,3 +115,17 @@ func TestChurnSuppressor_EvictsBeyondCapacity(t *testing.T) {
 		t.Errorf("entries = %d; want the capacity of 10 respected", c.Len())
 	}
 }
+
+// The classification log has to state the settings that produced it, not the
+// package defaults — a suppressor built with different values would otherwise
+// announce numbers that never applied.
+func TestChurnSuppressor_ReportsItsOwnSettings(t *testing.T) {
+	c := NewChurnSuppressor(0, 7, 3*time.Minute, 90*time.Minute)
+	if c.threshold != 7 || c.window != 3*time.Minute || c.cooldown != 90*time.Minute {
+		t.Errorf("settings not retained: threshold=%d window=%s cooldown=%s", c.threshold, c.window, c.cooldown)
+	}
+	d := NewChurnSuppressor(0, 0, 0, 0)
+	if d.threshold != DefaultChurnThreshold || d.window != DefaultChurnWindow || d.cooldown != DefaultChurnCooldown {
+		t.Error("zero values must fall back to the documented defaults")
+	}
+}

@@ -175,8 +175,8 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 				name, namespace, _, _ := SubjectFromObj(ev.Kind, ev.Obj)
 				e.logger.Info("change suppressed: resource rewrites itself continuously",
 					"matcher", spec.Name, "namespace", namespace, "name", name,
-					"threshold", DefaultChurnThreshold, "window", DefaultChurnWindow,
-					"cooldown", DefaultChurnCooldown)
+					"threshold", e.churn.threshold, "window", e.churn.window,
+					"cooldown", e.churn.cooldown)
 			}
 			if !allowed {
 				continue

@@ -741,7 +741,7 @@ func isNoisyConfigMap(obj map[string]any) bool {
 	if metaName(obj) == "kube-root-ca.crt" {
 		return true
 	}
-	if inExcludedNamespace(metaNS(obj)) && !isTrackedSystemConfigMap(metaNS(obj), metaName(obj)) {
+	if inExcludedNamespace(metaNS(obj)) && !isTrackedSystemConfigMap(metaName(obj)) {
 		return true
 	}
 	meta, _ := obj["metadata"].(map[string]any)
@@ -817,7 +817,7 @@ func inExcludedNamespace(namespace string) bool {
 	return false
 }
 
-func isTrackedSystemConfigMap(namespace, name string) bool {
+func isTrackedSystemConfigMap(name string) bool {
 	return trackedSystemConfigMaps[name]
 }
 
