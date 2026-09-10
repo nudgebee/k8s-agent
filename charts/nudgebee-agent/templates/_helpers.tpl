@@ -224,11 +224,18 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: RELAY_SIGNING_PUBLIC_KEY
       value: {{ .Values.runner.nudgebee.relay_signing_public_key | quote }}
     {{- end }}
-    {{- if or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled }}
-    {{- $clickhouseSecret := .Values.runner.clickhouse_secret }}
-    {{- if not $clickhouseSecret }}
-      {{- $clickhouseSecret = include "nudgebee-agent.clickhouse.servicename" . }}
-    {{- end }}
+    {{- /*
+    ClickHouse wiring for the runner. The in-chart ClickHouse subchart is
+    conditioned on `opentelemetry-collector.enabled`, so with the collector off
+    neither the `<release>-clickhouse` Service nor its Secret exists. Point the
+    runner at either of them anyway and kubelet cannot resolve the secretKeyRef:
+    the pod never starts and sits in phase Pending with CreateContainerConfigError.
+    So the in-chart defaults are gated on the collector being enabled, and only
+    the operator-supplied sources (clickhouse_password / clickhouse_secret /
+    a CLICKHOUSE_HOST in additional_env_vars) survive with it off.
+    */}}
+    {{- $otelEnabled := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" }}
+    {{- if or $otelEnabled .Values.runner.clickhouse_enabled }}
     {{- $envVarNames := list }}
     {{- if and .Values.runner.additional_env_vars (kindIs "slice" .Values.runner.additional_env_vars) }}
       {{- range .Values.runner.additional_env_vars }}
@@ -237,15 +244,36 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
         {{- end }}
       {{- end }}
     {{- end }}
-    {{- if not (has "CLICKHOUSE_HOST" $envVarNames) }}
+    {{- /* Only default CLICKHOUSE_HOST to the in-chart Service when it is installed. */}}
+    {{- if and $otelEnabled (not (has "CLICKHOUSE_HOST" $envVarNames)) }}
     - name: CLICKHOUSE_HOST
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
     {{- end }}
+    {{- /*
+    Password source, in precedence order: runner.clickhouse_password (lands in
+    the runner Secret), runner.clickhouse_secret (operator-provisioned), then the
+    subchart Secret — the last only when the subchart is actually installed.
+    No source at all means no env var rather than a reference to a missing Secret.
+    */}}
+    {{- if .Values.runner.clickhouse_password }}
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: {{ if .Values.runner.clickhouse_password }}{{ include "nudgebee-agent.fullname" . }}-runner-secret{{ else }}{{ $clickhouseSecret }}{{ end }}
-          key: {{ if .Values.runner.clickhouse_password }}CLICKHOUSE_PASSWORD{{ else }}admin-password{{ end }}
+          name: {{ include "nudgebee-agent.fullname" . }}-runner-secret
+          key: CLICKHOUSE_PASSWORD
+    {{- else if .Values.runner.clickhouse_secret }}
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ .Values.runner.clickhouse_secret }}
+          key: admin-password
+    {{- else if $otelEnabled }}
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
+          key: admin-password
+    {{- end }}
     {{- end }}
     {{- if kindIs "string" .Values.runner.additional_env_vars }}
     {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
