@@ -61,7 +61,79 @@ jobs:
         run: helm dependency build charts/nudgebee-agent
 
       - name: Render templates
-        run: helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent > /tmp/rendered.yaml
+        run: |
+          helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent > /tmp/rendered.yaml
+          # Subchart-conditioned resources are the usual source of dangling
+          # references, so render the collector-off variant too and check it.
+          helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent \
+            --set opentelemetry-collector.enabled=false > /tmp/rendered-no-otel.yaml
+
+      # Guards a whole bug class: a workload referencing a Secret/ConfigMap the
+      # release does not create. kubelet cannot resolve the reference, so the pod
+      # never starts — it sits in phase Pending with CreateContainerConfigError,
+      # which reads as "stuck Pending" to operators. It bit us when the runner
+      # kept a hard secretKeyRef to the ClickHouse Secret while the ClickHouse
+      # subchart is conditioned on opentelemetry-collector.enabled.
+      - name: Assert no workload references a Secret/ConfigMap the release omits
+        run: |
+          pip install pyyaml
+          python - /tmp/rendered.yaml /tmp/rendered-no-otel.yaml <<'PY'
+          import sys, yaml
+
+          POD_OWNERS = {'Deployment', 'DaemonSet', 'StatefulSet', 'Job', 'CronJob', 'ReplicaSet'}
+          failed = False
+
+          for path in sys.argv[1:]:
+              docs = [d for d in yaml.safe_load_all(open(path)) if d]
+              created = {(d['kind'], d['metadata']['name'])
+                         for d in docs if d.get('kind') in ('Secret', 'ConfigMap')}
+              missing = []
+
+              def check(kind, name, where, optional):
+                  # An optional reference is a deliberate "may not exist" — the
+                  # pod starts either way, so it is not a dangling reference.
+                  if not optional and (kind, name) not in created:
+                      missing.append(f'{where} -> missing {kind}/{name}')
+
+              def walk_pod(owner, spec):
+                  for c in (spec.get('containers') or []) + (spec.get('initContainers') or []):
+                      for e in c.get('env') or []:
+                          vf = e.get('valueFrom') or {}
+                          for key, kind in (('secretKeyRef', 'Secret'), ('configMapKeyRef', 'ConfigMap')):
+                              if ref := vf.get(key):
+                                  check(kind, ref['name'],
+                                        f"{owner} container/{c['name']} env/{e['name']}", ref.get('optional'))
+                      for ef in c.get('envFrom') or []:
+                          for key, kind in (('secretRef', 'Secret'), ('configMapRef', 'ConfigMap')):
+                              if ref := ef.get(key):
+                                  check(kind, ref['name'],
+                                        f"{owner} container/{c['name']} envFrom", ref.get('optional'))
+                  for v in spec.get('volumes') or []:
+                      if 'secret' in v:
+                          check('Secret', v['secret']['secretName'],
+                                f"{owner} volume/{v['name']}", v['secret'].get('optional'))
+                      if 'configMap' in v:
+                          check('ConfigMap', v['configMap']['name'],
+                                f"{owner} volume/{v['name']}", v['configMap'].get('optional'))
+
+              for d in docs:
+                  if d.get('kind') not in POD_OWNERS:
+                      continue
+                  spec = d['spec']
+                  tmpl = spec.get('template') or (spec.get('jobTemplate') or {}).get('spec', {}).get('template')
+                  if tmpl:
+                      walk_pod(f"{d['kind']}/{d['metadata']['name']}", tmpl['spec'])
+
+              if missing:
+                  failed = True
+                  print(f'FAIL {path}:')
+                  for m in sorted(missing):
+                      print(f'  {m}')
+              else:
+                  print(f'ok: {path} has no dangling Secret/ConfigMap references')
+
+          sys.exit(1 if failed else 0)
+          PY
 
       # Guards a Helm footgun: the opentelemetry-collector subchart puts
       # memory_limiter first in each of its default pipelines, but Helm replaces
@@ -129,4 +201,4 @@ jobs:
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             -skip SecurityContextConstraints \
-            /tmp/rendered.yaml
+            /tmp/rendered.yaml /tmp/rendered-no-otel.yaml
