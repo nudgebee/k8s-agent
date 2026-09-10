@@ -314,3 +314,57 @@ func TestEvidence_DataIsJSONStringifiedArray(t *testing.T) {
 		t.Errorf("unexpected blocks shape: %v", blocks)
 	}
 }
+
+// subject_node must never carry a scrape address. `instance` used to be the
+// fallback here, and for a kube-state-metrics-sourced alert that is the KSM
+// pod's own address, which the backend then used to build node-scoped
+// Prometheus queries: they matched nothing and the noisy-neighbours card was
+// silently absent for every KubePodCrashLooping alert
+// (nudgebee-enterprise#37669). No node is named by address, so an empty value
+// is the useful answer — the backend resolves the node from the pod's own
+// inventory row when this is blank.
+func TestBuilder_Alert_SubjectNodeIsNeverAScrapeAddress(t *testing.T) {
+	b := &Builder{AccountID: "acc", Cluster: "c"}
+	cases := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{
+			"kube-state-metrics scrape address is not reported as a node",
+			map[string]string{"alertname": "KubePodCrashLooping", "pod": "payments-1", "namespace": "shop", "instance": "10.64.21.224:8080"},
+			"",
+		},
+		{
+			"a port-less address is still an address",
+			map[string]string{"alertname": "KubePodCrashLooping", "pod": "payments-1", "namespace": "shop", "instance": "10.64.21.224"},
+			"",
+		},
+		{
+			"the node label is a real node name and is kept",
+			map[string]string{"alertname": "KubePodNotReady", "pod": "payments-1", "namespace": "shop", "node": "worker-01"},
+			"worker-01",
+		},
+		{
+			"the node label wins when both are present",
+			map[string]string{"alertname": "KubePodNotReady", "pod": "payments-1", "namespace": "shop", "node": "worker-01", "instance": "10.64.21.224:8080"},
+			"worker-01",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			webhook := map[string]any{"alerts": []map[string]any{{"labels": tc.labels}}}
+			raw, _ := json.Marshal(webhook)
+			out, _, err := b.FromAlertManager(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out) != 1 {
+				t.Fatalf("got %d envelopes; want 1", len(out))
+			}
+			if out[0].Finding.SubjectNode != tc.want {
+				t.Errorf("subject_node = %q; want %q", out[0].Finding.SubjectNode, tc.want)
+			}
+		})
+	}
+}

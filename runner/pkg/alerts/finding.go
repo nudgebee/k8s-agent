@@ -414,7 +414,24 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 			subjectName = "UnnamedAlert"
 		}
 	}
-	subjectNode := pickLabel(a.Labels, "node", "instance")
+	// subject_node means "the node this subject runs on". A `node` label means
+	// exactly that. `instance` does not — it is the scrape target that reported
+	// the series, which for anything off kube-state-metrics is the KSM pod's
+	// own address ("10.64.21.224:8080"), and the two are only ever coincidentally
+	// equal.
+	//
+	// It used to be the fallback here, and the address it produced was stored as
+	// the pod's node and then used to build node-scoped Prometheus queries. No
+	// node is named by address — of 25,341 node records in one estate's
+	// inventory, none contains a colon and none is a bare IP — so those queries
+	// matched nothing: the noisy-neighbours card was silently absent for every
+	// KubePodCrashLooping alert (nudgebee-enterprise#37669).
+	//
+	// There is no pod spec in this code path to read spec.nodeName from, so
+	// send nothing rather than something wrong. The server resolves the node
+	// from the pod's own inventory row when this is empty, which is the only
+	// source that actually records it.
+	subjectNode := pickLabel(a.Labels, "node")
 	alertname := pickLabel(a.Labels, "alertname")
 	if alertname == "" {
 		alertname = "UnnamedAlert"
