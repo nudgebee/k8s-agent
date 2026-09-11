@@ -261,3 +261,34 @@ func TestMergeHeaders(t *testing.T) {
 		})
 	}
 }
+
+// A Proxy built before its Prometheus existed must pick the URL up later.
+// The agent constructs this proxy at startup but may only discover
+// Prometheus minutes (or days) afterwards; a URL captured at construction
+// would pin the empty string and 503 the /prometheus-v2/* route forever.
+func TestProxy_HandlePrometheus_UsesTheURLLookupWhenSet(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer upstream.Close()
+
+	// Built with no URL, exactly as an agent that found no Prometheus does.
+	p := New("", "", "", nil, "", nil, nil)
+	var discovered string
+	p.PrometheusURLFn = func() string { return discovered }
+
+	if resp := p.HandlePrometheus(context.Background(), &Request{Method: "GET", URL: "/api/v1/labels"}); resp.StatusCode != 503 {
+		t.Fatalf("status before discovery = %d; want 503", resp.StatusCode)
+	}
+
+	discovered = upstream.URL + "/"
+	resp := p.HandlePrometheus(context.Background(), &Request{Method: "GET", URL: "/api/v1/labels"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("status after discovery = %d; want 200", resp.StatusCode)
+	}
+	if gotPath != "/api/v1/labels" {
+		t.Errorf("upstream path = %q; want /api/v1/labels (trailing slash on the base must not double up)", gotPath)
+	}
+}
