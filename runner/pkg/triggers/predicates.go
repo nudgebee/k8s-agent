@@ -538,11 +538,40 @@ func nodeUnschedulableMatcher() MatcherSpec {
 	}
 }
 
+// nodePressureWindow is both the rate-limit window and the fingerprint bucket
+// for node_pressure. They MUST stay equal: the limiter is keyed on the
+// fingerprint, so a bucket shorter than the window would mint a new key before
+// the limit expired and defeat it again.
+const nodePressureWindow = 6 * time.Hour
+
 // nodePressureMatcher fires when a Node reports Disk/Memory/PID pressure
 // (kubelet is reclaiming or evicting). The condition is read straight off the
 // watched Node object (KSM-derived, not node-exporter), so it survives a
 // degraded Prometheus rule engine — the failure mode that lets the upstream
 // KubeNodePressure rule miss it under load.
+//
+// Fingerprinted by TIME BUCKET, not by the condition's lastTransitionTime.
+// Pressure is a RECURRING condition, not an episode: kubelet fills the disk,
+// garbage-collects images, and fills it again, so DiskPressure flips True →
+// False → True continuously. lastTransitionTime moves on every flip, which
+// minted a new fingerprint each time — and since the rate limiter is keyed on
+// spec.Name+":"+fingerprint (engine.go), the RateLimit below never engaged.
+// Measured on production: one node produced 7 findings in 53 minutes against
+// a 6h limit, and across 30 days node_pressure averaged 7.7 findings per node
+// over 42 nodes.
+//
+// This is why it does NOT get the dwell guard its neighbours use
+// (nodeNotReadyMinDuration and friends). A 15-minute minimum would silence a
+// node flapping every 8 minutes — exactly the node most worth alerting on,
+// since the pressure there is real and continuous. The condition belongs with
+// report_crash_loop and pod_oom_killed, which are also "keeps happening"
+// signals bucketed by time, rather than with node_not_ready / cordon, which
+// are genuine single episodes.
+//
+// The bucket matches RateLimit so the two agree: at most one finding per node
+// per condition per window, whether the condition flaps or holds. `cond` stays
+// in the key so a node that develops a SECOND kind of pressure still reports
+// promptly instead of being suppressed for the rest of the window.
 func nodePressureMatcher() MatcherSpec {
 	return MatcherSpec{
 		Name:           "node_pressure",
@@ -551,13 +580,28 @@ func nodePressureMatcher() MatcherSpec {
 		AggregationKey: "node_pressure",
 		Priority:       "HIGH",
 		FindingType:    "issue",
-		RateLimit:      6 * time.Hour,
+		RateLimit:      nodePressureWindow,
 		Predicate: func(obj, _ map[string]any) bool {
 			return activeNodePressure(obj) != ""
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			cond := activeNodePressure(obj)
-			return fp("node_pressure", metaName(obj), cond, nodeConditionLastTransition(obj, cond))
+			// Bucket the condition's OWN transition time, truncated to the
+			// window -- not wall-clock now. A fingerprint has to be a function
+			// of the object observed: bucketing on now() would collapse a
+			// backlog replayed after a restart into whichever window the
+			// catch-up happened to run in, and would make this untestable
+			// (two calls in one test always share the same now()).
+			//
+			// Flaps inside a window truncate to the same bucket, so they stay
+			// one finding. A condition that simply HOLDS keeps one stable
+			// fingerprint, so the RateLimit expires and re-fires it against
+			// the same key -- the re-fire behaviour node_not_ready documents.
+			bucket := time.Now().UTC().Truncate(nodePressureWindow).Unix()
+			if t, err := time.Parse(time.RFC3339, nodeConditionLastTransition(obj, cond)); err == nil {
+				bucket = t.UTC().Truncate(nodePressureWindow).Unix()
+			}
+			return fp("node_pressure", metaName(obj), cond, fmt.Sprintf("b%d", bucket))
 		},
 	}
 }

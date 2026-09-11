@@ -983,6 +983,97 @@ func TestNodePressure_DoesNotFireWhenNoPressure(t *testing.T) {
 	}
 }
 
+// pressuredNode builds a Node whose `cond` pressure condition is True and
+// transitioned at `transitioned` — the value that used to drive the fingerprint.
+func pressuredNode(t *testing.T, name, cond, transitioned string) map[string]any {
+	t.Helper()
+	return asObj(t, `{
+		"metadata":{"name":"`+name+`"},
+		"status":{"conditions":[
+			{"type":"Ready","status":"True"},
+			{"type":"`+cond+`","status":"True","lastTransitionTime":"`+transitioned+`"}
+		]}
+	}`)
+}
+
+// A flapping condition must NOT mint a new fingerprint. kubelet fills the disk,
+// garbage-collects images and fills it again, so DiskPressure flips True →
+// False → True every few minutes and lastTransitionTime moves with it. Because
+// the rate limiter is keyed on the fingerprint, the old key defeated the 6h
+// RateLimit entirely: one production node produced 7 findings in 53 minutes.
+func TestNodePressure_FlappingConditionKeepsOneFingerprint(t *testing.T) {
+	m := nodePressureMatcher()
+	first := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	// Same node, same condition, transitioned again 8 minutes later.
+	second := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:35:04Z"))
+	if first != second {
+		t.Errorf("flap produced a second fingerprint, so the rate limit is bypassed:\n  %s\n  %s", first, second)
+	}
+}
+
+// The counterpart to the flap test: once the window rolls, continuing pressure
+// is a new finding. Without this, a fingerprint that simply ignored the
+// timestamp would pass the flap test too.
+func TestNodePressure_LaterWindowIsANewFingerprint(t *testing.T) {
+	m := nodePressureMatcher()
+	inWindow := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	nextWindow := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T18:05:00Z"))
+	if inWindow == nextWindow {
+		t.Error("pressure continuing into a later window must report again")
+	}
+}
+
+// Two flips either side of a window boundary are deliberately two findings:
+// the bucket is the unit of reporting, so this pins where the seam falls.
+func TestNodePressure_BucketBoundaryIsRespected(t *testing.T) {
+	m := nodePressureMatcher()
+	before := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T11:59:59Z"))
+	after := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T12:00:01Z"))
+	if before == after {
+		t.Error("flips either side of a 6h boundary belong to different windows")
+	}
+}
+
+// A Node whose condition carries no parseable lastTransitionTime must still
+// produce a usable fingerprint rather than an empty bucket shared by every node.
+func TestNodePressure_UnparseableTransitionStillDiffersPerNode(t *testing.T) {
+	m := nodePressureMatcher()
+	a := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "not-a-timestamp"))
+	b := m.FingerprintFn(pressuredNode(t, "n2", "DiskPressure", "not-a-timestamp"))
+	if a == b {
+		t.Error("fallback bucket must still separate nodes")
+	}
+}
+
+func TestNodePressure_DifferentNodesDiffer(t *testing.T) {
+	m := nodePressureMatcher()
+	a := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	b := m.FingerprintFn(pressuredNode(t, "n2", "DiskPressure", "2026-05-08T10:27:24Z"))
+	if a == b {
+		t.Error("two different nodes must not share a fingerprint")
+	}
+}
+
+// A node already reporting DiskPressure that ALSO runs out of memory is a new
+// problem and must not be suppressed for the rest of the window.
+func TestNodePressure_DifferentConditionsDiffer(t *testing.T) {
+	m := nodePressureMatcher()
+	disk := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	mem := m.FingerprintFn(pressuredNode(t, "n1", "MemoryPressure", "2026-05-08T10:27:24Z"))
+	if disk == mem {
+		t.Error("different pressure conditions on one node must not share a fingerprint")
+	}
+}
+
+// The bucket and the rate-limit window have to stay equal. A bucket shorter
+// than the window mints a new limiter key before the limit expires and
+// re-opens the defect this matcher was fixed for.
+func TestNodePressure_BucketMatchesRateLimit(t *testing.T) {
+	if got := nodePressureMatcher().RateLimit; got != nodePressureWindow {
+		t.Errorf("RateLimit %v must equal nodePressureWindow %v", got, nodePressureWindow)
+	}
+}
+
 // ---------- pod_unschedulable ----------
 
 // unschedulablePod builds a Pending Pod whose PodScheduled condition has been
