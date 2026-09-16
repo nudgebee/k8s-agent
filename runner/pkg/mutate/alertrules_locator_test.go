@@ -248,3 +248,25 @@ func TestHandlers_RouteLocatedPayloads(t *testing.T) {
 		t.Error("CR must be intact")
 	}
 }
+
+// A located edit changes only what the request carries: an omitted duration
+// keeps the rule's `for` (dropping it would make the alert fire on the first
+// breach), and an explicit "0s" is how a caller removes the wait.
+func TestPatchAlertRuleInCR_DurationAbsentKeepsFor(t *testing.T) {
+	m, dyn := locatorMutator(t, customerCR())
+	if _, err := m.PatchAlertRuleInCR(context.Background(), paymentsLoc, LegacyAlertRuleParams{Alert: "HighErrorRate", Expr: "x > 1"}); err != nil {
+		t.Fatal(err)
+	}
+	r := groupRules(crGroups(t, dyn, "monitoring", "payments-rules"), "payments")[0].(map[string]any)
+	if r["for"] != "5m" {
+		t.Errorf("for must be kept when no duration is sent, got %v", r["for"])
+	}
+
+	if _, err := m.PatchAlertRuleInCR(context.Background(), paymentsLoc, LegacyAlertRuleParams{Alert: "HighErrorRate", Expr: "x > 1", Duration: "0s"}); err != nil {
+		t.Fatal(err)
+	}
+	r = groupRules(crGroups(t, dyn, "monitoring", "payments-rules"), "payments")[0].(map[string]any)
+	if r["for"] != "0s" {
+		t.Errorf("explicit 0s must be written, got %v", r["for"])
+	}
+}
