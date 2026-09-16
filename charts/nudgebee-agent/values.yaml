@@ -84,7 +84,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-09-11T05-33-11_ff96150fa23e210be51f6074c1af2277be933aff
+    tag: 2026-09-11T18-19-15_a0a6103d8584ee4cbd0fe8a9df25447ae7f1ce74
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -649,7 +649,7 @@ alertmanager:
   # extra_rule_exclusions: ["demo", "nb-bench"]
   extra_rule_exclusions: []
   # OPT-IN: keep_firing_for for the flap-prone rules (HighErrorCriticalLogs,
-  # ApplicationAPIFailures): an intermittently failing target stays one steady
+  # ApplicationServerErrors): an intermittently failing target stays one steady
   # alert instead of resolving and re-firing on every dip below threshold.
   # Off by default for provider compatibility — Prometheus < 2.42 REJECTS rule
   # files containing this field (taking down every rule in the group), and

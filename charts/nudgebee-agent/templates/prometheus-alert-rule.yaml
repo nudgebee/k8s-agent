@@ -126,14 +126,56 @@ spec:
         # path) — request path is unbounded cardinality, so the per-path form
         # produced a separate alert per endpoint per replica.
         #
-        # Fires when >20% of a workload's HTTP traffic is 4xx or 5xx for 10m,
-        # with an activity floor of 0.1 req/s so ratios don't blow up on
+        # These two REPLACE the single ApplicationAPIFailures rule, which summed
+        # 4xx and 5xx into one ratio at one threshold and one severity. Measured
+        # on dev, the top firing workload was relay-server at a reported "53.7%
+        # error rate" — 100% of which was 401. Zero 5xx. A server-down page for
+        # an auth misconfiguration. The classes carry different meaning and
+        # deserve different responses:
+        #
+        #   5xx  the callee is broken. Page. 5% threshold.
+        #   4xx  callers are sending bad requests — auth, validation, wrong
+        #        route. Real signal, but never a page: warning, 20% threshold.
+        #        404 is dropped outright; scanners and probe traffic make it
+        #        permanent background noise on any internet-facing workload.
+        #
+        # Both keep the 0.1 req/s activity floor so ratios don't blow up on
         # low-volume workloads.
-        - alert: ApplicationAPIFailures
+        - alert: ApplicationServerErrors
           expr: |
             (
               sum by (destination_workload_namespace, destination_workload_name) (
-                rate(container_http_requests_total{ {{ $httpSel }}, status=~"5..|4.." }[5m])
+                rate(container_http_requests_total{ {{ $httpSel }}, status=~"5.." }[5m])
+              )
+              /
+              sum by (destination_workload_namespace, destination_workload_name) (
+                rate(container_http_requests_total{ {{ $httpSel }} }[5m])
+              )
+            ) > 0.05
+            and
+            sum by (destination_workload_namespace, destination_workload_name) (
+              rate(container_http_requests_total{ {{ $httpSel }} }[5m])
+            ) > 0.1
+          for: 10m
+{{- with $keepFiringFor }}
+          keep_firing_for: {{ . }}
+{{- end }}
+          annotations:
+            summary: >-
+              High 5xx rate for {{`{{ $labels.destination_workload_name }}`}}
+              in {{`{{ $labels.destination_workload_namespace }}`}}
+            description: >-
+              HTTP 5xx rate exceeded 5% of total traffic.
+              Namespace: {{`{{ $labels.destination_workload_namespace }}`}}
+              Workload: {{`{{ $labels.destination_workload_name }}`}}
+              Error rate: {{`{{ $value | humanizePercentage }}`}}
+          labels:
+            severity: critical
+        - alert: ApplicationClientErrors
+          expr: |
+            (
+              sum by (destination_workload_namespace, destination_workload_name) (
+                rate(container_http_requests_total{ {{ $httpSel }}, status=~"4..", status!="404" }[5m])
               )
               /
               sum by (destination_workload_namespace, destination_workload_name) (
@@ -150,15 +192,15 @@ spec:
 {{- end }}
           annotations:
             summary: >-
-              High error rate for {{`{{ $labels.destination_workload_name }}`}}
+              High 4xx rate for {{`{{ $labels.destination_workload_name }}`}}
               in {{`{{ $labels.destination_workload_namespace }}`}}
             description: >-
-              HTTP error rate exceeded 20% of total traffic.
+              HTTP 4xx rate (excluding 404) exceeded 20% of total traffic.
               Namespace: {{`{{ $labels.destination_workload_namespace }}`}}
               Workload: {{`{{ $labels.destination_workload_name }}`}}
               Error rate: {{`{{ $value | humanizePercentage }}`}}
           labels:
-            severity: critical
+            severity: warning
         # Fires when a pod has been in Terminating state for >30 minutes — that
         # is 60x the Kubernetes default terminationGracePeriodSeconds (30s), well
         # past any legitimate graceful termination. max_over_time smooths across

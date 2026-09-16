@@ -529,7 +529,7 @@ func alertSubject(labels map[string]string) (string, string) {
 // walking the lower-confidence labels the backend webhook mapper
 // (resolveSubjectFromLabels) also understands, so an alert delivered through
 // Alertmanager resolves the same subject it would via PagerDuty/Zenduty:
-// mesh-style workload labels (ApplicationAPIFailures carries
+// mesh-style workload labels (ApplicationServerErrors carries
 // destination_workload_name), the /k8s/{namespace}/{pod}/{container} path in
 // container_id, and application `service` labels (NBLLMLatencyP95High).
 // Returns (name, kind, namespace); kind stays empty when the label doesn't
