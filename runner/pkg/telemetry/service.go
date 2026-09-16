@@ -88,6 +88,18 @@ type ActivityStats struct {
 	// an explicit "" to clear the stale reason — dropping the key would strand
 	// it in the DB forever.
 	TracesConnectionError string `json:"tracesConnectionError"`
+
+	// Alert-rule write capabilities, read by api-server before it offers an edit
+	// or disable of a Prometheus rule. No omitempty: a false must overwrite a
+	// stale true in connection_status (same jsonb merge as above).
+	//
+	// AlertRuleLocatorWrites: this agent edits/removes a rule inside the
+	// PrometheusRule named in the request (instead of the canonical CR only).
+	AlertRuleLocatorWrites bool `json:"alertRuleLocatorWrites"`
+	// PrometheusRuleClusterWrite: the agent's service account may update
+	// PrometheusRules in every namespace (false for a runner.readOnly install,
+	// which can write only in its own namespace).
+	PrometheusRuleClusterWrite bool `json:"prometheusRuleClusterWrite"`
 }
 
 // ClusterStatus is the wire payload posted to /v1/k8s/telemetry.
@@ -211,6 +223,10 @@ type Datasources struct {
 	// AgentURL is published to the UI as the cluster's "agent" address so
 	// pop-out actions know where to call. Defaults to AGENT_HTTP_URL env.
 	AgentURL string
+
+	// Alert-rule write capabilities; see ActivityStats.
+	AlertRuleLocatorWrites     bool
+	PrometheusRuleClusterWrite bool
 }
 
 // Service is the periodic poster.
@@ -388,6 +404,8 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 		AutoScalerVersion:          ds.AutoScalerVersion,
 		AutoScalerNamespace:        ds.AutoScalerNamespace,
 		AgentURL:                   ds.AgentURL,
+		AlertRuleLocatorWrites:     ds.AlertRuleLocatorWrites,
+		PrometheusRuleClusterWrite: ds.PrometheusRuleClusterWrite,
 	}
 
 	// Prometheus: connectivity is computed by the caller via an authenticated
