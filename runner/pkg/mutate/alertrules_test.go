@@ -419,11 +419,27 @@ func TestHandleDeletePromRule_RoutesByAlertVsName(t *testing.T) {
 		t.Errorf("expected ToDrop removed, %d rules remain", len(got))
 	}
 
-	// Name+namespace removes the standalone CR.
+	// Name+namespace without alert and without delete_cr is refused, and the
+	// CR survives: a caller that lost the rule name must not wipe the CR.
 	if err := handleDeletePromRule(context.Background(), m, map[string]any{
 		"name": "standalone", "namespace": "monitoring",
+	}); err == nil {
+		t.Fatal("delete without alert and without delete_cr must be refused")
+	}
+	if _, err := dyn.Resource(prometheusRuleGVR).Namespace("monitoring").Get(
+		context.Background(), "standalone", metav1.GetOptions{}); err != nil {
+		t.Fatalf("standalone CR must still exist: %v", err)
+	}
+
+	// delete_cr removes the standalone CR.
+	if err := handleDeletePromRule(context.Background(), m, map[string]any{
+		"name": "standalone", "namespace": "monitoring", "delete_cr": true,
 	}); err != nil {
 		t.Fatalf("manifest-shape: %v", err)
+	}
+	if _, err := dyn.Resource(prometheusRuleGVR).Namespace("monitoring").Get(
+		context.Background(), "standalone", metav1.GetOptions{}); err == nil {
+		t.Error("standalone CR should be gone")
 	}
 }
 

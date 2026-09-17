@@ -992,6 +992,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			}
 		}
 
+		// Alert-rule write capabilities for api-server: the locator-aware
+		// PrometheusRule writes exist only when the mutate handlers do, and
+		// cluster-wide write depends on the install's RBAC (checked once — an
+		// RBAC change comes with a helm upgrade, which restarts the pod).
+		alertRuleLocatorWrites := cfg.MutateEnabled && dynamicKube != nil
+		promRuleClusterWrite := false
+		if alertRuleLocatorWrites {
+			rbacCtx, rbacCancel := context.WithTimeout(gctx, 10*time.Second)
+			promRuleClusterWrite = telemetry.CanUpdatePrometheusRulesClusterWide(rbacCtx, typedKube, logger)
+			rbacCancel()
+			logger.Info("prometheusrule write capability", "cluster_wide", promRuleClusterWrite)
+		}
+
 		ts := &telemetry.Service{
 			Endpoint:     cfg.BackendEndpoint,
 			AuthSecret:   cfg.AuthSecretKey,
@@ -1045,6 +1058,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					AutoScalerType:             as.Type,
 					AutoScalerVersion:          as.Version,
 					AutoScalerNamespace:        as.Namespace,
+					AlertRuleLocatorWrites:     alertRuleLocatorWrites,
+					PrometheusRuleClusterWrite: promRuleClusterWrite,
 				}
 			},
 			LightActions: func() []string {

@@ -508,3 +508,27 @@ func TestHealthErr_TruncatesLongBodies(t *testing.T) {
 		t.Errorf("healthErr(503, nil) = %q; want %q", got, "HTTP 503")
 	}
 }
+
+// api-server reads these flags from connection_status before offering a
+// Prometheus rule edit. They are merged with jsonb `||`, so a false must be
+// sent explicitly or a stale true would survive an RBAC downgrade.
+func TestProbe_AlertRuleWriteCapabilities(t *testing.T) {
+	s := &Service{}
+	for _, tc := range []struct {
+		ds   Datasources
+		want string
+	}{
+		{Datasources{}, `"alertRuleLocatorWrites":false`},
+		{Datasources{}, `"prometheusRuleClusterWrite":false`},
+		{Datasources{AlertRuleLocatorWrites: true, PrometheusRuleClusterWrite: true}, `"alertRuleLocatorWrites":true`},
+		{Datasources{AlertRuleLocatorWrites: true, PrometheusRuleClusterWrite: true}, `"prometheusRuleClusterWrite":true`},
+	} {
+		body, err := json.Marshal(s.probe(context.Background(), tc.ds))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), tc.want) {
+			t.Errorf("activity stats %s missing %s", body, tc.want)
+		}
+	}
+}
