@@ -69,6 +69,7 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		IncrementalBatchSize: 1,
 		ForwardPoolSize:      64,
 		RelayHandlerPoolSize: 32,
+		TriggerRateLimits:    map[string]time.Duration{},
 		KubeEnabled:          true,
 		PodExecEnabled:       true,
 		ScannerNamespace:     "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
@@ -221,5 +222,72 @@ func TestParseHeaders(t *testing.T) {
 				t.Errorf("ParseHeaders(%q)\n got:  %v\n want: %v", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+func TestParseTriggerRateLimits(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want map[string]time.Duration
+	}{
+		{"empty", "", map[string]time.Duration{}},
+		{"single", "pod_crash_loop=5m", map[string]time.Duration{"pod_crash_loop": 5 * time.Minute}},
+		{
+			"multiple with spaces",
+			" pod_crash_loop = 5m , pod_oom_killed=30m ",
+			map[string]time.Duration{"pod_crash_loop": 5 * time.Minute, "pod_oom_killed": 30 * time.Minute},
+		},
+		{"go duration forms", "a=90s,b=1h30m", map[string]time.Duration{"a": 90 * time.Second, "b": 90 * time.Minute}},
+		// Zero would disable suppression, and the watched conditions re-emit on
+		// every Kubernetes update — that is a Finding every few seconds, not an
+		// operator asking for slightly more alerts. Rejected, not honoured.
+		{"zero rejected", "pod_crash_loop=0s", map[string]time.Duration{}},
+		{"negative rejected", "pod_crash_loop=-5m", map[string]time.Duration{}},
+		{"unparseable duration skipped", "pod_crash_loop=soon", map[string]time.Duration{}},
+		{"missing separator skipped", "pod_crash_loop", map[string]time.Duration{}},
+		{"empty name skipped", "=5m", map[string]time.Duration{}},
+		{"trailing comma tolerated", "pod_crash_loop=5m,", map[string]time.Duration{"pod_crash_loop": 5 * time.Minute}},
+		// One bad entry must not discard the good ones: this knob is reached for
+		// while something is already wrong.
+		{
+			"bad entry does not poison the rest",
+			"pod_crash_loop=nope,pod_oom_killed=30m",
+			map[string]time.Duration{"pod_oom_killed": 30 * time.Minute},
+		},
+		{"last value wins on repeat", "a=1m,a=2m", map[string]time.Duration{"a": 2 * time.Minute}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParseTriggerRateLimits(tc.in); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("ParseTriggerRateLimits(%q) = %v; want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFromEnv_ReadsTriggerRateLimits(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "x")
+	t.Setenv("TRIGGER_RATE_LIMITS", "pod_crash_loop=5m")
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if got := cfg.TriggerRateLimits["pod_crash_loop"]; got != 5*time.Minute {
+		t.Errorf("TriggerRateLimits[pod_crash_loop] = %v; want 5m", got)
+	}
+}
+
+func TestFromEnv_TriggerRateLimitsDefaultsEmpty(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "x")
+	t.Setenv("TRIGGER_RATE_LIMITS", "")
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if len(cfg.TriggerRateLimits) != 0 {
+		t.Errorf("TriggerRateLimits = %v; want empty so matchers keep their compiled windows", cfg.TriggerRateLimits)
 	}
 }

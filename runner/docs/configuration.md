@@ -63,6 +63,32 @@ If a K8s subsystem is enabled but the agent fails to build a K8s client (no kube
 | `CHRONOSPHERE_URL` / `CHRONOSPHERE_API_KEY` | optional | `chronosphere_query_traces`; API key sent as `Authorization: Bearer` |
 | `HTTP_PROXY_TARGETS` | optional | `name=url;name=url` for `http_proxy_request` named targets |
 
+## Trigger engine
+
+The agent turns Kubernetes events into Findings through a set of matchers, each
+with a suppression window: after a matcher fires for a subject, the same subject
+stays quiet for that long. It is what keeps a Pod stuck in CrashLoopBackOff from
+producing a Finding on every backoff cycle.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRIGGER_RATE_LIMITS` | (none) | Per-matcher window override, `matcher=duration,matcher=duration` (e.g. `pod_crash_loop=5m,pod_oom_killed=30m`). Unset matchers keep their built-in window. |
+
+Chart value: `runner.triggerRateLimits`.
+
+Matcher names: `pod_crash_loop`, `pod_oom_killed`, `image_pull_backoff`,
+`job_failure`, `pod_unschedulable`, `node_not_ready`, `node_unschedulable`,
+`node_pressure`, `service_no_endpoints`, `babysitter_configmap`, and
+`babysitter_<kind>` for `deployment`, `daemonset`, `statefulset`, `ingress` and
+`rollout`. An unrecognised name is ignored; the runner logs a warning naming it
+and listing the names it accepts, so check the log after setting this.
+
+Only positive durations are accepted — malformed, zero and negative entries are
+skipped, and the rest of the string still applies. Zero is rejected rather than
+treated as "no limit": the watched conditions re-emit continuously, so it would
+mean a Finding every few seconds per affected object rather than simply more of
+them.
+
 ## Mutation-specific config
 
 | Variable | Description |

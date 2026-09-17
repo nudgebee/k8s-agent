@@ -122,6 +122,30 @@ runner:
   # Explicit GOMEMLIMIT override; skips the derivation when non-empty. Accepts
   # the Go form (e.g. "1600MiB" or a plain byte count). Leave empty to derive.
   goMemLimit: ""
+  # Per-matcher suppression window for the trigger engine, as
+  # "matcher=duration,matcher=duration". Surfaces as TRIGGER_RATE_LIMITS.
+  # Empty (the default) keeps every matcher on its built-in window.
+  #
+  # The window is how long the same subject stays quiet after a Finding, so a
+  # persistent problem re-reports on that cadence instead of on every
+  # Kubernetes update. Shorten it when a condition needs to be noticed sooner;
+  # lengthen it when a noisy workload is dominating the alert list.
+  #
+  #   triggerRateLimits: "pod_crash_loop=5m,pod_oom_killed=30m"
+  #
+  # Matcher names: pod_crash_loop, pod_oom_killed, image_pull_backoff,
+  # job_failure, pod_unschedulable, node_not_ready, node_unschedulable,
+  # node_pressure, service_no_endpoints, babysitter_configmap, and
+  # babysitter_<kind> (deployment, daemonset, statefulset, ingress, rollout).
+  # An unrecognised name is ignored with a warning in the runner log, which
+  # also lists the names it does accept.
+  #
+  # Only positive durations are accepted; entries that are malformed, zero or
+  # negative are skipped. Zero would disable suppression entirely, and these
+  # conditions re-emit constantly — a Pod in CrashLoopBackOff produces an
+  # update on every backoff cycle — so it would mean a Finding every few
+  # seconds per affected Pod, not simply more of them.
+  triggerRateLimits: ""
   # Liveness/readiness probes hit the always-on /healthz endpoint on :5000 so a
   # hung or restarting runner is detected and kept out of the Service.
   probes:

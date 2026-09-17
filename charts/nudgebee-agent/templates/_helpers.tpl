@@ -185,6 +185,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
     {{- end }}
+    {{- if .Values.runner.triggerRateLimits }}
+    - name: TRIGGER_RATE_LIMITS
+      value: {{ .Values.runner.triggerRateLimits | quote }}
+    {{- end }}
     # MUTATE_ENABLED gates the runner's mutate subsystem (delete_pod,
     # cordon, rollout_restart, PrometheusRule CRUD, AlertManager silences,
     # Loki rules, ...). The auth boundary lives inside the runner — only

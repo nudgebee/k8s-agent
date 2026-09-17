@@ -144,6 +144,16 @@ type Config struct {
 	// pkg/relay as a soft outer guard against goroutine pile-up. Default 32.
 	RelayHandlerPoolSize int
 
+	// TriggerRateLimits overrides the per-matcher suppression window of the
+	// trigger engine, keyed by MatcherSpec.Name ("pod_crash_loop",
+	// "pod_oom_killed", ...). Empty (the default) leaves every matcher on the
+	// window compiled into pkg/triggers.
+	//
+	// From TRIGGER_RATE_LIMITS, a "name=duration,name=duration" string.
+	// Durations are Go's form: "5m", "30s", "2h". See
+	// ParseTriggerRateLimits for what is rejected and why.
+	TriggerRateLimits map[string]time.Duration
+
 	// Kube primitives (group B): enabled when KubeEnabled=true. Independent
 	// of discovery so an operator can run primitives-only without paying
 	// for the full informer cache.
@@ -288,6 +298,7 @@ func FromEnv() (*Config, error) {
 		EmitTombstones:            envBool("DISCOVERY_EMIT_TOMBSTONES", false),
 		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
 		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
+		TriggerRateLimits:         ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
 		KubeEnabled:               envBool("KUBE_ENABLED", true),
 		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
@@ -375,6 +386,44 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// ParseTriggerRateLimits parses a "name=duration,name=duration" string into
+// per-matcher suppression windows. Used for the TRIGGER_RATE_LIMITS env var.
+//
+// Malformed pairs are skipped rather than fatal: this knob is reached for while
+// something is already going wrong (an alert is too quiet, or too loud), and a
+// typo in one entry should not take the agent down or silently discard the
+// entries around it.
+//
+// Only positive durations are accepted. Zero means "no rate limit" inside the
+// engine, and the conditions these matchers watch re-emit constantly — a Pod in
+// CrashLoopBackOff produces a kubewatch UPDATE on every backoff cycle, plus
+// resyncs — so a zero here is not "more alerts", it is a Finding every few
+// seconds for every affected Pod. Lowering the window is supported; removing it
+// is not.
+func ParseTriggerRateLimits(s string) map[string]time.Duration {
+	out := map[string]time.Duration{}
+	if s == "" {
+		return out
+	}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		i := strings.IndexByte(pair, '=')
+		if i <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(pair[:i])
+		d, err := time.ParseDuration(strings.TrimSpace(pair[i+1:]))
+		if err != nil || d <= 0 || name == "" {
+			continue
+		}
+		out[name] = d
+	}
+	return out
 }
 
 // ParseTargets parses a "name=url;name=url" string into a map. Used for
