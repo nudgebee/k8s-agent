@@ -852,7 +852,22 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Info("configmap change namespace exclusions overridden",
 				"namespaces", triggers.ConfigMapExcludedNamespaces)
 		}
-		eng := triggers.NewEngine(triggers.Builtins(), time.Now()).WithLogger(logger)
+		specs := triggers.Builtins()
+		// TRIGGER_RATE_LIMITS lets an operator shorten a matcher's suppression
+		// window without a new image. Applied before NewEngine so the engine
+		// never sees the compiled-in default for an overridden matcher.
+		if applied, unknown := triggers.ApplyRateLimits(specs, cfg.TriggerRateLimits); len(applied)+len(unknown) > 0 {
+			if len(applied) > 0 {
+				logger.Info("trigger rate-limit overrides applied", "matchers", applied)
+			}
+			// Loud on purpose: a typo here changes nothing, and without this
+			// the agent starts clean and the operator believes it took.
+			if len(unknown) > 0 {
+				logger.Warn("trigger rate-limit override ignored: no such matcher",
+					"names", unknown, "known_matchers", triggers.MatcherNames(specs))
+			}
+		}
+		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
 			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
 			// Service-backends lister lets service_no_endpoints resolve a
@@ -862,7 +877,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(typedKube, dynamicKube))
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
-		logger.Info("trigger engine enabled", "matcher_count", len(triggers.Builtins()))
+		logger.Info("trigger engine enabled", "matcher_count", len(specs))
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
