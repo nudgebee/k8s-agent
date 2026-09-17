@@ -124,15 +124,18 @@ func (e *Engine) fetchNamespaceEvents(namespace string) []EvidenceBlock {
 //
 // Filtering order per matcher:
 //
-//  1. Kind filter        (cheap, drops most events fast)
-//  2. Operation filter   (cheap)
-//  3. Predicate          (does the actual K8s field walking)
-//  4. Resync suppression (creationTimestamp older than start+grace)
-//  5. Rate limit         (fingerprint seen recently?)
+//  1. Kind filter         (cheap, drops most events fast)
+//  2. Operation filter    (cheap)
+//  3. Recovery predicate  (healthy again → clear suppression, never fires)
+//  4. Predicate           (does the actual K8s field walking)
+//  5. Resync suppression  (creationTimestamp older than start+grace)
+//  6. Rate limit          (fingerprint seen recently?)
 //
 // Order matters: the rate-limiter shouldn't be touched for events that
 // don't satisfy the predicate, otherwise the LRU fills with garbage
-// keys from non-matching events.
+// keys from non-matching events. The recovery check is the one exception
+// — it touches the limiter for non-matching events by design — but it
+// only ever removes keys, so it can't grow the LRU.
 func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 	if ev.Obj == nil {
 		return nil
@@ -145,6 +148,18 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 			continue
 		}
 		if !operationMatches(spec.Operations, ev.Operation) {
+			continue
+		}
+		// Recovery runs before the failure predicate: the two are
+		// mutually exclusive, and a recovered object is the cheaper,
+		// far more common case on a healthy cluster. Clearing the
+		// limiter record here is what lets a workload that recovers and
+		// breaks again inside the window get a second Finding instead
+		// of being suppressed as a repeat of the first.
+		if spec.RecoveryPredicate != nil && spec.RecoveryPredicate(ev.Obj, ev.OldObj) {
+			if spec.FingerprintFn != nil {
+				e.rl.Forget(spec.Name + ":" + spec.FingerprintFn(ev.Obj))
+			}
 			continue
 		}
 		// PredicateCtx (cluster-read matchers) takes precedence over the

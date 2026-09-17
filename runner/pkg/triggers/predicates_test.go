@@ -2,6 +2,7 @@ package triggers
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,11 +112,12 @@ func TestPodCrashLoop_DropsForOtherWaitingReasons(t *testing.T) {
 	}
 }
 
-func TestPodCrashLoop_FingerprintStableWithinHour(t *testing.T) {
-	// A Pod stuck in CrashLoopBackOff produces ~1 Finding per hour. The
-	// fingerprint pairs with a 1h rate limit and an hour-bucket, so
-	// successive restarts in the same wall-clock hour collapse to one
-	// fingerprint (and the rate limiter suppresses repeats).
+func TestPodCrashLoop_FingerprintIsWorkloadIdentityOnly(t *testing.T) {
+	// The fingerprint must be a pure function of (namespace, owner): no
+	// restart count, no Pod name, and — the reason this test exists — no
+	// wall-clock bucket. The recovery reset has to rebuild the same key
+	// from a healthy Pod, which it can only do if nothing about the
+	// failure or the current time went into it.
 	mk := func(rc int) map[string]any {
 		return asObj(t, `{
 			"metadata":{"name":"web-0","namespace":"prod"},
@@ -127,10 +129,186 @@ func TestPodCrashLoop_FingerprintStableWithinHour(t *testing.T) {
 	}
 	m := podCrashLoopMatcher()
 	if m.FingerprintFn(mk(2)) != m.FingerprintFn(mk(7)) {
-		t.Error("restartCount must not affect fingerprint within an hour")
+		t.Error("restartCount must not affect the fingerprint")
 	}
 	if m.FingerprintFn(mk(2)) != m.FingerprintFn(mk(100)) {
-		t.Error("restartCount must not affect fingerprint within an hour (rc=100 case)")
+		t.Error("restartCount must not affect the fingerprint (rc=100 case)")
+	}
+	if want := fp("report_crash_loop", "prod", "web-0"); m.FingerprintFn(mk(2)) != want {
+		t.Error("fingerprint must be exactly (aggregation key, namespace, owner-or-pod) — " +
+			"an extra dimension here breaks the recovery reset silently")
+	}
+	// A healthy Pod — no waiting state, no restarts — must produce the same
+	// key as the crashing one. This is the invariant the reset depends on.
+	healthy := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":true,"restartCount":0,
+			 "state":{"running":{"startedAt":"2020-01-01T00:00:00Z"}}}
+		]}
+	}`)
+	if m.FingerprintFn(healthy) != m.FingerprintFn(mk(5)) {
+		t.Error("healthy and crashing Pod must fingerprint identically, " +
+			"otherwise the recovery path clears a key nobody set")
+	}
+}
+
+// ---------- pod_crash_loop recovery ----------
+
+// podFixture builds a single-container Pod with the given readiness and a
+// running state that started `runningFor` ago.
+func podFixture(t *testing.T, ready bool, runningFor time.Duration) map[string]any {
+	t.Helper()
+	startedAt := time.Now().Add(-runningFor).UTC().Format(time.RFC3339)
+	return asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":`+strconv.FormatBool(ready)+`,"restartCount":9,
+			 "state":{"running":{"startedAt":"`+startedAt+`"}}}
+		]}
+	}`)
+}
+
+func TestPodCrashLoopRecovered_RequiresSustainedHealth(t *testing.T) {
+	cases := []struct {
+		name       string
+		ready      bool
+		runningFor time.Duration
+		want       bool
+	}{
+		{"ready and up well past the window", true, podCrashLoopStableWindow + 10*time.Minute, true},
+		{"ready and up exactly at the window", true, podCrashLoopStableWindow, true},
+		// The container is running and even ready — which is exactly what a
+		// crashlooping Pod looks like for the few seconds between restarts.
+		// Resetting here would re-fire the matcher every backoff cycle.
+		{"ready but only just started", true, 30 * time.Second, false},
+		{"ready but still inside the window", true, podCrashLoopStableWindow - time.Minute, false},
+		{"running long enough but not ready", false, time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := podCrashLoopRecovered(podFixture(t, tc.ready, tc.runningFor)); got != tc.want {
+				t.Errorf("podCrashLoopRecovered = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPodCrashLoopRecovered_RejectsUnhealthyShapes(t *testing.T) {
+	startedLongAgo := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	cases := map[string]string{
+		"currently crashlooping": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":false,"restartCount":9,
+				 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+			]}
+		}`,
+		"one of two containers still down": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":true,"state":{"running":{"startedAt":"` + startedLongAgo + `"}}},
+				{"name":"sidecar","ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+			]}
+		}`,
+		"no container statuses yet": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"phase":"Pending"}
+		}`,
+		"no status at all": `{"metadata":{"name":"web-0","namespace":"prod"}}`,
+		"terminated, not running": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":false,"state":{"terminated":{"reason":"Completed"}}}
+			]}
+		}`,
+		"running but startedAt unparseable": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":true,"state":{"running":{"startedAt":"not-a-timestamp"}}}
+			]}
+		}`,
+		// Init container stuck: the regular container is waiting on it, so
+		// the Pod fails the check without inspecting initContainerStatuses.
+		"blocked behind a failing init container": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{
+				"initContainerStatuses":[
+					{"name":"migrate","ready":false,"restartCount":6,
+					 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+				],
+				"containerStatuses":[
+					{"name":"app","ready":false,"state":{"waiting":{"reason":"PodInitializing"}}}
+				]
+			}
+		}`,
+	}
+	for name, fixture := range cases {
+		t.Run(name, func(t *testing.T) {
+			if podCrashLoopRecovered(asObj(t, fixture)) {
+				t.Error("podCrashLoopRecovered = true; want false")
+			}
+		})
+	}
+	if podCrashLoopRecovered(nil) {
+		t.Error("podCrashLoopRecovered(nil) = true; want false")
+	}
+}
+
+func TestPodCrashLoop_RecoveryResetsTheRateLimit(t *testing.T) {
+	// The customer-visible scenario end to end: a workload crashloops,
+	// recovers, and crashes again inside the 1h window. Before the reset
+	// the second crash was silently dropped.
+	crashing := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":false,"restartCount":5,
+			 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+		]}
+	}`)
+	recovered := podFixture(t, true, podCrashLoopStableWindow+time.Minute)
+
+	eng := NewEngine(Builtins(), time.Now().Add(-time.Hour))
+	crash := IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: crashing, OldObj: crashing}
+
+	if !contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Fatal("first crash must fire")
+	}
+	if contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Fatal("repeat crash inside the window must stay suppressed")
+	}
+
+	healthy := IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: recovered, OldObj: recovered}
+	if names := matchNames(eng.Match(healthy)); contains(names, "pod_crash_loop") {
+		t.Fatal("recovery must clear the limiter without emitting a Finding of its own")
+	}
+	if !contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Error("crash after a genuine recovery must fire again, not wait out the hour")
+	}
+}
+
+func TestPodCrashLoop_BackoffCycleDoesNotResetTheRateLimit(t *testing.T) {
+	// The regression this guards: a crashlooping container is briefly
+	// running and ready on every restart. If that counted as recovery the
+	// limiter would be cleared every cycle and the matcher would fire
+	// continuously — noisier than the bug it was meant to fix.
+	crashing := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":false,"restartCount":5,
+			 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+		]}
+	}`)
+	justRestarted := podFixture(t, true, 20*time.Second)
+
+	eng := NewEngine(Builtins(), time.Now().Add(-time.Hour))
+	crash := IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: crashing, OldObj: crashing}
+	if !contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Fatal("first crash must fire")
+	}
+	eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: justRestarted, OldObj: justRestarted})
+	if contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Error("a mid-backoff-cycle running container must not clear the rate limit")
 	}
 }
 
