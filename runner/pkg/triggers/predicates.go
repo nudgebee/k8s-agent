@@ -58,11 +58,29 @@ func Builtins() []MatcherSpec {
 // Pod has obj.restartCount == oldObj.restartCount, so the transition gate
 // suppressed every real event.
 //
-// Rate limit: 1h per (owner, hour-bucket). A Pod stuck in CrashLoopBackOff
-// fires ~1 Finding per hour. Earlier the matcher bucketed by
-// restartCount/5 with a 10m rate limit — a fast-crashing Pod (5 restarts
-// every ~10m) advanced the bucket every window and produced 20+ findings
-// in 6h. Hour-bucket pattern mirrors podOOMKilledMatcher.
+// Rate limit: 1h per owner, cleared early when the workload recovers
+// (RecoveryPredicate below). A Pod stuck in CrashLoopBackOff fires ~1
+// Finding per hour; a Pod that recovers and breaks again fires as soon
+// as it breaks again.
+//
+// Two earlier shapes, and why neither worked:
+//
+//   - restartCount/5 bucket + 10m rate limit: a fast-crashing Pod (5
+//     restarts every ~10m) advanced the bucket every window and produced
+//     20+ findings in 6h.
+//   - wall-clock hour bucket in the fingerprint (mirroring
+//     podOOMKilledMatcher): pinned re-fire to the clock rather than to
+//     the failure. Two crashes straddling :00 produced two Findings
+//     minutes apart, while a genuine recover-then-crash-again in the
+//     middle of an hour produced none at all. Observed live: findings at
+//     09:41 and 10:01 for one Deployment, then nothing for the rest of
+//     the hour.
+//
+// The bucket is gone, so the fingerprint is (namespace, owner) and can
+// be reconstructed from a healthy Pod — which is what makes the recovery
+// reset possible. Nothing downstream depended on the bucket: the
+// collector normalizes this aggregation key's fingerprint to owner level
+// on ingest anyway.
 func podCrashLoopMatcher() MatcherSpec {
 	const minRestarts = 2
 	return MatcherSpec{
@@ -90,21 +108,84 @@ func podCrashLoopMatcher() MatcherSpec {
 			}
 			return false
 		},
-		FingerprintFn: func(obj map[string]any) string {
-			ns, name := metaNS(obj), metaName(obj)
-			owner := ResolveOwner(obj)
-			if owner.Name != "" {
-				name = owner.Name
-			}
-			// Hour bucket pairs with the 1h rate limit. After the
-			// limit expires, the bucket has rolled too — so the next
-			// CrashLoopBackOff produces a fresh fingerprint and a
-			// fresh Finding. Mirrors podOOMKilledMatcher.
-			hourBucket := time.Now().UTC().Truncate(time.Hour).Unix()
-			return fp("report_crash_loop", ns, name, fmt.Sprintf("h%d", hourBucket))
+		RecoveryPredicate: func(obj, _ map[string]any) bool {
+			return podCrashLoopRecovered(obj)
 		},
-		EnrichBlocks: crashLoopEnrichBlocks,
+		FingerprintFn: podCrashLoopFingerprint,
+		EnrichBlocks:  crashLoopEnrichBlocks,
 	}
+}
+
+// podCrashLoopFingerprint identifies the workload, not the episode and
+// not the Pod: every replica of a Deployment crashing on the same bad
+// image is one problem, and the Pod name changes on every recreate.
+// Shared by the fire path and the recovery path — both must derive the
+// same key from the same Pod or the reset can't find the record to
+// clear, so it reads nothing that only a crashing Pod carries.
+func podCrashLoopFingerprint(obj map[string]any) string {
+	ns, name := metaNS(obj), metaName(obj)
+	if owner := ResolveOwner(obj); owner.Name != "" {
+		name = owner.Name
+	}
+	return fp("report_crash_loop", ns, name)
+}
+
+// podCrashLoopStableWindow is how long every container has to have been
+// running before we call a Pod recovered and drop the rate-limit record.
+//
+// It exists because CrashLoopBackOff is intermittent by construction:
+// the kubelet restarts the container, it runs (and briefly reports
+// ready) until it crashes, then goes back to waiting. So "not in
+// CrashLoopBackOff right now" is true for part of every backoff cycle,
+// and resetting on that would re-fire the matcher every few minutes —
+// worse than the bug this fixes. The container must survive longer than
+// the crash cycle for the reset to mean anything.
+//
+// 10m is comfortably past the kubelet's 5m backoff ceiling, so a Pod
+// that is still only cycling can't clear it.
+const podCrashLoopStableWindow = 10 * time.Minute
+
+// podCrashLoopRecovered reports whether the Pod has been healthy long
+// enough that a later CrashLoopBackOff is a new problem rather than a
+// continuation of the one we already reported.
+//
+// Every regular container must be ready and running, with a
+// state.running.startedAt at least podCrashLoopStableWindow old. The
+// startedAt check doubles as a restart check without needing the
+// previous object: the kubelet stamps a fresh startedAt on every
+// container start, so a Pod that restarted a minute ago cannot pass it.
+//
+// Init containers are deliberately not inspected — they terminate
+// successfully in a healthy Pod, so requiring them to be running would
+// never pass. An init container stuck crashlooping still fails this
+// check, because the regular containers behind it are waiting on
+// PodInitializing rather than running.
+func podCrashLoopRecovered(obj map[string]any) bool {
+	if obj == nil {
+		return false
+	}
+	statuses := podRegularContainerStatuses(obj)
+	if len(statuses) == 0 {
+		// No container statuses at all: a Pod that hasn't been scheduled
+		// or admitted yet. Unknown, not healthy — leave suppression as is.
+		return false
+	}
+	for _, cs := range statuses {
+		if ready, _ := cs["ready"].(bool); !ready {
+			return false
+		}
+		st, _ := cs["state"].(map[string]any)
+		running, _ := st["running"].(map[string]any)
+		if running == nil {
+			return false
+		}
+		startedAt, _ := running["startedAt"].(string)
+		since, ok := durationSinceRFC3339(startedAt)
+		if !ok || since < podCrashLoopStableWindow {
+			return false
+		}
+	}
+	return true
 }
 
 // crashLoopEnrichBlocks builds the markdown blocks report_crash_loop
@@ -883,6 +964,25 @@ func podContainerStatuses(obj map[string]any) []map[string]any {
 		}
 	}
 	return all
+}
+
+// podRegularContainerStatuses returns status.containerStatuses only —
+// no init or ephemeral containers. Callers that reason about whether the
+// Pod's actual workload is running want this; callers looking for a
+// failure anywhere in the Pod want podContainerStatuses.
+func podRegularContainerStatuses(obj map[string]any) []map[string]any {
+	st, _ := obj["status"].(map[string]any)
+	if st == nil {
+		return nil
+	}
+	raw, _ := st["containerStatuses"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if cs, _ := item.(map[string]any); cs != nil {
+			out = append(out, cs)
+		}
+	}
+	return out
 }
 
 func firstFailingImage(obj map[string]any) string {

@@ -70,3 +70,36 @@ func TestRateLimiter_EvictsAtCap(t *testing.T) {
 		t.Error("evicted 'a' should be allowed again")
 	}
 }
+
+func TestRateLimiter_ForgetClearsSuppression(t *testing.T) {
+	rl := NewRateLimiter(0)
+	if !rl.Allow("k", time.Hour) {
+		t.Fatal("first Allow must return true")
+	}
+	if rl.Allow("k", time.Hour) {
+		t.Fatal("second Allow within window must return false")
+	}
+	if !rl.Forget("k") {
+		t.Error("Forget must report that it removed a live record")
+	}
+	if rl.Len() != 0 {
+		t.Errorf("Len = %d; Forget must drop the entry from the LRU too", rl.Len())
+	}
+	if !rl.Allow("k", time.Hour) {
+		t.Error("Allow after Forget must return true — that is the whole point")
+	}
+}
+
+func TestRateLimiter_ForgetUnknownKeyIsNoop(t *testing.T) {
+	// The engine calls Forget on every recovery event, including for
+	// matchers that never fired for that object. That must not be an error
+	// and must not disturb unrelated keys.
+	rl := NewRateLimiter(0)
+	rl.Allow("other", time.Hour)
+	if rl.Forget("never-seen") {
+		t.Error("Forget on an unknown key must report false")
+	}
+	if rl.Allow("other", time.Hour) {
+		t.Error("forgetting an unknown key must not clear a different key")
+	}
+}

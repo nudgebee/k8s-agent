@@ -90,6 +90,27 @@ func (r *RateLimiter) Allow(key string, window time.Duration) bool {
 	return true
 }
 
+// Forget drops the record for a key so the next Allow on it returns true
+// immediately, and reports whether a record was actually removed. Used by
+// the engine's recovery path: when a matcher's RecoveryPredicate says the
+// subject is healthy again, the suppression from the previous fire is no
+// longer describing reality, and a fresh failure deserves a fresh Finding
+// instead of waiting out the remainder of the window.
+//
+// Forgetting a key the limiter never held is a no-op — callers don't have
+// to know whether the matcher ever fired.
+func (r *RateLimiter) Forget(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	el, ok := r.index[key]
+	if !ok {
+		return false
+	}
+	delete(r.index, key)
+	r.order.Remove(el)
+	return true
+}
+
 // Len returns the current entry count. Test-only.
 func (r *RateLimiter) Len() int {
 	r.mu.Lock()

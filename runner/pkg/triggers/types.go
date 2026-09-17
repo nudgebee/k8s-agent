@@ -60,6 +60,26 @@ type MatcherSpec struct {
 	// missing data.
 	PredicateCtx func(obj, oldObj map[string]any, ec EnrichContext) bool
 
+	// RecoveryPredicate (optional) is the inverse gate: it returns true
+	// when the object is healthy again, and the engine then clears the
+	// rate-limit record for this (matcher, fingerprint) so the next
+	// failure fires immediately instead of waiting out the remainder of
+	// the window. Never fires a Finding itself — recovery is not an
+	// event we report, only a reason to stop suppressing.
+	//
+	// Only meaningful for matchers whose FingerprintFn is stable across
+	// failure episodes (a fingerprint that embeds a time bucket or an
+	// episode id can't be reconstructed at recovery time, so there would
+	// be nothing to clear).
+	//
+	// Implementations must be strict about what counts as recovered.
+	// The condition a matcher watches is often intermittent by nature —
+	// a CrashLoopBackOff Pod is Running for a few seconds of every
+	// backoff cycle — so "not currently failing" is the wrong test: it
+	// resets the limiter on every cycle and turns the rate limit off.
+	// Require sustained health (see podCrashLoopStableWindow).
+	RecoveryPredicate func(obj, oldObj map[string]any) bool
+
 	// AggregationKey is set on the emitted Finding. Determines how the
 	// UI groups + dedupes. We use the legacy strings (so the UI's
 	// per-aggregation_key handling stays unchanged).
@@ -79,11 +99,18 @@ type MatcherSpec struct {
 	// typically 5-10 min.
 	RateLimit time.Duration
 
-	// FingerprintFn extracts the dedup key from the matched obj. Plan
-	// agent feedback: fingerprint MUST include a recurrence-bucket
-	// dimension for repeating conditions (crash count bucket, time
-	// bucket, etc.) — otherwise OOM-3-times-an-hour collapses to
-	// one Finding forever. Each builtin matcher provides its own.
+	// FingerprintFn extracts the dedup key from the matched obj. Each
+	// builtin matcher provides its own.
+	//
+	// Repeating conditions need some way to stop collapsing into one
+	// Finding forever. Two shapes do that: a recurrence-bucket dimension
+	// baked into the fingerprint (a time bucket, a count bucket — what
+	// pod_oom_killed does), or a stable fingerprint plus a
+	// RecoveryPredicate that clears the suppression when the subject is
+	// healthy again (what pod_crash_loop does). Prefer the second: a time
+	// bucket ties re-fire to the wall clock rather than to the failure,
+	// so the same condition can re-fire minutes apart across a bucket
+	// boundary and then stay silent for an hour in the middle of one.
 	FingerprintFn func(obj map[string]any) string
 
 	// SuppressChurn opts the matcher into frequency-based suppression: a
