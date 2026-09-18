@@ -185,26 +185,34 @@ var applicationTypeToLang = map[string]ProgrammingLanguage{
 	"ruby":   LangRuby,
 }
 
+// promMatcherValue prepares a string for use inside a PromQL double-quoted
+// label-matcher value. QuoteMeta escapes regex metacharacters with a
+// backslash, but PromQL string literals process escapes themselves and
+// reject unknown ones — a raw `\.` makes the whole query a parse error, so
+// the backslash has to survive as `\\`.
+func promMatcherValue(s string) string {
+	return strings.ReplaceAll(regexp.QuoteMeta(s), `\`, `\\`)
+}
+
 // detectLang resolves the target pod's language from the node-agent's
 // container_application_type metric — the same signal the pod-details UI
-// uses to preselect the language dropdown. Returns LangUnknown when
-// Prometheus is unconfigured, the query fails, or nothing in the pod maps
-// to a language we can profile; the caller turns that into an explicit
-// error rather than guessing.
-func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string) ProgrammingLanguage {
+// uses to preselect the language dropdown. It returns LangUnknown plus the
+// reason, which the caller puts in its error so "no Prometheus configured"
+// and "this pod runs nginx" don't read the same.
+func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string) (ProgrammingLanguage, string) {
 	if h.prom == nil {
-		return LangUnknown
+		return LangUnknown, "the agent has no Prometheus configured, so the language could not be looked up"
 	}
-	// container_id is "/k8s/<namespace>/<pod>/<container>"; QuoteMeta so a
-	// dot in a pod name can't widen the match.
+	// container_id is "/k8s/<namespace>/<pod>/<container>"; escape so a dot
+	// in a pod name can't widen the match.
 	query := fmt.Sprintf(`container_application_type{container_id=~"/k8s/%s/%s/.*"}`,
-		regexp.QuoteMeta(namespace), regexp.QuoteMeta(pod))
+		promMatcherValue(namespace), promMatcherValue(pod))
 
 	qctx, cancel := context.WithTimeout(ctx, langDetectTimeout)
 	defer cancel()
 	raw, err := h.prom.Query(qctx, query, "", "10s")
 	if err != nil {
-		return LangUnknown
+		return LangUnknown, fmt.Sprintf("the container_application_type lookup failed: %v", err)
 	}
 
 	var resp struct {
@@ -215,18 +223,24 @@ func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string)
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(raw, &resp); err != nil || resp.Status != "success" {
-		return LangUnknown
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return LangUnknown, fmt.Sprintf("the container_application_type response could not be read: %v", err)
+	}
+	if resp.Status != "success" {
+		return LangUnknown, "Prometheus rejected the container_application_type query"
 	}
 	// A pod can report several containers (app + sidecars). Take the first
 	// one that maps to a profilable language — a sidecar the node-agent
 	// labels "envoy" shouldn't shadow the java app next to it.
 	for _, s := range resp.Data.Result {
 		if lang, ok := applicationTypeToLang[strings.ToLower(s.Metric["application_type"])]; ok {
-			return lang
+			return lang, ""
 		}
 	}
-	return LangUnknown
+	if len(resp.Data.Result) == 0 {
+		return LangUnknown, "no container_application_type metric reported for it"
+	}
+	return LangUnknown, "it reports no language we have a profiler for"
 }
 
 // defaultProfilerImage picks the image variant by tool first, then
@@ -299,19 +313,19 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 
 	lang := req.Lang
 	if lang == "" || lang == LangUnknown {
-		lang = h.detectLang(ctx, req.Namespace, req.Name)
-	}
-	if lang == "" || lang == LangUnknown {
-		// Do NOT fall back to Go. The Go path scrapes
-		// http://127.0.0.1:<port>/debug/pprof inside the target, so on any
-		// non-Go process it fails as a wget 404/connection error that reads
-		// like a network fault instead of "we guessed the language wrong".
-		// Callers with no language (the pod_profiler playbook action) are
-		// better served by being told to name one.
-		return nil, fmt.Errorf(
-			"pod_profiler: could not determine the application language for %s/%s "+
-				"(no container_application_type metric for it) — pass lang explicitly",
-			req.Namespace, req.Name)
+		detected, why := h.detectLang(ctx, req.Namespace, req.Name)
+		if detected == "" || detected == LangUnknown {
+			// Do NOT fall back to Go. The Go path scrapes
+			// http://127.0.0.1:<port>/debug/pprof inside the target, so on
+			// any non-Go process it fails as a wget 404/connection error
+			// that reads like a network fault instead of "we guessed the
+			// language wrong". Callers with no language (the pod_profiler
+			// playbook action) are better served by being told to name one.
+			return nil, fmt.Errorf(
+				"pod_profiler: could not determine the application language for %s/%s — %s; pass lang explicitly",
+				req.Namespace, req.Name, why)
+		}
+		lang = detected
 	}
 	tool := req.ProfileTool
 	output := req.OutputType

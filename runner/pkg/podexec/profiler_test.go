@@ -599,8 +599,12 @@ func TestDetectLang(t *testing.T) {
 			if !tc.noSet {
 				h.SetLanguageDetector(tc.prom)
 			}
-			if got := h.detectLang(context.Background(), "shop", "cart-0"); got != tc.want {
+			got, why := h.detectLang(context.Background(), "shop", "cart-0")
+			if got != tc.want {
 				t.Errorf("detectLang = %q; want %q", got, tc.want)
+			}
+			if got == LangUnknown && why == "" {
+				t.Error("detectLang returned LangUnknown with no reason for the caller to report")
 			}
 		})
 	}
@@ -614,7 +618,10 @@ func TestDetectLang_QuotesMatcher(t *testing.T) {
 	h.SetLanguageDetector(p)
 	h.detectLang(context.Background(), "shop", "cart.0")
 
-	want := `container_application_type{container_id=~"/k8s/shop/cart\.0/.*"}`
+	// The backslash QuoteMeta adds must reach Prometheus as a literal, so it
+	// is doubled: a bare `\.` inside a PromQL string literal is an unknown
+	// escape sequence and fails the whole query at parse time.
+	want := `container_application_type{container_id=~"/k8s/shop/cart\\.0/.*"}`
 	if p.lastSeen != want {
 		t.Errorf("query = %s; want %s", p.lastSeen, want)
 	}
