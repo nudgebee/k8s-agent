@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,6 +49,16 @@ const (
 	LangRuby          ProgrammingLanguage = "ruby"
 	LangUnknown       ProgrammingLanguage = "unknown"
 )
+
+// langDetectTimeout bounds the container_application_type lookup. It runs
+// before the debugger pod is created and inside the dispatcher's 180s
+// budget, so it has to stay small enough to be noise.
+const langDetectTimeout = 10 * time.Second
+
+// profileOverhead is what a run costs on top of the profile window itself:
+// scheduling the debugger pod, pulling its image, and tarring the result
+// back out. Used to reject durations that cannot fit the action's budget.
+const profileOverhead = 30 * time.Second
 
 // ProfilingTool — `ProfilingTool` enum.
 type ProfilingTool string
@@ -131,6 +142,17 @@ type ProfilerHandler struct {
 	// pair. Uses PROFILER_IMAGE env. Pulled out as a func so tests can
 	// substitute without reaching into env.
 	image func(lang ProgrammingLanguage, tool ProfilingTool) string
+	// prom answers the container_application_type query used to resolve
+	// the target's language when the caller didn't pass one. Nil when the
+	// agent has no Prometheus configured — detection is then skipped.
+	prom promQuerier
+}
+
+// promQuerier is the slice of the Prometheus client this package needs.
+// Declared here (consumer side) so podexec doesn't import the client
+// package just for a type.
+type promQuerier interface {
+	Query(ctx context.Context, query, atTime, timeout string) (json.RawMessage, error)
 }
 
 // NewProfilerHandler wires the dispatch path. cs / restCfg can both be
@@ -142,6 +164,69 @@ func NewProfilerHandler(cs kubernetes.Interface, restCfg *rest.Config) *Profiler
 		restCfg: restCfg,
 		image:   defaultProfilerImage,
 	}
+}
+
+// SetLanguageDetector enables language auto-detection for requests that
+// carry no `lang`. Same optional-capability pattern as mutate.SetExec /
+// SetDynamic: without it the handler still works, it just requires the
+// caller to name the language.
+func (h *ProfilerHandler) SetLanguageDetector(p promQuerier) { h.prom = p }
+
+// applicationTypeToLang maps the node-agent's detected application_type
+// label onto the languages we have a profiler for. Types with no entry
+// (nginx, redis, postgres, envoy, …) are native binaries with no
+// language-specific tool, so they stay unresolved rather than being
+// forced into a wrong one.
+var applicationTypeToLang = map[string]ProgrammingLanguage{
+	"golang": LangGo,
+	"java":   LangJava,
+	"python": LangPython,
+	"nodejs": LangNode,
+	"ruby":   LangRuby,
+}
+
+// detectLang resolves the target pod's language from the node-agent's
+// container_application_type metric — the same signal the pod-details UI
+// uses to preselect the language dropdown. Returns LangUnknown when
+// Prometheus is unconfigured, the query fails, or nothing in the pod maps
+// to a language we can profile; the caller turns that into an explicit
+// error rather than guessing.
+func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string) ProgrammingLanguage {
+	if h.prom == nil {
+		return LangUnknown
+	}
+	// container_id is "/k8s/<namespace>/<pod>/<container>"; QuoteMeta so a
+	// dot in a pod name can't widen the match.
+	query := fmt.Sprintf(`container_application_type{container_id=~"/k8s/%s/%s/.*"}`,
+		regexp.QuoteMeta(namespace), regexp.QuoteMeta(pod))
+
+	qctx, cancel := context.WithTimeout(ctx, langDetectTimeout)
+	defer cancel()
+	raw, err := h.prom.Query(qctx, query, "", "10s")
+	if err != nil {
+		return LangUnknown
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.Status != "success" {
+		return LangUnknown
+	}
+	// A pod can report several containers (app + sidecars). Take the first
+	// one that maps to a profilable language — a sidecar the node-agent
+	// labels "envoy" shouldn't shadow the java app next to it.
+	for _, s := range resp.Data.Result {
+		if lang, ok := applicationTypeToLang[strings.ToLower(s.Metric["application_type"])]; ok {
+			return lang
+		}
+	}
+	return LangUnknown
 }
 
 // defaultProfilerImage picks the image variant by tool first, then
@@ -184,6 +269,17 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 	if req.Seconds <= 0 {
 		req.Seconds = 60
 	}
+	// pod_profiler is not a long-action, so the dispatcher gives it 180s.
+	// A profile longer than that budget can only ever end in "context
+	// deadline exceeded" three minutes later — say so now instead.
+	if deadline, ok := ctx.Deadline(); ok {
+		if budget := time.Until(deadline); budget < time.Duration(req.Seconds)*time.Second+profileOverhead {
+			return nil, fmt.Errorf(
+				"pod_profiler: a %ds profile does not fit the %ds this action has left "+
+					"(the debugger pod still has to start and the file be copied back) — ask for a shorter duration",
+				req.Seconds, int(budget.Seconds()))
+		}
+	}
 
 	pod, err := h.cs.CoreV1().Pods(req.Namespace).Get(ctx, req.Name, metav1.GetOptions{})
 	if err != nil {
@@ -203,7 +299,19 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 
 	lang := req.Lang
 	if lang == "" || lang == LangUnknown {
-		lang = LangGo // default when prometheus auto-detect misses
+		lang = h.detectLang(ctx, req.Namespace, req.Name)
+	}
+	if lang == "" || lang == LangUnknown {
+		// Do NOT fall back to Go. The Go path scrapes
+		// http://127.0.0.1:<port>/debug/pprof inside the target, so on any
+		// non-Go process it fails as a wget 404/connection error that reads
+		// like a network fault instead of "we guessed the language wrong".
+		// Callers with no language (the pod_profiler playbook action) are
+		// better served by being told to name one.
+		return nil, fmt.Errorf(
+			"pod_profiler: could not determine the application language for %s/%s "+
+				"(no container_application_type metric for it) — pass lang explicitly",
+			req.Namespace, req.Name)
 	}
 	tool := req.ProfileTool
 	output := req.OutputType

@@ -550,6 +550,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		var profiler *podexec.ProfilerHandler
 		if kubeRestCfg != nil {
 			profiler = podexec.NewProfilerHandler(typedKube, kubeRestCfg)
+			// Lets a request that carries no language resolve one from the
+			// node-agent's container_application_type metric — the signal
+			// the pod-details UI already uses. The pod_profiler playbook
+			// action has no language field at all, so without this every
+			// playbook run has to be told what it is profiling.
+			if promClient != nil {
+				profiler.SetLanguageDetector(promClient)
+			}
 		}
 		ph := podexec.HandlersWithProfiler(execer, profiler)
 		maps.Copy(handlers, ph)
