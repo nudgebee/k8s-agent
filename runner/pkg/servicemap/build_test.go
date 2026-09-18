@@ -187,6 +187,67 @@ func TestBuild_ServiceClusterIPMappedToService(t *testing.T) {
 	}
 }
 
+// TestBuild_UnknownDestinationNameKeptWhole covers destinations that
+// kube_pod_info never registered. Only a ReplicaSet name may lose its
+// "-<hash>" suffix; external hostnames and other kinds must keep the full
+// name, or distinct hosts collapse into one node (e.g. every
+// "us-central1-*.googleapis.com" endpoint becoming "us-central1").
+func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
+	conn := func(kind, name, ns string) promResult {
+		return metric(map[string]string{
+			"src_workload_kind":              "Deployment",
+			"src_workload_name":              "frontend",
+			"src_workload_namespace":         "shop",
+			"destination_workload_kind":      kind,
+			"destination_workload_name":      name,
+			"destination_workload_namespace": ns,
+		}, 1.0, true)
+	}
+	metrics := map[string][]promResult{
+		"kube_pod_info": {
+			metric(map[string]string{
+				"pod": "frontend-abc-1", "namespace": "shop", "pod_ip": "10.0.0.1",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+			}, 1, true),
+		},
+		"container_net_tcp_successful_connects": {
+			conn("external", "us-central1-aiplatform.googleapis.com", "external"),
+			conn("external", "us-central1-artifactregistry.googleapis.com", "external"),
+			conn("external", "kms.us-east-1.amazonaws.com", "external"),
+			conn("Service", "redis-master", "shop"),
+			conn("ReplicaSet", "api-7c9f8", "shop"),
+		},
+	}
+
+	w := build(metrics)
+
+	want := []ApplicationID{
+		{Name: "us-central1-aiplatform.googleapis.com", Kind: "external", Namespace: "external"},
+		{Name: "us-central1-artifactregistry.googleapis.com", Kind: "external", Namespace: "external"},
+		{Name: "kms.us-east-1.amazonaws.com", Kind: "external", Namespace: "external"},
+		{Name: "redis-master", Kind: "Service", Namespace: "shop"},
+		{Name: "api", Kind: "Deployment", Namespace: "shop"},
+	}
+	for _, id := range want {
+		if _, ok := w.applications[appKey(id)]; !ok {
+			t.Errorf("app %s missing; have %v", appKey(id), keysOf(w.applications))
+		}
+	}
+	for _, truncated := range []ApplicationID{
+		{Name: "us-central1", Kind: "external", Namespace: "external"},
+		{Name: "kms.us-east", Kind: "external", Namespace: "external"},
+		{Name: "redis", Kind: "Service", Namespace: "shop"},
+	} {
+		if _, ok := w.applications[appKey(truncated)]; ok {
+			t.Errorf("truncated app %s should not exist", appKey(truncated))
+		}
+	}
+	src := appKey(ApplicationID{Name: "frontend", Kind: "Deployment", Namespace: "shop"})
+	if got := len(w.edges[src]); got != len(want) {
+		t.Errorf("edges from frontend = %d; want %d", got, len(want))
+	}
+}
+
 func TestTrimReplicaSetSuffix(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"frontend-abc123", "frontend"},
