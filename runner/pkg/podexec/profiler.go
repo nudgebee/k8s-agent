@@ -56,9 +56,10 @@ const (
 const langDetectTimeout = 10 * time.Second
 
 // profileOverhead is what a run costs on top of the profile window itself:
-// scheduling the debugger pod, pulling its image, and tarring the result
-// back out. Used to reject durations that cannot fit the action's budget.
-const profileOverhead = 30 * time.Second
+// scheduling the debugger pod, pulling its image, the profiler's staggered
+// fan-out across the target's PIDs, and tarring the result back out. It
+// bounds the handler and rejects durations that cannot fit its budget.
+const profileOverhead = 3 * time.Minute
 
 // ProfilingTool — `ProfilingTool` enum.
 type ProfilingTool string
@@ -283,17 +284,24 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 	if req.Seconds <= 0 {
 		req.Seconds = 60
 	}
-	// pod_profiler is not a long-action, so the dispatcher gives it 180s.
-	// A profile longer than that budget can only ever end in "context
-	// deadline exceeded" three minutes later — say so now instead.
+	// A profile longer than the budget this action has left can only ever end
+	// in "context deadline exceeded" once the whole budget has burned — say
+	// so now instead.
+	need := time.Duration(req.Seconds)*time.Second + profileOverhead
 	if deadline, ok := ctx.Deadline(); ok {
-		if budget := time.Until(deadline); budget < time.Duration(req.Seconds)*time.Second+profileOverhead {
+		if budget := time.Until(deadline); budget < need {
 			return nil, fmt.Errorf(
 				"pod_profiler: a %ds profile does not fit the %ds this action has left "+
 					"(the debugger pod still has to start and the file be copied back) — ask for a shorter duration",
 				req.Seconds, int(budget.Seconds()))
 		}
 	}
+	// pod_profiler runs as a long action so a 600s profile isn't cut off at
+	// the 180s default, but that ceiling is shared with the rightsize_pvc
+	// data migration and measured in tens of minutes. Hold ourselves to what
+	// this profile can legitimately need.
+	ctx, cancel := context.WithTimeout(ctx, need)
+	defer cancel()
 
 	pod, err := h.cs.CoreV1().Pods(req.Namespace).Get(ctx, req.Name, metav1.GetOptions{})
 	if err != nil {

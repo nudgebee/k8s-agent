@@ -665,6 +665,21 @@ func TestProfile_RejectsDurationBeyondDeadline(t *testing.T) {
 	}
 }
 
+// TestProfile_AcceptsDurationInsideDeadline guards the other side of that
+// check: pod_profiler runs as a long action precisely so the UI's longest
+// profile still fits, and rejecting those would be worse than the timeout.
+func TestProfile_AcceptsDurationInsideDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
+	defer cancel()
+
+	h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+	// 600s is the maximum the profiler screen allows.
+	_, err := h.Profile(ctx, ProfileRequest{Name: "cart-0", Namespace: "shop", Seconds: 600})
+	if err != nil && strings.Contains(err.Error(), "does not fit") {
+		t.Errorf("err = %v; a 600s profile must fit the long-action budget", err)
+	}
+}
+
 // fakeRestConfig is a non-nil *rest.Config sentinel for tests that need
 // NewProfilerHandler to accept the wiring without dialing the apiserver.
 // The actual SPDY call would fail (Host="" is a no-op), but we never
