@@ -207,8 +207,17 @@ func edgeFromConnectionLabels(w *world, l map[string]string) *linkAccum {
 		} else {
 			// Workload labelled but not yet known — register it as a
 			// Deployment (most common case) so downstream lookups resolve.
+			// Only a ReplicaSet name carries a hash suffix; every other
+			// destination (external hostnames like
+			// "us-central1-aiplatform.googleapis.com", Services,
+			// StatefulSets) is already the real name and must not be cut
+			// at its last "-".
+			name := dstName
+			if dstKind == "ReplicaSet" {
+				name = trimReplicaSetSuffix(dstName)
+			}
 			id := ApplicationID{
-				Name:      trimReplicaSetSuffix(dstName),
+				Name:      name,
 				Kind:      orDefault(normalizeKind(dstKind), "Deployment"),
 				Namespace: dstNS,
 			}
