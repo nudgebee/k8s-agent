@@ -550,6 +550,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		var profiler *podexec.ProfilerHandler
 		if kubeRestCfg != nil {
 			profiler = podexec.NewProfilerHandler(typedKube, kubeRestCfg)
+			// Lets a request that carries no language resolve one from the
+			// node-agent's container_application_type metric — the signal
+			// the pod-details UI already uses. The pod_profiler playbook
+			// action has no language field at all, so without this every
+			// playbook run has to be told what it is profiling.
+			if promClient != nil {
+				profiler.SetLanguageDetector(promClient)
+			}
 		}
 		ph := podexec.HandlersWithProfiler(execer, profiler)
 		maps.Copy(handlers, ph)
@@ -720,7 +728,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// migration (copies volume data via a mover pod). The ceiling stays under
 	// the server's 60-min PROCESSING→TIMEOUT reap so a task isn't force-failed
 	// mid-flight. Override with LONG_TASK_TIMEOUT_SECONDS.
-	longActions := map[string]struct{}{"rightsize_pvc": {}}
+	// pod_profiler is here because the caller picks the duration (the UI
+	// allows up to 600s) and the profiler fans out over every PID in the
+	// target's process tree, staggered — a postgres pod with 11 backends
+	// blew the 180s default on a 20s profile. The handler bounds itself to
+	// the requested duration plus a fixed slack, so this ceiling is only the
+	// outer guard rail.
+	longActions := map[string]struct{}{"rightsize_pvc": {}, "pod_profiler": {}}
 	longTaskTimeout := 50 * time.Minute
 	if v := os.Getenv("LONG_TASK_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

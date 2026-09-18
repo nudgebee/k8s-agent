@@ -538,6 +538,148 @@ func TestProfile_RejectsMissingTargetPod(t *testing.T) {
 	}
 }
 
+// ---------- language detection ----------
+
+// fakeProm returns a canned /api/v1/query body (or an error) for
+// detectLang. It records the query so the test can assert the matcher.
+type fakeProm struct {
+	body     string
+	err      error
+	lastSeen string
+}
+
+func (f *fakeProm) Query(_ context.Context, query, _, _ string) (json.RawMessage, error) {
+	f.lastSeen = query
+	if f.err != nil {
+		return nil, f.err
+	}
+	return json.RawMessage(f.body), nil
+}
+
+// promVector builds a success envelope carrying one series per
+// application_type, in order.
+func promVector(appTypes ...string) string {
+	series := make([]string, 0, len(appTypes))
+	for _, at := range appTypes {
+		series = append(series, `{"metric":{"application_type":"`+at+`"},"value":[0,"1"]}`)
+	}
+	return `{"status":"success","data":{"resultType":"vector","result":[` +
+		strings.Join(series, ",") + `]}}`
+}
+
+// TestDetectLang covers the application_type → language mapping plus
+// every way detection is allowed to come back empty. LangUnknown is not
+// a soft default here: Profile turns it into an error, so a wrong
+// mapping silently reroutes a customer profile to the wrong tool.
+func TestDetectLang(t *testing.T) {
+	cases := []struct {
+		name  string
+		prom  *fakeProm
+		want  ProgrammingLanguage
+		noSet bool
+	}{
+		{name: "golang maps to go", prom: &fakeProm{body: promVector("golang")}, want: LangGo},
+		{name: "java", prom: &fakeProm{body: promVector("java")}, want: LangJava},
+		{name: "python", prom: &fakeProm{body: promVector("python")}, want: LangPython},
+		{name: "nodejs maps to node", prom: &fakeProm{body: promVector("nodejs")}, want: LangNode},
+		{name: "ruby", prom: &fakeProm{body: promVector("ruby")}, want: LangRuby},
+		{name: "case insensitive", prom: &fakeProm{body: promVector("Java")}, want: LangJava},
+		// A sidecar the node-agent labels envoy must not shadow the app.
+		{name: "skips unprofilable sidecar", prom: &fakeProm{body: promVector("envoy", "java")}, want: LangJava},
+		{name: "native-only pod stays unknown", prom: &fakeProm{body: promVector("nginx", "redis")}, want: LangUnknown},
+		{name: "empty result", prom: &fakeProm{body: promVector()}, want: LangUnknown},
+		{name: "query error", prom: &fakeProm{err: errors.New("boom")}, want: LangUnknown},
+		{name: "prometheus error status", prom: &fakeProm{body: `{"status":"error","error":"bad"}`}, want: LangUnknown},
+		{name: "malformed body", prom: &fakeProm{body: `not json`}, want: LangUnknown},
+		{name: "no prometheus configured", noSet: true, want: LangUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+			if !tc.noSet {
+				h.SetLanguageDetector(tc.prom)
+			}
+			got, why := h.detectLang(context.Background(), "shop", "cart-0")
+			if got != tc.want {
+				t.Errorf("detectLang = %q; want %q", got, tc.want)
+			}
+			if got == LangUnknown && why == "" {
+				t.Error("detectLang returned LangUnknown with no reason for the caller to report")
+			}
+		})
+	}
+}
+
+// TestDetectLang_QuotesMatcher — a dot in a pod name is a regex
+// wildcard; unescaped it would match other pods' containers.
+func TestDetectLang_QuotesMatcher(t *testing.T) {
+	p := &fakeProm{body: promVector()}
+	h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+	h.SetLanguageDetector(p)
+	h.detectLang(context.Background(), "shop", "cart.0")
+
+	// The backslash QuoteMeta adds must reach Prometheus as a literal, so it
+	// is doubled: a bare `\.` inside a PromQL string literal is an unknown
+	// escape sequence and fails the whole query at parse time.
+	want := `container_application_type{container_id=~"/k8s/shop/cart\\.0/.*"}`
+	if p.lastSeen != want {
+		t.Errorf("query = %s; want %s", p.lastSeen, want)
+	}
+}
+
+// TestProfile_UndetectableLanguageErrors locks the contract that
+// replaced the old "assume Go" default: with no lang and no detection,
+// the caller is told to name the language instead of getting a pprof
+// scrape that 404s on every non-Go process.
+func TestProfile_UndetectableLanguageErrors(t *testing.T) {
+	cs := fake.NewClientset(
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "cart-0", Namespace: "shop"},
+			Spec:       corev1.PodSpec{NodeName: "node-a"},
+			Status: corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{ContainerID: "containerd://abc"}},
+			},
+		},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+	)
+	h := NewProfilerHandler(cs, fakeRestConfig)
+	h.SetLanguageDetector(&fakeProm{body: promVector("nginx")})
+
+	_, err := h.Profile(context.Background(), ProfileRequest{Name: "cart-0", Namespace: "shop"})
+	if err == nil || !strings.Contains(err.Error(), "could not determine the application language") {
+		t.Errorf("err = %v; want 'could not determine the application language'", err)
+	}
+}
+
+// TestProfile_RejectsDurationBeyondDeadline — pod_profiler runs under
+// the dispatcher's 180s budget, so a longer profile can only end in
+// "context deadline exceeded" once the whole budget has burned.
+func TestProfile_RejectsDurationBeyondDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+	_, err := h.Profile(ctx, ProfileRequest{Name: "cart-0", Namespace: "shop", Seconds: 300})
+	if err == nil || !strings.Contains(err.Error(), "does not fit") {
+		t.Errorf("err = %v; want 'does not fit'", err)
+	}
+}
+
+// TestProfile_AcceptsDurationInsideDeadline guards the other side of that
+// check: pod_profiler runs as a long action precisely so the UI's longest
+// profile still fits, and rejecting those would be worse than the timeout.
+func TestProfile_AcceptsDurationInsideDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
+	defer cancel()
+
+	h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+	// 600s is the maximum the profiler screen allows.
+	_, err := h.Profile(ctx, ProfileRequest{Name: "cart-0", Namespace: "shop", Seconds: 600})
+	if err != nil && strings.Contains(err.Error(), "does not fit") {
+		t.Errorf("err = %v; a 600s profile must fit the long-action budget", err)
+	}
+}
+
 // fakeRestConfig is a non-nil *rest.Config sentinel for tests that need
 // NewProfilerHandler to accept the wiring without dialing the apiserver.
 // The actual SPDY call would fail (Host="" is a no-op), but we never
