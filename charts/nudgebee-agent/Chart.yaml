@@ -34,8 +34,8 @@ annotations:
 # release-rc.yaml stamps both for RCs; release.yaml uses whatever is committed
 # here, so a GA release ships exactly these two lines. helm-dev-lint.yml fails
 # the PR if they differ.
-version: 0.1.25
-appVersion: 0.1.25
+version: 0.1.26
+appVersion: 0.1.26
 dependencies:
 - name: opencost
   version: 2.0.1
