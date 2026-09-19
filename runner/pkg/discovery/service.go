@@ -623,8 +623,19 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 	flush := func(last bool) {
 		seq++
 		env := &Envelope{
-			Type:          typ,
-			Data:          append([]any(nil), chunk...),
+			Type: typ,
+			// Must stay non-nil even when chunk is empty: `append([]any(nil))`
+			// returns a nil slice, which marshals to `"data": null`, and the
+			// collector discards a null-data payload outright (it cannot tell
+			// "no resources" from "lost payload", and coercing null to [] on a
+			// last batch would deactivate every resource for the account). A
+			// discarded envelope is silent data loss when it is the is_last
+			// one: the collector never records the terminal sequence, so
+			// claim_reconcile never fires and the snapshot's deletion-reconcile
+			// is skipped entirely. Two ways to get an empty final chunk — a
+			// converted count that is an exact multiple of batchSize, and a
+			// resource type with no items at all.
+			Data:          append(make([]any, 0, len(chunk)), chunk...),
 			FullLoad:      true,
 			BatchID:       batchID,
 			BatchSequence: seq,
