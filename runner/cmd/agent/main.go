@@ -804,6 +804,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		Logger:          logger,
 		HandlerPoolSize: cfg.RelayHandlerPoolSize,
 		OnShed:          func() { mreg.ForwardShed.WithLabelValues("relay").Inc() },
+		OnConnect:       func() { mreg.OnRelayConnected(true) },
+		OnDisconnect:    func() { mreg.OnRelayConnected(false) },
+		OnReconnect:     mreg.OnRelayReconnect,
 	}, disp.Handle)
 
 	logger.Info("starting relay client",
@@ -845,6 +848,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
 		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
+		fwd.OnForward = mreg.OnAlertForwarded
+		fwd.OnDrop = func(string) { mreg.OnAlertDropped() }
 		// Wire the trigger engine. Without this, every kubewatch event is
 		// dropped (safe default — see plan stage 2.1). With it, only
 		// events matching a registered predicate produce a Finding.
@@ -1131,6 +1136,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// Discovery: K8s informer-driven resource sync. Reuses typedKube built above.
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
+		discoverySink.Metrics = mreg
 		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,

@@ -71,6 +71,14 @@ type Config struct {
 	// OnShed, if set, is called whenever a message is shed due to pool
 	// saturation so main can bump a Prometheus counter.
 	OnShed func()
+	// OnConnect / OnDisconnect, if set, bracket each live WS session so main
+	// can drive the relay_connected gauge. OnDisconnect runs on every exit
+	// path out of an established session, so the gauge cannot latch at 1.
+	OnConnect    func()
+	OnDisconnect func()
+	// OnReconnect, if set, is called before each redial after the first, so
+	// main can count reconnect attempts.
+	OnReconnect func()
 }
 
 // Client manages the WebSocket lifecycle. One Client per agent process.
@@ -125,6 +133,9 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(c.cfg.ReconnectDelay):
+			if c.cfg.OnReconnect != nil {
+				c.cfg.OnReconnect()
+			}
 		}
 	}
 }
@@ -147,6 +158,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 		return fmt.Errorf("dial %s: %w", c.cfg.URL, err)
 	}
 	c.cfg.Logger.Info("relay connected", "url", c.cfg.URL)
+	if c.cfg.OnConnect != nil {
+		c.cfg.OnConnect()
+	}
 
 	c.mu.Lock()
 	c.conn = conn
@@ -156,6 +170,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 		_ = c.conn.Close()
 		c.conn = nil
 		c.mu.Unlock()
+		if c.cfg.OnDisconnect != nil {
+			c.cfg.OnDisconnect()
+		}
 	}()
 
 	// Keepalive. Every handler below runs on this goroutine (gorilla calls
