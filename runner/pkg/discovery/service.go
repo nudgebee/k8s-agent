@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -389,8 +390,16 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 		converter: converter,
 	}
 	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { enqueue(queue, obj) },
-		UpdateFunc: func(_, obj any) { enqueue(queue, obj) },
+		AddFunc: func(obj any) { enqueue(queue, obj) },
+		UpdateFunc: func(oldObj, newObj any) {
+			// Every resync replays the whole cache as no-op updates. The
+			// periodic full snapshot already re-sends everything, so posting
+			// them as well only doubles what the collector has to drain.
+			if sameResourceVersion(oldObj, newObj) {
+				return
+			}
+			enqueue(queue, newObj)
+		},
 		DeleteFunc: func(obj any) {
 			// When tombstones are enabled, capture a deleted:true item NOW —
 			// the DeleteFunc still has the object; once the key is gone from the
@@ -410,6 +419,21 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 		},
 	})
 	s.handlers = append(s.handlers, h)
+}
+
+// sameResourceVersion reports whether an update carries no change: an informer
+// resync delivers the cached object as both old and new. Objects without a
+// ResourceVersion are treated as changed.
+func sameResourceVersion(oldObj, newObj any) bool {
+	o, err := meta.Accessor(oldObj)
+	if err != nil {
+		return false
+	}
+	n, err := meta.Accessor(newObj)
+	if err != nil {
+		return false
+	}
+	return o.GetResourceVersion() != "" && o.GetResourceVersion() == n.GetResourceVersion()
 }
 
 // unwrapDeleted returns the underlying object from a cache.DeletedFinalStateUnknown
