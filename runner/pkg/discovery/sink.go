@@ -79,6 +79,17 @@ type Sink struct {
 	Cluster    string // X-NB-Cluster header
 	HTTP       *http.Client
 	Logger     *slog.Logger
+	// Metrics, when set, records the outcome of every Post. nil disables
+	// recording (tests, and any caller without a registry).
+	Metrics SinkMetrics
+}
+
+// SinkMetrics records discovery POST outcomes. *metrics.Registry satisfies it.
+// Declared here rather than importing pkg/metrics so the dependency points the
+// same way as dispatch.Metrics.
+type SinkMetrics interface {
+	OnDiscoveryPost(typ string, fullLoad bool)
+	OnDiscoveryError(typ string)
 }
 
 func NewSink(backendURL, authSecret, accountID, cluster string, logger *slog.Logger) *Sink {
@@ -96,7 +107,21 @@ func NewSink(backendURL, authSecret, accountID, cluster string, logger *slog.Log
 }
 
 // Post sends one envelope. Body is gzipped if larger than 16 KB.
-func (s *Sink) Post(ctx context.Context, env *Envelope) error {
+//
+// Every exit path is metered, so discovery_posts_total / discovery_errors_total
+// account for the whole POST — marshal and gzip failures included, not just the
+// HTTP call.
+func (s *Sink) Post(ctx context.Context, env *Envelope) (err error) {
+	if s.Metrics != nil {
+		defer func() {
+			if err != nil {
+				s.Metrics.OnDiscoveryError(string(env.Type))
+				return
+			}
+			s.Metrics.OnDiscoveryPost(string(env.Type), env.FullLoad)
+		}()
+	}
+
 	if s.URL == "" {
 		return errors.New("discovery: backend URL not configured")
 	}

@@ -61,6 +61,12 @@ type Forwarder struct {
 	// OnShed, if set, is called on each shed event with the source label
 	// ("alertmanager"|"kubewatch") so main can bump a Prometheus counter.
 	OnShed func(source string)
+	// OnForward / OnDrop, if set, are called once per Finding the backend
+	// accepted / rejected, so main can bump the alerts_forwarded_total and
+	// alerts_dropped_total counters. These mirror the Dropped() accessor,
+	// which nothing polls.
+	OnForward func()
+	OnDrop    func(source string)
 }
 
 // SetForwardPoolSize bounds concurrent event-forward goroutines. n<=0 leaves
@@ -161,7 +167,9 @@ func (f *Forwarder) handleAlert(w http.ResponseWriter, r *http.Request) {
 		for i := range envelopes {
 			if err := f.forward(context.Background(), &envelopes[i]); err != nil {
 				f.recordDrop("alertmanager", err)
+				continue
 			}
+			f.recordForward()
 		}
 	})
 }
@@ -250,7 +258,9 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := f.forward(context.Background(), env); err != nil {
 				f.recordDrop("kubewatch_matcher_"+matches[i].MatcherName, err)
+				continue
 			}
+			f.recordForward()
 		}
 	})
 }
@@ -314,8 +324,17 @@ func (f *Forwarder) forward(ctx context.Context, env *FindingEnvelope) error {
 
 func (f *Forwarder) recordDrop(source string, err error) {
 	f.dropped.Add(1)
+	if f.OnDrop != nil {
+		f.OnDrop(source)
+	}
 	f.Logger.Error("event forward failed",
 		"source", source, "err", err, "dropped_total", f.dropped.Load())
+}
+
+func (f *Forwarder) recordForward() {
+	if f.OnForward != nil {
+		f.OnForward()
+	}
 }
 
 // Dropped returns the running count of events dropped due to forward
