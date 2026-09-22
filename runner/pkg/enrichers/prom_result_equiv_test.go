@@ -74,26 +74,33 @@ func vectorEnvelope(seriesJSON string) []byte {
 // backend can actually emit through both implementations.
 func TestMatrixDecode_MatchesReference(t *testing.T) {
 	cases := map[string]string{
-		"plain":            `[{"metric":{"a":"b"},"values":[[1700000000,"0.42"],[1700000060,"1"]]}]`,
-		"integral value":   `[{"metric":{},"values":[[1700000000,"3"]]}]`,
-		"negative":         `[{"metric":{},"values":[[1700000000,"-17.5"]]}]`,
-		"exponent value":   `[{"metric":{},"values":[[1700000000,"1.4e+09"]]}]`,
-		"NaN value":        `[{"metric":{},"values":[[1700000000,"NaN"]]}]`,
-		"inf value":        `[{"metric":{},"values":[[1700000000,"+Inf"]]}]`,
-		"fractional ts":    `[{"metric":{},"values":[[1700000000.501,"1"]]}]`,
-		"quoted ts":        `[{"metric":{},"values":[["1700000000","1"]]}]`,
-		"empty values":     `[{"metric":{"a":"b"},"values":[]}]`,
-		"empty result":     `[]`,
-		"multi series":     `[{"metric":{"a":"1"},"values":[[1,"1"]]},{"metric":{"a":"2"},"values":[[2,"2"]]}]`,
-		"whitespace":       `[ { "metric" : { } , "values" : [ [ 1700000000 , "0.42" ] ] } ]`,
-		"escaped value":    `[{"metric":{},"values":[[1700000000,"a\"b"]]}]`,
-		"unicode value":    `[{"metric":{},"values":[[1700000000,"é "]]}]`,
-		"big ts":           `[{"metric":{},"values":[[253402300799,"1"]]}]`,
-		"zero ts":          `[{"metric":{},"values":[[0,"0"]]}]`,
-		"many samples":     manySamples(500),
-		"long fractional":  `[{"metric":{},"values":[[1700000000,"0.123456789012345"]]}]`,
-		"leading plus ts":  `[{"metric":{},"values":[[1700000000,"1"]]}]`,
-		"value with comma": `[{"metric":{},"values":[[1700000000,"1,2"]]}]`,
+		"plain":          `[{"metric":{"a":"b"},"values":[[1700000000,"0.42"],[1700000060,"1"]]}]`,
+		"integral value": `[{"metric":{},"values":[[1700000000,"3"]]}]`,
+		"negative":       `[{"metric":{},"values":[[1700000000,"-17.5"]]}]`,
+		"exponent value": `[{"metric":{},"values":[[1700000000,"1.4e+09"]]}]`,
+		"NaN value":      `[{"metric":{},"values":[[1700000000,"NaN"]]}]`,
+		"inf value":      `[{"metric":{},"values":[[1700000000,"+Inf"]]}]`,
+		"fractional ts":  `[{"metric":{},"values":[[1700000000.501,"1"]]}]`,
+		"quoted ts":      `[{"metric":{},"values":[["1700000000","1"]]}]`,
+		"empty values":   `[{"metric":{"a":"b"},"values":[]}]`,
+		"empty result":   `[]`,
+		"multi series":   `[{"metric":{"a":"1"},"values":[[1,"1"]]},{"metric":{"a":"2"},"values":[[2,"2"]]}]`,
+		"whitespace":     `[ { "metric" : { } , "values" : [ [ 1700000000 , "0.42" ] ] } ]`,
+		"escaped value":  `[{"metric":{},"values":[[1700000000,"a\"b"]]}]`,
+		"unicode value":  `[{"metric":{},"values":[[1700000000,"é "]]}]`,
+		"big ts":         `[{"metric":{},"values":[[253402300799,"1"]]}]`,
+		"zero ts":        `[{"metric":{},"values":[[0,"0"]]}]`,
+		// Invalid UTF-8 must come out as U+FFFD, exactly as encoding/json
+		// renders it — the scanner passed the raw bytes through until the
+		// fuzzer caught it. Written with \x escapes so this source file stays
+		// valid UTF-8 itself.
+		"invalid utf8 value":  "[{\"metric\":{},\"values\":[[1700000000,\"a\xa9b\"]]}]",
+		"invalid utf8 only":   "[{\"metric\":{},\"values\":[[1700000000,\"\xa9\"]]}]",
+		"lone surrogate byte": "[{\"metric\":{},\"values\":[[1700000000,\"a\xed\xa0\x80b\"]]}]",
+		"many samples":        manySamples(500),
+		"long fractional":     `[{"metric":{},"values":[[1700000000,"0.123456789012345"]]}]`,
+		"leading plus ts":     `[{"metric":{},"values":[[1700000000,"1"]]}]`,
+		"value with comma":    `[{"metric":{},"values":[[1700000000,"1,2"]]}]`,
 	}
 
 	for name, seriesJSON := range cases {
