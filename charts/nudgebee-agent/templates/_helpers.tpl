@@ -61,27 +61,49 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-GOMEMLIMIT (in bytes) for the runner, derived from its container memory limit.
+GOMEMLIMIT (in bytes) for the runner, derived from its memory limit if it has
+one and from its memory request otherwise.
 
 The runner is a Go process and the Go runtime is cgroup-unaware: without
 GOMEMLIMIT the GC paces off GOGC alone, so a transient allocation burst can run
 the heap past the container limit and get the pod OOM-killed while the live heap
 is still small. GOMEMLIMIT is a soft limit — as the heap approaches it the GC
-runs progressively harder, trading CPU to stay under the cgroup ceiling.
+runs progressively harder, trading CPU to stay under the ceiling.
 
-Derived rather than hardcoded so it cannot drift from resources.limits.memory:
-raising the limit raises the headroom automatically. Emits nothing when no
-memory limit is set (unbounded cgroup — a soft limit would be arbitrary).
+Derived rather than hardcoded so it cannot drift from the resource block:
+raising the limit raises the headroom automatically.
+
+Falling back to resources.requests.memory is deliberate, and replaces an
+earlier rule that emitted nothing at all when no limit was set. "No limit"
+reads like "no ceiling needed", but the Go runtime does not stop growing just
+because the cgroup lets it: measured on a runner with no limit, one scheduled
+workload sweep drove the heap to 4088Mi against a ~180Mi median, and the same
+sweep against the same code with a limit in place peaked at 1618Mi with GC
+pacing holding it there. An unlimited runner is the one most in need of a
+ceiling, not the one that can do without it.
+
+A request-derived ceiling is a soft one: exceeding it costs GC CPU, never an
+OOM kill. That is strictly better than an unbounded heap on a node that will
+evict the pod under pressure anyway. Operators who want the heap to exceed the
+request can set runner.goMemLimit explicitly.
 
 Ratio is runner.goMemLimitRatio (default 0.8); the remaining 20% covers non-heap
 RSS (goroutine stacks, runtime metadata, mmap'd binary). Set runner.goMemLimit to
-override with an explicit value and skip the derivation entirely.
+override with an explicit value and skip the derivation entirely; set it to "0"
+to opt out of the ceiling altogether.
 */}}
 {{- define "nudgebee-agent.goMemLimit" -}}
-{{- if .Values.runner.goMemLimit -}}
+{{- /* The "0" test has to come first: --set goMemLimit=0 yields an int 0,
+       which is falsy, so a plain truthiness check would fall through to the
+       derivation and silently ignore the opt-out. */ -}}
+{{- if eq (.Values.runner.goMemLimit | toString) "0" -}}
+{{- else if .Values.runner.goMemLimit -}}
 {{- .Values.runner.goMemLimit -}}
 {{- else -}}
 {{- $lim := (dig "resources" "limits" "memory" "" .Values.runner) | toString -}}
+{{- if not (regexFind "^[0-9.]+" $lim) -}}
+{{- $lim = (dig "resources" "requests" "memory" "" .Values.runner) | toString -}}
+{{- end -}}
 {{- $num := regexFind "^[0-9.]+" $lim -}}
 {{- if $num -}}
 {{- $mult := 1.0 -}}

@@ -107,20 +107,29 @@ runner:
       #   ~500 nodes / ~50k workloads   : 4000Mi
       #   ~1000 nodes / ~100k workloads : 6000Mi+  (and enable runner.scaling below)
       memory: 2000Mi
-  # GOMEMLIMIT is derived from resources.limits.memory above and injected into
-  # the runner container, so the Go GC knows about the cgroup ceiling instead of
+  # GOMEMLIMIT is derived from resources.limits.memory above — or from
+  # resources.requests.memory when no limit is set — and injected into the
+  # runner container, so the Go GC knows about the ceiling instead of
   # discovering it via SIGKILL. Without it a transient allocation burst (large
   # Prometheus/Loki/ClickHouse responses are read whole before being decoded) can
   # outrun the collector and OOM the pod while the live heap is still small —
   # which is why OOMKills show up even on tiny clusters where the sizing table
   # above says there is plenty of headroom.
   #
-  # goMemLimitRatio is the fraction of the memory limit handed to the Go heap;
+  # Clearing the memory limit does NOT disable the ceiling, and should not be
+  # used to try: a runner with no limit is the one most exposed, because nothing
+  # stops the heap growing. Measured on one such runner, a single scheduled
+  # workload sweep took the heap to 4088Mi against a ~180Mi median; the same
+  # sweep with a limit in place peaked at 1618Mi. To genuinely opt out, set
+  # goMemLimit to "0".
+  #
+  # goMemLimitRatio is the fraction of the limit/request handed to the Go heap;
   # the remainder covers non-heap RSS. Lower it if the pod still OOMs, raise it
   # to trade OOM-safety margin for less GC CPU.
   goMemLimitRatio: 0.8
   # Explicit GOMEMLIMIT override; skips the derivation when non-empty. Accepts
-  # the Go form (e.g. "1600MiB" or a plain byte count). Leave empty to derive.
+  # the Go form (e.g. "1600MiB" or a plain byte count). Leave empty to derive,
+  # or set "0" to inject nothing and let the heap grow unbounded.
   goMemLimit: ""
   # Per-matcher suppression window for the trigger engine, as
   # "matcher=duration,matcher=duration". Surfaces as TRIGGER_RATE_LIMITS.
