@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,8 +181,19 @@ func TestSink_RetriedGzipBodyIsNotEmpty(t *testing.T) {
 
 func TestSink_StopsRetryingWhenContextIsCancelled(t *testing.T) {
 	// Real backoff here on purpose: the point is that cancellation wins over
-	// the wait rather than the test outrunning it.
-	srv, calls := countingServer(t, http.StatusServiceUnavailable)
+	// the wait, not that the test outruns it.
+	var calls atomic.Int32
+	// Signalled rather than slept on — a fixed sleep either races a loaded CI
+	// box or pads every run. sync.Once because a regression that retries would
+	// otherwise panic on a second close instead of failing the assertion below.
+	var once sync.Once
+	firstAttempt := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		once.Do(func() { close(firstAttempt) })
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := NewSink(srv.URL, "secret", "acc-1", "cluster-x", slog.Default())
@@ -189,8 +201,7 @@ func TestSink_StopsRetryingWhenContextIsCancelled(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Post(ctx, testEnvelope()) }()
 
-	// Let the first attempt land, then cancel while it is backing off.
-	time.Sleep(100 * time.Millisecond)
+	<-firstAttempt // the post is now in its first backoff
 	cancel()
 
 	select {

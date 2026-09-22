@@ -223,7 +223,16 @@ func (s *Sink) post(ctx context.Context, body []byte, contentEncoding string) (b
 		// down, or its own deadline is already spent.
 		return ctx.Err() == nil, fmt.Errorf("post: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drain before closing, or net/http will not put the connection back in the
+	// idle pool: a body that was closed unread makes the next post open a fresh
+	// TCP connection and redo the TLS handshake. That was already true before
+	// retries existed; retries multiply how often it happens, since a broker
+	// outage now turns one post into four. Bounded so a backend answering with
+	// something enormous cannot park this goroutine reading it.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
