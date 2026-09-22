@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,20 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/observability/prometheus"
+)
+
+const (
+	// maxConcurrentQueries bounds the per-request fan-out in
+	// HandleQueriesEnricher. Matches servicemap's MaxParallel.
+	maxConcurrentQueries = 8
+
+	// maxRangePoints caps (end-start)/step for a range query. Prometheus
+	// itself refuses more than 11000 points with an HTTP 400, so anything
+	// above this was never going to return data — but the runner used to
+	// forward the request anyway and, for backends with a laxer limit,
+	// allocate the whole grid. Over the cap the step is widened instead, which
+	// returns a coarser series rather than nothing.
+	maxRangePoints = 11000
 )
 
 // PromQuerier is the subset of *prometheus.Client this package needs. We type
@@ -164,11 +179,19 @@ func (p *PrometheusEnricher) HandleQueriesEnricher(ctx context.Context, params m
 	}
 	results := make([]slot, len(queries))
 	var wg sync.WaitGroup
+	// Bound the fan-out. Every in-flight query holds its whole response body
+	// plus its decoded tree, so an unbounded fan-out makes peak memory a
+	// function of how many queries the caller happened to batch. servicemap
+	// has carried the same bound for the same reason.
+	sem := make(chan struct{}, maxConcurrentQueries)
 	for i, q := range queries {
 		i, q := i, q
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			if instant {
 				list, runErr := p.runOneInstantRaw(ctx, q.query, endsAt)
 				if runErr != nil {
@@ -396,6 +419,7 @@ func (p *PrometheusEnricher) runOne(ctx context.Context, query string, instant b
 		if step == "" {
 			step = "60"
 		}
+		step = clampStep(startsAt, endsAt, step)
 		raw, err = p.q.QueryRange(ctx, query, s, e, step, "")
 	}
 	if err != nil {
@@ -478,6 +502,39 @@ func toInt(v any) (int, error) {
 		return i, err
 	}
 	return 0, fmt.Errorf("expected number, got %T", v)
+}
+
+// clampStep widens step so a range query cannot ask for more than
+// maxRangePoints samples per series.
+//
+// The window and the step arrive independently from the caller and nothing
+// related them before: a multi-week window at the default 60s step asks for
+// tens of thousands of points per series, and with a few thousand series that
+// is gigabytes of decoded samples. Widening keeps the query answerable —
+// callers get a coarser series over the range they asked for, rather than the
+// HTTP 400 Prometheus would return for the same request.
+//
+// A step that is absent, unparseable, or non-positive falls back to the 60s
+// default rather than being trusted.
+func clampStep(startsAt, endsAt time.Time, step string) string {
+	span := endsAt.Sub(startsAt).Seconds()
+	if span <= 0 {
+		return step
+	}
+	stepSecs, err := strconv.ParseFloat(step, 64)
+	if err != nil || stepSecs <= 0 {
+		// Non-numeric steps are the Prometheus duration forms ("5m", "1h").
+		if d, derr := time.ParseDuration(step); derr == nil && d > 0 {
+			stepSecs = d.Seconds()
+		} else {
+			stepSecs = 60
+		}
+	}
+	if span/stepSecs <= maxRangePoints {
+		return step
+	}
+	widened := math.Ceil(span / maxRangePoints)
+	return strconv.FormatInt(int64(widened), 10)
 }
 
 func stringStep(params map[string]any) string {
