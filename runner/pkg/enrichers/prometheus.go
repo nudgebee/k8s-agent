@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,20 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/observability/prometheus"
+)
+
+const (
+	// maxConcurrentQueries bounds the per-request fan-out in
+	// HandleQueriesEnricher. Matches servicemap's MaxParallel.
+	maxConcurrentQueries = 8
+
+	// maxRangePoints caps (end-start)/step for a range query. Prometheus
+	// itself refuses more than 11000 points with an HTTP 400, so anything
+	// above this was never going to return data — but the runner used to
+	// forward the request anyway and, for backends with a laxer limit,
+	// allocate the whole grid. Over the cap the step is widened instead, which
+	// returns a coarser series rather than nothing.
+	maxRangePoints = 11000
 )
 
 // PromQuerier is the subset of *prometheus.Client this package needs. We type
@@ -164,11 +179,19 @@ func (p *PrometheusEnricher) HandleQueriesEnricher(ctx context.Context, params m
 	}
 	results := make([]slot, len(queries))
 	var wg sync.WaitGroup
+	// Bound the fan-out. Every in-flight query holds its whole response body
+	// plus its decoded tree, so an unbounded fan-out makes peak memory a
+	// function of how many queries the caller happened to batch. servicemap
+	// has carried the same bound for the same reason.
+	sem := make(chan struct{}, maxConcurrentQueries)
 	for i, q := range queries {
 		i, q := i, q
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			if instant {
 				list, runErr := p.runOneInstantRaw(ctx, q.query, endsAt)
 				if runErr != nil {
@@ -396,6 +419,7 @@ func (p *PrometheusEnricher) runOne(ctx context.Context, query string, instant b
 		if step == "" {
 			step = "60"
 		}
+		step = clampStep(startsAt, endsAt, step)
 		raw, err = p.q.QueryRange(ctx, query, s, e, step, "")
 	}
 	if err != nil {
@@ -478,6 +502,103 @@ func toInt(v any) (int, error) {
 		return i, err
 	}
 	return 0, fmt.Errorf("expected number, got %T", v)
+}
+
+// clampStep widens step so a range query cannot ask for more than
+// maxRangePoints samples per series.
+//
+// The window and the step arrive independently from the caller and nothing
+// related them before: a multi-week window at the default 60s step asks for
+// tens of thousands of points per series, and with a few thousand series that
+// is gigabytes of decoded samples. Widening keeps the query answerable —
+// callers get a coarser series over the range they asked for, rather than the
+// HTTP 400 Prometheus would return for the same request.
+//
+// A step that is absent, unparseable, or non-positive falls back to the 60s
+// default rather than being trusted.
+func clampStep(startsAt, endsAt time.Time, step string) string {
+	span := endsAt.Sub(startsAt).Seconds()
+	if span <= 0 {
+		return step
+	}
+	stepSecs, err := strconv.ParseFloat(step, 64)
+	if err != nil || stepSecs <= 0 {
+		// Non-numeric steps are the Prometheus duration forms ("5m", "1d",
+		// "2d12h"). These must be parsed before falling back to a default:
+		// treating an unrecognised "1d" as 60s would widen a step the caller
+		// set deliberately, turning one coarse query into the 11000-point
+		// query this function exists to prevent.
+		if d, ok := parsePromDuration(step); ok && d > 0 {
+			stepSecs = d
+		} else if d, derr := time.ParseDuration(step); derr == nil && d > 0 {
+			stepSecs = d.Seconds()
+		} else {
+			stepSecs = 60
+		}
+	}
+	if span/stepSecs <= maxRangePoints {
+		return step
+	}
+	widened := math.Ceil(span / maxRangePoints)
+	return strconv.FormatInt(int64(widened), 10)
+}
+
+// promDurationUnits maps Prometheus duration suffixes to seconds. "ms" must be
+// tested before "m", so the lookup below walks this in order rather than using
+// a map.
+var promDurationUnits = []struct {
+	suffix  string
+	seconds float64
+}{
+	{"ms", 0.001},
+	{"s", 1},
+	{"m", 60},
+	{"h", 3600},
+	{"d", 86400},
+	{"w", 604800},
+	{"y", 31536000}, // Prometheus defines a year as 365 days.
+}
+
+// parsePromDuration parses the Prometheus duration grammar —
+// `<number><unit>` repeated, e.g. "30s", "1d", "2d12h", "1y" — and returns the
+// total in seconds.
+//
+// time.ParseDuration cannot be used on its own here: it rejects d, w and y
+// outright, and those are ordinary things for a caller to send as a step.
+// Units may repeat or appear in any order; Prometheus requires descending
+// order, but being lenient costs nothing and a step we can read is always
+// better than one we silently replace.
+func parsePromDuration(s string) (float64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	var total float64
+	for i := 0; i < len(s); {
+		start := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return 0, false // a unit with no leading number
+		}
+		n, err := strconv.ParseFloat(s[start:i], 64)
+		if err != nil {
+			return 0, false
+		}
+		unit := 0.0
+		for _, u := range promDurationUnits {
+			if strings.HasPrefix(s[i:], u.suffix) {
+				unit = u.seconds
+				i += len(u.suffix)
+				break
+			}
+		}
+		if unit == 0 {
+			return 0, false // missing or unrecognised unit
+		}
+		total += n * unit
+	}
+	return total, true
 }
 
 func stringStep(params map[string]any) string {

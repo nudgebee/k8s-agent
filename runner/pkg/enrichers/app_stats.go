@@ -99,7 +99,17 @@ func (a *AppStatsEnricher) run(ctx context.Context, params map[string]any) []map
 			startTime = t
 		}
 	}
+	// r_duration / r_start_time / r_end_time all arrive from the caller with
+	// no upper bound, and the grid built in parseMetricSeries is
+	// (window / step) float64s *per series*. Widen the step so a long window
+	// cannot turn a handful of samples into a multi-gigabyte grid; the query
+	// and the grid share this value, so they stay aligned.
 	step := int64(60)
+	if span := endTime.Sub(startTime).Seconds(); span > 0 {
+		if minStep := int64(math.Ceil(span / maxRangePoints)); minStep > step {
+			step = minStep
+		}
+	}
 
 	// 2. Build label filters
 	podFilter := dictToPrometheusFilter(params["pod_filter"])
@@ -201,11 +211,8 @@ func parseMetricSeries(raw []byte, startUnix, endUnix, step int64) ([]metricSeri
 	var resp struct {
 		Status string `json:"status"`
 		Data   struct {
-			ResultType string `json:"resultType"`
-			Result     []struct {
-				Metric map[string]string `json:"metric"`
-				Values [][]any           `json:"values"`
-			} `json:"result"`
+			ResultType string         `json:"resultType"`
+			Result     []matrixSeries `json:"result"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -214,6 +221,17 @@ func parseMetricSeries(raw []byte, startUnix, endUnix, step int64) ([]metricSeri
 	if resp.Status != "success" {
 		return nil, nil
 	}
+	// Each series gets its own dense, NaN-filled grid whose width comes from
+	// the requested window alone — a series holding three real samples still
+	// costs the full grid, and every cell is written, so it is committed
+	// memory rather than lazily-faulted pages. Callers clamp the step to keep
+	// this bounded (see maxRangePoints); widen it again here so a caller that
+	// forgets degrades to a coarser grid rather than allocating tens of GB.
+	// Coarsening only buckets samples more loosely (set() is last-write-wins);
+	// the full window is still covered, and no query fails.
+	if span := endUnix - startUnix; span > 0 && step > 0 && span/step > maxRangePoints {
+		step = int64(math.Ceil(float64(span) / maxRangePoints))
+	}
 	points := int((endUnix - startUnix) / step)
 	if points <= 0 {
 		points = 1
@@ -221,29 +239,12 @@ func parseMetricSeries(raw []byte, startUnix, endUnix, step int64) ([]metricSeri
 	out := make([]metricSeries, 0, len(resp.Data.Result))
 	for _, r := range resp.Data.Result {
 		ts := newTimeSeries(startUnix, points, step)
-		for _, v := range r.Values {
-			if len(v) < 2 {
-				continue
-			}
-			tInt := int64(0)
-			switch t := v[0].(type) {
-			case float64:
-				tInt = int64(t)
-			case string:
-				if n, err := strconv.ParseFloat(t, 64); err == nil {
-					tInt = int64(n)
-				}
-			}
+		for i, tsSec := range r.Values.timestamps {
 			f := math.NaN()
-			switch x := v[1].(type) {
-			case string:
-				if n, err := strconv.ParseFloat(x, 64); err == nil {
-					f = n
-				}
-			case float64:
-				f = x
+			if n, err := strconv.ParseFloat(r.Values.values[i], 64); err == nil {
+				f = n
 			}
-			ts.set(tInt, f)
+			ts.set(int64(tsSec), f)
 		}
 		out = append(out, metricSeries{labels: r.Metric, values: ts})
 	}
