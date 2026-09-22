@@ -321,7 +321,17 @@ func (s *sampleScanner) token() (rawToken, error) {
 			c := s.b[s.i]
 			if c == '\\' {
 				esc = true
-				s.i += 2
+				// Skip the escaped byte, but never past the end: a trailing
+				// backslash would otherwise leave s.i == len(s.b)+1 and break
+				// the scanner's `s.i <= len(s.b)` invariant. Every read today
+				// is length-guarded so this cannot currently be observed, but
+				// atNull slices s.b[s.i:] and would panic if the invariant
+				// were ever relied on after this point.
+				if s.i+1 < len(s.b) {
+					s.i += 2
+				} else {
+					s.i = len(s.b)
+				}
 				continue
 			}
 			if c == '"' {

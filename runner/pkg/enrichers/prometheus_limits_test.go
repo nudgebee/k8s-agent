@@ -226,3 +226,114 @@ func TestParseMetricSeries_CoarsensRatherThanExploding(t *testing.T) {
 }
 
 func isNaN(f float64) bool { return f != f }
+
+// TestParsePromDuration covers the Prometheus duration grammar, including the
+// d/w/y units Go's time.ParseDuration rejects and the compound forms a caller
+// can legitimately send as a step.
+func TestParsePromDuration(t *testing.T) {
+	ok := map[string]float64{
+		"30s":    30,
+		"1m":     60,
+		"90s":    90,
+		"1h":     3600,
+		"12h":    43200,
+		"1d":     86400,
+		"7d":     604800,
+		"1w":     604800,
+		"1y":     31536000,
+		"1h30m":  5400,
+		"2d12h":  216000,
+		"1d1h1m": 90060,
+		"500ms":  0.5,
+		"1ms":    0.001,
+	}
+	for in, want := range ok {
+		got, valid := parsePromDuration(in)
+		if !valid {
+			t.Errorf("parsePromDuration(%q) rejected; want %v", in, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("parsePromDuration(%q) = %v; want %v", in, got, want)
+		}
+	}
+
+	bad := []string{"", "d", "1", "1x", "abc", "-1d", "1.5h", "h1", "1d!"}
+	for _, in := range bad {
+		if got, valid := parsePromDuration(in); valid {
+			t.Errorf("parsePromDuration(%q) = %v, accepted; want rejected", in, got)
+		}
+	}
+}
+
+// TestClampStep_RespectsPromDurationSteps is the regression guard for the bug
+// this caught: a step in Prometheus duration units that clampStep could not
+// read was treated as 60s, so an explicit coarse step ("1d") got *widened* to
+// ~236s — 366x finer than asked for, and exactly the oversized query the clamp
+// is meant to prevent.
+func TestClampStep_RespectsPromDurationSteps(t *testing.T) {
+	start := mustTime(t, "2026-08-16 08:00:00 UTC")
+	end := mustTime(t, "2026-09-15 08:00:00 UTC") // 30 days
+
+	// All of these are coarse enough to stay under the cap, so clampStep must
+	// return them untouched.
+	for _, step := range []string{"1d", "1w", "12h", "1h30m", "2d12h", "1y", "300s"} {
+		if got := clampStep(start, end, step); got != step {
+			t.Errorf("clampStep(30d window, %q) = %q; want unchanged", step, got)
+		}
+	}
+
+	// A step genuinely too fine for the window still widens.
+	for _, step := range []string{"60", "1m", "30s"} {
+		got := clampStep(start, end, step)
+		if got == step {
+			t.Errorf("clampStep(30d window, %q) left it unchanged; expected widening", step)
+		}
+		secs, err := strconv.ParseFloat(got, 64)
+		if err != nil {
+			t.Fatalf("widened step %q not numeric: %v", got, err)
+		}
+		if points := end.Sub(start).Seconds() / secs; points > maxRangePoints {
+			t.Errorf("step %q -> %q, still %.0f points", step, got, points)
+		}
+	}
+}
+
+// TestSampleScanner_MalformedInputNeverPanics walks the scanner over truncated
+// and malformed input, with particular attention to a trailing backslash,
+// which advances the cursor two bytes at a time.
+func TestSampleScanner_MalformedInputNeverPanics(t *testing.T) {
+	inputs := []string{
+		`[[0,"\`,
+		`[[0,"ab\`,
+		`[["\`,
+		`[[0,"\"]]`,
+		`[`,
+		`[[`,
+		`[[0`,
+		`[[0,`,
+		`[[0,"`,
+		`[[0,"1"`,
+		`[[0,"1"]`,
+		`"`,
+		`\`,
+		`[\`,
+		`[[\\`,
+		`null`,
+		`nul`,
+		``,
+	}
+	for _, in := range inputs {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic scanning %q: %v", in, r)
+				}
+			}()
+			var c sampleColumns
+			_ = c.UnmarshalJSON([]byte(in))
+			var s promSample
+			_ = s.UnmarshalJSON([]byte(in))
+		}()
+	}
+}
