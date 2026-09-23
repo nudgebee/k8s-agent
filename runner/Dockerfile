@@ -35,7 +35,7 @@ RUN go build \
 # `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
 # Pinned to BUILDPLATFORM: this stage only curls a binary, so there is no reason
 # to run it emulated on the arm64 leg.
-FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS kubectl
+FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS kubectl
 ARG TARGETARCH
 # v1.36.2 (current stable): upstream builds the 1.32 line on Go 1.24.13, whose
 # stale stdlib + x/net account for 33 of the image's 37 fixable Trivy findings
@@ -68,7 +68,7 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 WORKDIR /
 RUN apk add --no-cache ca-certificates && \
 	addgroup -S nonroot -g 65532 && \
