@@ -158,3 +158,43 @@ func Coalesce(values ...string) string {
 	}
 	return ""
 }
+
+// WatchUntilFound keeps looking for a service until one of the selectors
+// matches, then calls onFound with its URL and returns.
+//
+// Discovery used to run exactly once, during boot. An agent that started
+// before its Prometheus — a fresh cluster where both are installed together,
+// or a cluster where monitoring is added later — therefore stayed blind to it
+// for the life of the process, and nothing short of a pod restart recovered:
+// prometheus_* actions, rightsizing and the service map all stayed off, and
+// the only trace was a single warning in the boot log.
+//
+// Each attempt uses a fresh Discoverer so the negative-result cache in
+// FindFirst (CacheTTL, 1h) does not outlive the interval and swallow the
+// retry. One label-filtered LIST per interval; the API server does the
+// filtering, so this stays cheap on large clusters.
+func WatchUntilFound(
+	ctx context.Context,
+	cs kubernetes.Interface,
+	clusterDomain string,
+	selectors []string,
+	interval time.Duration,
+	onFound func(url string),
+) {
+	if cs == nil || onFound == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if u := New(cs, clusterDomain).FindFirst(ctx, selectors); u != "" {
+				onFound(u)
+				return
+			}
+		}
+	}
+}
