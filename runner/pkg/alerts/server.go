@@ -83,9 +83,7 @@ func (f *Forwarder) SetForwardPoolSize(n int) {
 // without it, such an alert can only be corrected from its own labels, and the
 // backend applies the same correction on ingest. Call once at construction.
 func (f *Forwarder) SetNodeLocator(l NodeLocator) {
-	if f.builder != nil {
-		f.builder.Nodes = l
-	}
+	f.builder.Nodes = l
 }
 
 // ForwardShed returns the number of intake events dropped because the forward
