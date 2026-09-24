@@ -150,8 +150,12 @@ func (c *Client) listOne(ctx context.Context, gvr schema.GroupVersionResource, p
 	opts := metav1.ListOptions{LabelSelector: p.LabelSelector, FieldSelector: p.FieldSelector}
 	list, err := c.resourceInterface(gvr, p).List(ctx, opts)
 	// A cluster-scoped resource asked for with a namespace is a 404, not an empty
-	// list: listing a namespace that does not exist returns no items, so NotFound
-	// here means the scope is wrong rather than the data missing. Callers pass a
+	// list, so NotFound here means the scope is wrong rather than the data
+	// missing. The API server does not check namespace existence on a collection
+	// request — `GET /api/v1/namespaces/<missing>/pods` answers 200 with an empty
+	// PodList, while `GET /api/v1/namespaces/default/nodes` is the 404 (verified
+	// against a live cluster). So this cannot fire for a namespace that is merely
+	// absent, and the retry is not a cluster-wide list on a typo. Callers pass a
 	// namespace freely (the generic k8s_resource action forwards whatever a
 	// playbook wrote), and that used to be harmless because the namespace was
 	// dropped — so retry the way it used to be served rather than regress them.
