@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -45,7 +46,10 @@ func NewLogsEnricher(cs kubernetes.Interface, accountID string) *LogsEnricher {
 //	container_name        string
 //	previous              bool
 //	tail_lines            int (default 1000)
-//	since_time            int (unix seconds; passed as &sinceSeconds=)
+//	since_time            int (unix seconds; read no logs older than this)
+//
+// Lines are always returned with the kubelet's RFC3339Nano timestamp prefixed —
+// see readLogs.
 func (l *LogsEnricher) Handle(ctx context.Context, params map[string]any) (any, error) {
 	if l.clientset == nil {
 		return ErrorResponse("logs_enricher: kube client unavailable", 503), nil
@@ -61,6 +65,14 @@ func (l *LogsEnricher) Handle(ctx context.Context, params map[string]any) (any, 
 	if v, err := toInt(params["tail_lines"]); err == nil && v > 0 {
 		tailLines = v
 	}
+	// since_time has been in this action's contract since it was written and was
+	// never read, so a caller asking for the lead-up to an incident silently got
+	// the same tail as everyone else.
+	var sinceTime *metav1.Time
+	if v, err := toInt(params["since_time"]); err == nil && v > 0 {
+		t := metav1.NewTime(time.Unix(int64(v), 0).UTC())
+		sinceTime = &t
+	}
 
 	pod, err := l.resolvePod(ctx, namespace, name)
 	if err != nil {
@@ -70,7 +82,7 @@ func (l *LogsEnricher) Handle(ctx context.Context, params map[string]any) (any, 
 		containerName = pickContainer(pod)
 	}
 
-	logs, err := l.readLogs(ctx, pod, containerName, previous, int64(tailLines))
+	logs, err := l.readLogs(ctx, pod, containerName, previous, int64(tailLines), sinceTime)
 	if err != nil {
 		return ErrorResponse(fmt.Sprintf("logs_enricher: read logs: %v", err), 502), nil
 	}
@@ -173,13 +185,8 @@ func pickContainer(pod *corev1.Pod) string {
 	return ""
 }
 
-func (l *LogsEnricher) readLogs(ctx context.Context, pod *corev1.Pod, container string, previous bool, tailLines int64) ([]byte, error) {
-	opts := &corev1.PodLogOptions{
-		Container: container,
-		Previous:  previous,
-		TailLines: &tailLines,
-	}
-	req := l.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, opts)
+func (l *LogsEnricher) readLogs(ctx context.Context, pod *corev1.Pod, container string, previous bool, tailLines int64, sinceTime *metav1.Time) ([]byte, error) {
+	req := l.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, podLogOptions(container, previous, tailLines, sinceTime))
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return nil, err
@@ -190,4 +197,30 @@ func (l *LogsEnricher) readLogs(ctx context.Context, pod *corev1.Pod, container 
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// podLogOptions is the read this action asks the kubelet for. Split out because
+// the fake clientset discards PodLogOptions, so this is the only place the
+// contract can be asserted in a test.
+func podLogOptions(container string, previous bool, tailLines int64, sinceTime *metav1.Time) *corev1.PodLogOptions {
+	return &corev1.PodLogOptions{
+		Container: container,
+		Previous:  previous,
+		TailLines: &tailLines,
+		SinceTime: sinceTime,
+		// Prefix each line with the kubelet's RFC3339Nano timestamp.
+		//
+		// Without it the payload says nothing about when it was written, and a tail
+		// of a container that has been quiet for weeks is indistinguishable from the
+		// output of the crash being investigated: measured against stored evidence
+		// on 2026-09-23, 58% of pod-log evidences carried no parseable time on any
+		// line, and among those that did, the oldest was 68 days older than the
+		// event it was attached to.
+		//
+		// The api-server strips this prefix before parsing a line as JSON/logfmt
+		// (playbooks.splitContainerLogTimestamp), so the grouping, level detection
+		// and log card are unaffected; it must ship before this flag reaches a
+		// cluster, or structured lines stop being recognised as structured.
+		Timestamps: true,
+	}
 }

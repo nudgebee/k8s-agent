@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -44,21 +45,41 @@ func NewClient(dyn dynamic.Interface, typed kubernetes.Interface) *Client {
 // comma-separated list ("roles,rolebindings"); all_namespaces toggles cluster
 // scope; namespace+name select a single resource.
 type GetParams struct {
-	Group         string
-	Version       string
-	ResourceType  string // singular resource name; for plural lists, may be comma-separated
+	Group        string
+	Version      string
+	ResourceType string // singular resource name; for plural lists, may be comma-separated
+	// Namespace and Name hold the single-value case, which is what scopes the
+	// request server-side. Namespaces/Names hold everything the caller asked for
+	// and are filtered post-list when there is more than one.
 	Namespace     string
+	Namespaces    []string
 	Name          string
+	Names         []string
+	LabelSelector string
+	FieldSelector string
 	AllNamespaces bool
 }
 
 func ParseGetParams(p map[string]any) GetParams {
+	namespaces := strListParam(p, "namespace")
+	names := strListParam(p, "name")
 	gp := GetParams{
-		Group:         strParam(p, "group"),
-		Version:       strParam(p, "version"),
-		ResourceType:  strParam(p, "resource_type"),
-		Namespace:     strParam(p, "namespace"),
-		Name:          strParam(p, "name"),
+		Group:        strParam(p, "group"),
+		Version:      strParam(p, "version"),
+		ResourceType: strParam(p, "resource_type"),
+		Namespaces:   namespaces,
+		Names:        names,
+		// api-server sends these as JSON arrays (`"namespace": ["demo"]`), the UI
+		// and the legacy kind-based contract as bare strings. Only the string form
+		// was ever read — `m[k].(string)` fails on a []any and yields "" — so every
+		// api-server call listed the whole cluster and leaned on client-side
+		// filtering. That is how a Job in `nudgebee` came back captioned with a
+		// `demo`-namespace pod's logs (98% of job_failure findings on dev,
+		// 99.6% on prod, measured 2026-09-23).
+		Namespace:     single(namespaces),
+		Name:          single(names),
+		LabelSelector: strParam(p, "label_selector"),
+		FieldSelector: strParam(p, "field_selector"),
 		AllNamespaces: boolParam(p, "all_namespaces"),
 	}
 	// Backward-compat with the legacy `kind`-based contract (and the UI built
@@ -126,18 +147,45 @@ func (c *Client) GetResource(ctx context.Context, p GetParams) (any, error) {
 // listOne lists a single GVR and returns its items as []any. If p.Name is set,
 // the items are filtered by name post-list.
 func (c *Client) listOne(ctx context.Context, gvr schema.GroupVersionResource, p GetParams) ([]any, error) {
-	list, err := c.resourceInterface(gvr, p).List(ctx, metav1.ListOptions{})
+	opts := metav1.ListOptions{LabelSelector: p.LabelSelector, FieldSelector: p.FieldSelector}
+	list, err := c.resourceInterface(gvr, p).List(ctx, opts)
+	// A cluster-scoped resource asked for with a namespace is a 404, not an empty
+	// list: listing a namespace that does not exist returns no items, so NotFound
+	// here means the scope is wrong rather than the data missing. Callers pass a
+	// namespace freely (the generic k8s_resource action forwards whatever a
+	// playbook wrote), and that used to be harmless because the namespace was
+	// dropped — so retry the way it used to be served rather than regress them.
+	if err != nil && p.Namespace != "" && apierrors.IsNotFound(err) {
+		cluster := p
+		cluster.Namespace = ""
+		list, err = c.resourceInterface(gvr, cluster).List(ctx, opts)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", gvr.Resource, err)
 	}
 	out := make([]any, 0, len(list.Items))
 	for _, item := range list.Items {
-		if p.Name != "" && item.GetName() != p.Name {
+		// The server scoped the request when exactly one name/namespace was asked
+		// for; these filters cover the rest, and the single case costs one
+		// comparison against a value that already matches.
+		if len(p.Names) > 0 && !contains(p.Names, item.GetName()) {
+			continue
+		}
+		if len(p.Namespaces) > 0 && item.GetNamespace() != "" && !contains(p.Namespaces, item.GetNamespace()) {
 			continue
 		}
 		out = append(out, item.UnstructuredContent())
 	}
 	return out, nil
+}
+
+func contains(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) resourceInterface(gvr schema.GroupVersionResource, p GetParams) dynamic.ResourceInterface {
@@ -204,6 +252,53 @@ func strParam(m map[string]any, k string) string {
 	}
 	s, _ := m[k].(string)
 	return s
+}
+
+// strListParam reads a param that callers write either as a string or as a list
+// of strings. JSON decoding gives []any, and a Go caller inside the agent may
+// pass []string; both mean the same thing. Empty and blank entries are dropped so
+// `"namespace": [""]` does not scope a request to a namespace called "".
+func strListParam(m map[string]any, k string) []string {
+	if m == nil {
+		return nil
+	}
+	var raw []any
+	switch v := m[k].(type) {
+	case nil:
+		return nil
+	case string:
+		raw = []any{v}
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		raw = v
+	default:
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+// single returns the only value, or "" when the caller asked for none or for
+// several — several cannot scope one request, so listOne filters those post-list.
+func single(values []string) string {
+	if len(values) == 1 {
+		return values[0]
+	}
+	return ""
 }
 
 func boolParam(m map[string]any, k string) bool {

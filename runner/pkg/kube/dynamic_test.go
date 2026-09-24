@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,9 +34,10 @@ func TestParseGetParams(t *testing.T) {
 		Group: "rbac.authorization.k8s.io", Version: "v1",
 		ResourceType: "roles,rolebindings",
 		Namespace:    "kube-system", Name: "admin",
+		Namespaces: []string{"kube-system"}, Names: []string{"admin"},
 		AllNamespaces: true,
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseGetParams\n got:  %+v\n want: %+v", got, want)
 	}
 }
