@@ -847,6 +847,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		// Lets the forwarder report a node-exporter alert against the node it
+		// describes rather than the exporter pod that emitted it. Opportunistic:
+		// without a typed client the correction falls back to the alert's own
+		// labels, and the backend corrects what reaches it either way.
+		if typedKube != nil {
+			fwd.SetNodeLocator(newNodeLocator(typedKube))
+		}
 		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
 		fwd.OnForward = mreg.OnAlertForwarded
 		fwd.OnDrop = func(string) { mreg.OnAlertDropped() }

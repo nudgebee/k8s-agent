@@ -19,6 +19,7 @@ package alerts
 //	SubjectType:    "pod", "deployment", "node", "job", "daemonset", "statefulset", ...
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -81,6 +82,10 @@ type FindingEnvelope struct {
 type Builder struct {
 	AccountID string // `account_id` — pinned to the agent's NUDGEBEE account UUID
 	Cluster   string // `cluster_id` — same as the agent's CLUSTER_NAME env
+	// Nodes resolves the node behind a per-node exporter's series. Optional:
+	// nil when the agent booted without a typed k8s client, in which case a
+	// node-scoped alert can only be corrected from its own labels.
+	Nodes NodeLocator
 }
 
 // FromMatchedTrigger wraps a kubewatch K8s-event payload into a Finding
@@ -414,7 +419,17 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 			subjectName = "UnnamedAlert"
 		}
 	}
-	subjectNode := pickLabel(a.Labels, "node", "instance")
+	// A node-scoped alert (node-exporter series) arrives wearing the exporter's
+	// own pod/namespace/daemonset labels, so everything above resolved to the
+	// collector rather than to the node the metric describes. Repoint it.
+	subjectNode := nodeNameFromLabels(a.Labels)
+	if node := resolveNodeSubject(context.Background(), a.Labels, b.Nodes); node != "" {
+		subjectName = node
+		subjectType = "node"
+		// The namespace described the exporter pod; a node is cluster-scoped.
+		subjectNamespace = ""
+		subjectNode = node
+	}
 	alertname := pickLabel(a.Labels, "alertname")
 	if alertname == "" {
 		alertname = "UnnamedAlert"

@@ -77,6 +77,17 @@ func (f *Forwarder) SetForwardPoolSize(n int) {
 	}
 }
 
+// SetNodeLocator supplies the resolver that turns a per-node exporter's series
+// into the node it describes, so a NodeSystemSaturation alert is reported
+// against the node instead of the node-exporter pod that emitted it. Optional:
+// without it, such an alert can only be corrected from its own labels, and the
+// backend applies the same correction on ingest. Call once at construction.
+func (f *Forwarder) SetNodeLocator(l NodeLocator) {
+	if f.builder != nil {
+		f.builder.Nodes = l
+	}
+}
+
 // ForwardShed returns the number of intake events dropped because the forward
 // pool was saturated. Wire to a Prometheus counter in main.
 func (f *Forwarder) ForwardShed() uint64 { return f.forwardShed.Load() }
