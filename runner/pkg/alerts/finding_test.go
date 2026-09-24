@@ -314,3 +314,87 @@ func TestEvidence_DataIsJSONStringifiedArray(t *testing.T) {
 		t.Errorf("unexpected blocks shape: %v", blocks)
 	}
 }
+
+// alertWebhookJSON wraps one alert's labels in the AlertManager webhook shape
+// FromAlertManager expects.
+func alertWebhookJSON(labels map[string]string) []byte {
+	raw, _ := json.Marshal(map[string]any{"alerts": []map[string]any{{"labels": labels}}})
+	return raw
+}
+
+// TestBuilder_Alert_NodeScopedAlertReportsTheNode — the end-to-end shape of
+// the bug this fixes. A NodeSystemSaturation alert carries the node-exporter's
+// own pod and namespace, so without the correction it is reported against
+// `victoria-prometheus-node-exporter-skqnn` in `monitoring`, and every piece of
+// evidence the backend attaches describes that pod rather than the saturated
+// node.
+func TestBuilder_Alert_NodeScopedAlertReportsTheNode(t *testing.T) {
+	locator := &stubLocator{
+		podToNode: map[string]string{
+			"monitoring/victoria-prometheus-node-exporter-skqnn": "gke-nudgebee-pool-abc",
+		},
+	}
+	b := &Builder{AccountID: "acc", Cluster: "c", Nodes: locator}
+
+	envs, dropped, err := b.FromAlertManager(alertWebhookJSON(map[string]string{
+		"alertname": "NodeSystemSaturation",
+		"job":       "node-exporter",
+		"pod":       "victoria-prometheus-node-exporter-skqnn",
+		"namespace": "monitoring",
+		"instance":  "10.128.0.14:9100",
+		"severity":  "warning",
+	}))
+	if err != nil || dropped != 0 || len(envs) != 1 {
+		t.Fatalf("build failed: err=%v dropped=%d envs=%d", err, dropped, len(envs))
+	}
+
+	got := envs[0].Finding
+	if got.SubjectType != "node" {
+		t.Errorf("subject_type = %q, want node", got.SubjectType)
+	}
+	if got.SubjectName != "gke-nudgebee-pool-abc" {
+		t.Errorf("subject_name = %q, want the node", got.SubjectName)
+	}
+	if got.SubjectNode != "gke-nudgebee-pool-abc" {
+		t.Errorf("subject_node = %q, want the node", got.SubjectNode)
+	}
+	// The exporter's namespace described the exporter; a node is cluster-scoped.
+	if got.SubjectNamespace != "" {
+		t.Errorf("subject_namespace = %q, want empty for a node subject", got.SubjectNamespace)
+	}
+}
+
+// TestBuilder_Alert_ExporterPodAlertKeepsThePod — the negative case that keeps
+// the fix honest. A crash-looping node-exporter pod is genuinely about the pod;
+// its rule is scraped by kube-state-metrics, so the node correction must not
+// fire even though the subject name looks like an exporter.
+func TestBuilder_Alert_ExporterPodAlertKeepsThePod(t *testing.T) {
+	locator := &stubLocator{
+		podToNode: map[string]string{
+			"monitoring/victoria-prometheus-node-exporter-skqnn": "gke-nudgebee-pool-abc",
+		},
+	}
+	b := &Builder{AccountID: "acc", Cluster: "c", Nodes: locator}
+
+	envs, _, err := b.FromAlertManager(alertWebhookJSON(map[string]string{
+		"alertname": "KubePodCrashLooping",
+		"job":       "kube-state-metrics",
+		"pod":       "victoria-prometheus-node-exporter-skqnn",
+		"namespace": "monitoring",
+		"severity":  "warning",
+	}))
+	if err != nil || len(envs) != 1 {
+		t.Fatalf("build failed: err=%v envs=%d", err, len(envs))
+	}
+
+	got := envs[0].Finding
+	if got.SubjectType != "pod" {
+		t.Errorf("subject_type = %q, want pod", got.SubjectType)
+	}
+	if got.SubjectName != "victoria-prometheus-node-exporter-skqnn" {
+		t.Errorf("subject_name = %q, want the exporter pod itself", got.SubjectName)
+	}
+	if locator.podCalls != 0 {
+		t.Errorf("node lookups = %d, want 0 — a kube-state-metrics alert must not reach the locator", locator.podCalls)
+	}
+}
