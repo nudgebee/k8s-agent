@@ -11,12 +11,14 @@ Every clickhouse.metrics.serviceMonitor.* field the subchart honoured
 (namespace, labels, annotations, selector, jobLabel, honorLabels, relabelings)
 is honoured here too, and name, namespace and spec match the subchart's render,
 so an upgrade updates the existing object in place — including one that set a
-`release:` label for kube-prometheus-stack's selector. If someone turns the
+`release:` label for kube-prometheus-stack's selector. It also carries
+prometheusStack.selectorLabels like the chart's other monitoring CRs, and
+honours enableServiceMonitors. If someone turns the
 subchart's copy back on, this one steps aside rather than render a duplicate.
 */ -}}
 {{- $ch := .Values.clickhouse -}}
 {{- $otel := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}
-{{- if and $otel $ch.metrics.enabled $ch.nudgebeeServiceMonitor.enabled (not $ch.metrics.serviceMonitor.enabled) (or .Values.enablePrometheusStack (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor")) }}
+{{- if and .Values.enableServiceMonitors $otel $ch.metrics.enabled $ch.nudgebeeServiceMonitor.enabled (not $ch.metrics.serviceMonitor.enabled) (or .Values.enablePrometheusStack (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor")) }}
 {{- $sm := $ch.metrics.serviceMonitor }}
 {{- $name := default "clickhouse" $ch.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- $ns := default .Release.Namespace $ch.namespaceOverride | trunc 63 | trimSuffix "-" }}
@@ -25,17 +27,18 @@ kind: ServiceMonitor
 metadata:
   name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
   namespace: {{ default $ns $sm.namespace | quote }}
-  labels:
-    app.kubernetes.io/name: {{ $name }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/component: clickhouse
-    {{- with $ch.commonLabels }}
-    {{- tpl (toYaml .) $ | nindent 4 }}
-    {{- end }}
-    {{- with $sm.labels }}
-    {{- tpl (toYaml .) $ | nindent 4 }}
-    {{- end }}
+  {{- /* One map, so a key set in two places renders once. Later wins: the
+  installer-detected Prometheus selector labels (as on this chart's other
+  monitoring CRs), then commonLabels, then serviceMonitor.labels. */}}
+  {{- $labels := dict "app.kubernetes.io/name" $name "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/managed-by" .Release.Service "app.kubernetes.io/component" "clickhouse" }}
+  {{- $labels = mustMergeOverwrite $labels (default (dict) (fromYaml (include "nudgebee-agent.prometheusSelectorLabels" .))) }}
+  {{- with $ch.commonLabels }}
+  {{- $labels = mustMergeOverwrite $labels (fromYaml (tpl (toYaml .) $)) }}
+  {{- end }}
+  {{- with $sm.labels }}
+  {{- $labels = mustMergeOverwrite $labels (fromYaml (tpl (toYaml .) $)) }}
+  {{- end }}
+  labels: {{- toYaml $labels | nindent 4 }}
   annotations:
     {{- with $ch.commonAnnotations }}
     {{- tpl (toYaml .) $ | nindent 4 }}
