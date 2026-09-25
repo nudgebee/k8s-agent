@@ -84,7 +84,7 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-09-22T11-38-44_2fd2d049a4f8cd8b894e79b4604c9882f655c413
+    tag: 2026-09-24T10-58-00_cc47138c4b3bd1d5a1822440c3fbe1dab8b7b245
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
@@ -556,20 +556,23 @@ clickhouse:
       memory: 2000Mi
     limits:
       memory: 2000Mi
-  # NOTE: these render monitoring.coreos.com CRs from the Bitnami subchart, which
-  # this chart cannot gate on `.Capabilities` the way its own templates do — a
-  # parent cannot add a condition to a subchart's template, only flip a value. On
-  # a cluster with no Prometheus operator the CRDs are unregistered and the
-  # install fails on them, so installing there means setting BOTH:
-  #   --set enablePrometheusStack=false \
-  #   --set clickhouse.metrics.serviceMonitor.enabled=false
-  # Left enabled by default so installs that do have the operator (the case the
-  # quick-install script produces, since it installs kube-prometheus-stack) keep
-  # their ClickHouse scrape target.
+  # The ClickHouse ServiceMonitor is rendered by this chart
+  # (templates/clickhouse-servicemonitor.yaml), not by the Bitnami subchart: a
+  # parent cannot add a condition to a subchart's template, and the subchart's
+  # copy failed installs on clusters with no Prometheus operator. This chart's
+  # copy is gated like its other monitoring CRs, so on such a cluster the one
+  # setting needed is `--set enablePrometheusStack=false` (installation.sh sets
+  # it when the operator's CRDs are absent). Set nudgebeeServiceMonitor.enabled
+  # to false to drop the scrape target entirely.
+  nudgebeeServiceMonitor:
+    enabled: true
   metrics:
+    # Also opens the http-metrics port the ServiceMonitor scrapes; keep it on.
     enabled: true
     serviceMonitor:
-      enabled: true
+      # The subchart's own copy, ungated. Leave false; interval and
+      # scrapeTimeout below are still read by this chart's copy.
+      enabled: false
       interval: 30s
       scrapeTimeout: 10s
     prometheusRule:
