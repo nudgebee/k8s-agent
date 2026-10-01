@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -135,7 +136,7 @@ func parseSLOConfig(m map[string]any) sloConfig {
 //	distribution_cut  — needs expression + threshold_bucket
 //
 // Ports the backend verbatim, including the _bucket→_count rewrite
-// and the `le=~"<bucket>(\\.0+)?"` regex match.
+// and the `le=~"^<bucket>(\\.0+)?$"` regex match (see fmtSLOQuery for the escaping).
 func buildSLOQueries(cfg sloConfig) (map[string]string, error) {
 	groupOp := fmt.Sprintf("sum by (%s)", cfg.GroupBy)
 	switch cfg.Method {
@@ -186,9 +187,14 @@ func fmtSLOQuery(query string, window int, operators []string, labels map[string
 	}
 	for k, v := range labels {
 		if k == "le" {
-			// Escape: ', le=~"^<v>(\\.0+)?$"}'  — note the doubled
-			// backslash in the Python source becomes a single \ on the wire.
-			q = strings.Replace(q, "}", fmt.Sprintf(`, %s=~"^%s(\.0+)?$"}`, k, v), 1)
+			// Integer buckets print as 1 or 1.0 depending on the client, so allow
+			// a trailing .0+. The
+			// value is quoted so its own dot is literal, and every backslash is
+			// doubled: a PromQL/MetricsQL double-quoted string uses Go escape
+			// rules, where a lone `\.` is invalid and the whole query fails to
+			// parse — which left every latency SLO without a value (#39800).
+			re := "^" + regexp.QuoteMeta(v) + `(\.0+)?$`
+			q = strings.Replace(q, "}", fmt.Sprintf(`, %s=~"%s"}`, k, strings.ReplaceAll(re, `\`, `\\`)), 1)
 		} else {
 			q = strings.Replace(q, "}", fmt.Sprintf(`, %s="%s"}`, k, v), 1)
 		}
