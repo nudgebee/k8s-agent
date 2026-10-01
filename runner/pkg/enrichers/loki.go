@@ -117,6 +117,11 @@ func (l *LokiCompat) rawGet(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Same auth as loki.Client.get: without it every compat action (the ones
+	// api-server's log queries call) is rejected by a Loki behind Basic-Auth.
+	if l.c.Username != "" && l.c.Password != "" {
+		req.SetBasicAuth(l.c.Username, l.c.Password)
+	}
 	for k, vv := range l.c.ExtraHeaders {
 		for _, v := range vv {
 			req.Header.Add(k, v)
