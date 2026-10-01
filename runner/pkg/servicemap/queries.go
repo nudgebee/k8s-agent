@@ -40,7 +40,9 @@ const edgeGroupBy = "src_workload_kind, src_kind, src_workload_name, " +
 // and throttling cover the whole window. Reading pod state over the whole
 // window instead would count pods that completed during it as failed.
 var nodeQueries = map[string]string{
-	"kube_pod_info":                 "kube_pod_info{__CLUSTER__}",
+	// Completed pods stay in kube-state-metrics with ready=0; they are
+	// history, not failed instances.
+	"kube_pod_info":                 `kube_pod_info{__CLUSTER__} unless on (cluster, namespace, pod) (kube_pod_status_phase{__CLUSTER__ phase="Succeeded"} == 1)`,
 	"pod_workload":                  "count by (container_id, src_workload_kind, src_workload_name, src_workload_namespace) (container_net_tcp_bytes_sent_total{__CLUSTER__})",
 	"kube_pod_labels":               "kube_pod_labels{__CLUSTER__}",
 	"kube_pod_status_ready":         `kube_pod_status_ready{__CLUSTER__ condition="true"}`,
@@ -49,7 +51,7 @@ var nodeQueries = map[string]string{
 	"kube_daemonset_status_desired_number_scheduled": "kube_daemonset_status_desired_number_scheduled{__CLUSTER__}",
 	"kube_statefulset_replicas":                      "kube_statefulset_replicas{__CLUSTER__}",
 	"container_oom_kills_total":                      "increase(container_oom_kills_total{__CLUSTER__}[$RANGE]) % 10000000",
-	"container_restarts":                             "increase(container_restart_count_total{__CLUSTER__}[$RANGE]) % 10000000",
+	"container_restarts":                             "increase(container_restarts_total{__CLUSTER__}[$RANGE]) % 10000000",
 	"container_throttled_time":                       "rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__}[$RANGE])",
 	"container_volume_size":                          "container_resources_disk_size_bytes{__CLUSTER__}",
 	"container_volume_used":                          "container_resources_disk_used_bytes{__CLUSTER__}",

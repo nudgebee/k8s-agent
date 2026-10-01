@@ -165,3 +165,26 @@ func nonZeroNonZero() float64 {
 	x := 0.0
 	return x
 }
+
+// Throttling is shown on the node but does not make it unhealthy.
+func TestRender_ThrottlingDoesNotMarkUnhealthy(t *testing.T) {
+	w := newWorld()
+	a := ApplicationID{Name: "A", Kind: "Deployment", Namespace: "n"}
+	b := ApplicationID{Name: "B", Kind: "Deployment", Namespace: "n"}
+	w.upsertApp(a)
+	w.upsertApp(b)
+	w.addEdge(appKey(a), appKey(b)).requests = 1
+	w.containerStatsFor(appKey(a)).cpuThrottlingTime = 0.4
+
+	for _, app := range render(w) {
+		if app.ID.Name != "A" {
+			continue
+		}
+		if app.CPUThrottlingTime != 0.4 {
+			t.Errorf("CPUThrottlingTime = %v; want 0.4", app.CPUThrottlingTime)
+		}
+		if !app.IsHealthy || app.HealthReason != "" {
+			t.Errorf("throttling alone should not mark A unhealthy: healthy=%v reason=%q", app.IsHealthy, app.HealthReason)
+		}
+	}
+}
