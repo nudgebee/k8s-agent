@@ -9,9 +9,9 @@ func TestQueries_HasExpectedKeys(t *testing.T) {
 	want := []string{
 		"kube_pod_info", "kube_pod_labels", "kube_service_info",
 		"kube_deployment_spec_replicas", "container_net_tcp_successful_connects",
-		"container_http_requests_count", "container_http_requests_latency",
+		"l7_requests:HTTP", "l7_latency:HTTP", "l7_requests:Postgres", "l7_latency:Postgres",
 		"container_oom_kills_total", "container_restarts",
-		"container_http_requests_failure_count", "container_net_tcp_bytes_sent",
+		"l7_requests:RabbitMQ", "container_net_tcp_bytes_sent",
 	}
 	for _, k := range want {
 		if _, ok := Queries[k]; !ok {
@@ -61,7 +61,7 @@ func TestQuerySets_PodReadyOnlyTrueCondition(t *testing.T) {
 }
 
 func TestEdgeQuery_Expansion(t *testing.T) {
-	m := edgeMetric{"failures", "sum", `rate(container_http_requests_total{__EDGE__ status=~"5.."}[$RANGE])`}
+	m := edgeMetric{key: "failures", agg: "sum", expr: `rate(container_http_requests_total{__EDGE__ status=~"5.."}[$RANGE])`}
 	src := `src_workload_namespace=~"shop"`
 	dst := `destination_workload_namespace=~"shop"`
 
@@ -107,6 +107,65 @@ func TestDictToPrometheusFilter_LikeAndExact(t *testing.T) {
 			if !strings.Contains(got, sub) {
 				t.Errorf("dictToPrometheusFilter(%v) = %q; want substring %q", c.in, got, sub)
 			}
+		}
+	}
+}
+
+// Requests keep the status label so build.go can split out failures; the
+// other edge metrics aggregate to the edge alone.
+func TestEdgeQuery_ExtraGroupBy(t *testing.T) {
+	q := Queries[l7RequestsKey(l7Protocols[0])]
+	if !strings.HasPrefix(q, "sum by ("+edgeGroupBy+", status) (") {
+		t.Errorf("requests query should group by edge and status: %s", q)
+	}
+	if strings.Contains(Queries["container_net_tcp_bytes_sent"], "status") {
+		t.Errorf("bytes query should not group by status: %s", Queries["container_net_tcp_bytes_sent"])
+	}
+}
+
+// Protocols without a latency histogram must not get a latency query, and
+// every other protocol must.
+func TestL7Protocols_LatencyQueries(t *testing.T) {
+	for _, p := range l7Protocols {
+		_, has := Queries[l7LatencyKey(p)]
+		if has != (p.latency != "") {
+			t.Errorf("%s: latency query present=%v, histogram=%q", p.name, has, p.latency)
+		}
+	}
+}
+
+func TestFailedStatus(t *testing.T) {
+	cases := []struct {
+		f      func(string) bool
+		status string
+		want   bool
+	}{
+		{httpFailed, "200", false},
+		{httpFailed, "302", false},
+		{httpFailed, "404", true},
+		{httpFailed, "503", true},
+		{httpFailed, "", false},
+		{statusFailed, "ok", false},
+		{statusFailed, "unknown", false},
+		{statusFailed, "failed", true},
+		{dnsFailed, "ok", false},
+		{dnsFailed, "nxdomain", false},
+		{dnsFailed, "servfail", true},
+	}
+	for _, c := range cases {
+		if got := c.f(c.status); got != c.want {
+			t.Errorf("status %q: failed=%v, want %v", c.status, got, c.want)
+		}
+	}
+}
+
+// Pod inventory and readiness are the state at the end of the window. Read
+// over the whole window, a pod that completed during it reports ready=0 and
+// is counted as a failed instance.
+func TestNodeQueries_PodStateAtWindowEnd(t *testing.T) {
+	for _, k := range []string{"kube_pod_info", "kube_pod_labels", "kube_pod_status_ready", "pod_workload"} {
+		if strings.Contains(Queries[k], "$RANGE") {
+			t.Errorf("%s should be read at the end of the window, got: %s", k, Queries[k])
 		}
 	}
 }

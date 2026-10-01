@@ -16,7 +16,7 @@ func TestParsePromRangeResponse_HappyPath(t *testing.T) {
 			]
 		}
 	}`)
-	got, err := parsePromRangeResponse(raw)
+	got, err := parsePromResponse(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,13 +32,13 @@ func TestParsePromRangeResponse_HappyPath(t *testing.T) {
 }
 
 func TestParsePromRangeResponse_EmptyAndError(t *testing.T) {
-	if got, err := parsePromRangeResponse(nil); err != nil || got != nil {
+	if got, err := parsePromResponse(nil); err != nil || got != nil {
 		t.Errorf("nil input: got=%v err=%v", got, err)
 	}
-	if got, err := parsePromRangeResponse([]byte(`{"status":"error","data":{}}`)); err != nil || got != nil {
+	if got, err := parsePromResponse([]byte(`{"status":"error","data":{}}`)); err != nil || got != nil {
 		t.Errorf("error status should produce nil, got %v %v", got, err)
 	}
-	if _, err := parsePromRangeResponse([]byte(`not json`)); err == nil {
+	if _, err := parsePromResponse([]byte(`not json`)); err == nil {
 		t.Error("expected JSON parse error")
 	}
 }

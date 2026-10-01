@@ -112,41 +112,48 @@ func build(metrics map[string][]promResult) *world {
 	addContainerStat(w, metrics["container_volume_size"], func(s *containerSums, v float64) { s.volumeSize += v })
 	addContainerStat(w, metrics["container_volume_used"], func(s *containerSums, v float64) { s.volumeUsed += v })
 
-	// Phase 7 — connection edges from container_net_tcp_successful_connects.
-	// Labels: src_workload_kind, src_workload_name, src_workload_namespace,
-	//         destination_ip (or destination_workload_*).
+	// Phase 7 — edges. Labels: src_workload_kind, src_workload_name,
+	// src_workload_namespace, destination_workload_* (or destination_ip).
+	// New TCP connections are kept apart from protocol requests: an edge
+	// reports requests when the agent decoded its protocol and falls back to
+	// the connection rate only when it did not.
 	for _, r := range metrics["container_net_tcp_successful_connects"] {
 		la := edgeFromConnectionLabels(w, r.Metric)
 		if la == nil {
 			continue
 		}
-		la.hasRequests = true
-		la.requests += r.Last
+		la.connects += r.Last
 	}
-	for _, r := range metrics["container_http_requests_count"] {
-		la := edgeFromConnectionLabels(w, r.Metric)
-		if la == nil {
-			continue
+	for _, p := range l7Protocols {
+		perEdge := map[*linkAccum]float64{}
+		for _, r := range metrics[l7RequestsKey(p)] {
+			la := edgeFromConnectionLabels(w, r.Metric)
+			if la == nil {
+				continue
+			}
+			perEdge[la] += r.Last
+			if p.failed(labelOr(r.Metric, "status", "")) {
+				la.failures += r.Last
+			}
 		}
-		la.requests += r.Last
-		la.protocol = "HTTP"
-	}
-	for _, r := range metrics["container_http_requests_failure_count"] {
-		la := edgeFromConnectionLabels(w, r.Metric)
-		if la == nil {
-			continue
+		for la, n := range perEdge {
+			la.requests += n
+			// An edge speaking several protocols is labelled with its
+			// busiest one.
+			if n > la.protocolRequests {
+				la.protocol = p.name
+				la.protocolRequests = n
+			}
 		}
-		la.failures += r.Last
-	}
-	for _, r := range metrics["container_http_requests_latency"] {
-		la := edgeFromConnectionLabels(w, r.Metric)
-		if la == nil {
-			continue
-		}
-		// Use max observed latency (best-effort "most-recent" projection
-		// per connection).
-		if r.Last > la.latency {
-			la.latency = r.Last
+		for _, r := range metrics[l7LatencyKey(p)] {
+			la := edgeFromConnectionLabels(w, r.Metric)
+			if la == nil {
+				continue
+			}
+			// Mean latency of the slowest series on the edge.
+			if r.Last > la.latency {
+				la.latency = r.Last
+			}
 		}
 	}
 	for _, r := range metrics["container_net_tcp_bytes_sent"] {
