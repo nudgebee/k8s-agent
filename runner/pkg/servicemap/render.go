@@ -102,11 +102,9 @@ func render(w *world) []Application {
 			}
 		}
 
-		// Health computation.
-		if app.CPUThrottlingTime > 0 {
-			app.IsHealthy = false
-			app.HealthReason = "CPUThrottling"
-		}
+		// Health computation. CPU throttling is reported in CPUThrottlingTime
+		// but does not make an app unhealthy: brief throttling is common and
+		// is not a fault on its own.
 		if app.OOMKills > 0 {
 			app.IsHealthy = false
 			app.HealthReason = "OOMKills"

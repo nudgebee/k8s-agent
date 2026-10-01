@@ -105,7 +105,8 @@ func build(metrics map[string][]promResult) *world {
 	applyReplicaCount(w, metrics["kube_statefulset_replicas"], "StatefulSet", "statefulset")
 	applyReplicaCount(w, metrics["kube_daemonset_status_desired_number_scheduled"], "DaemonSet", "daemonset")
 
-	// Phase 6 — container resource stats summed per app.
+	// Phase 6 — container resource stats summed per app (needs the pod index
+	// from Phase 1).
 	addContainerStat(w, metrics["container_oom_kills_total"], func(s *containerSums, v float64) { s.oomKills += v })
 	addContainerStat(w, metrics["container_restarts"], func(s *containerSums, v float64) { s.restarts += v })
 	addContainerStat(w, metrics["container_throttled_time"], func(s *containerSums, v float64) { s.cpuThrottlingTime += v })
@@ -352,27 +353,23 @@ func applyReplicaCount(w *world, results []promResult, kind, labelKey string) {
 	}
 }
 
+// addContainerStat sums a per-container series into the app of the
+// container's pod. The eBPF agent's container metrics carry no workload
+// labels, only the container id, which names the pod.
 func addContainerStat(w *world, results []promResult, accumulate func(*containerSums, float64)) {
 	for _, r := range results {
-		l := r.Metric
-		ownerKind := labelOr(l, "owner_kind", labelOr(l, "workload_kind", ""))
-		ownerName := labelOr(l, "owner_name", labelOr(l, "workload_name", ""))
-		ns := labelOr(l, "namespace", "")
-		if ownerKind == "ReplicaSet" {
-			ownerKind = "Deployment"
-			ownerName = trimReplicaSetSuffix(ownerName)
-		}
-		if ownerName == "" || ownerKind == "" {
+		if !r.HasVal {
 			continue
 		}
-		k := appKey(ApplicationID{Name: ownerName, Kind: ownerKind, Namespace: ns})
-		if _, ok := w.applications[k]; !ok {
+		ns, pod, ok := podFromContainerID(labelOr(r.Metric, "container_id", ""))
+		if !ok {
 			continue
 		}
-		s := w.containerStatsFor(k)
-		if r.HasVal {
-			accumulate(s, r.Last)
+		k, ok := w.podApp[podRef(ns, pod)]
+		if !ok {
+			continue
 		}
+		accumulate(w.containerStatsFor(k), r.Last)
 	}
 }
 

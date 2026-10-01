@@ -138,26 +138,33 @@ func TestBuild_FailedInstance(t *testing.T) {
 	}
 }
 
+// The eBPF agent's container metrics name only the container (and through
+// it the pod); stats reach the app via the pod index.
 func TestBuild_ContainerStatsAccumulate(t *testing.T) {
+	stat := func(container string, v float64) promResult {
+		return metric(map[string]string{"container_id": "/k8s/shop/" + container}, v, true)
+	}
 	metrics := map[string][]promResult{
 		"kube_pod_info": {
 			metric(map[string]string{
-				"pod": "frontend-a", "namespace": "shop", "pod_ip": "10.0.0.1",
+				"pod": "frontend-abc-1", "namespace": "shop", "pod_ip": "10.0.0.1",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+			}, 1, true),
+			metric(map[string]string{
+				"pod": "frontend-abc-2", "namespace": "shop", "pod_ip": "10.0.0.2",
 				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
 			}, 1, true),
 		},
 		"container_oom_kills_total": {
-			metric(map[string]string{
-				"workload_kind": "Deployment", "workload_name": "frontend", "namespace": "shop",
-			}, 3, true),
-			metric(map[string]string{
-				"workload_kind": "Deployment", "workload_name": "frontend", "namespace": "shop",
-			}, 2, true),
+			stat("frontend-abc-1/app", 3),
+			stat("frontend-abc-2/app", 2),
+			// a pod that is not in kube_pod_info is skipped
+			stat("gone-1/app", 7),
 		},
 		"container_restarts": {
-			metric(map[string]string{
-				"workload_kind": "Deployment", "workload_name": "frontend", "namespace": "shop",
-			}, 5, true),
+			stat("frontend-abc-1/sidecar", 5),
+			// not a pod container id
+			metric(map[string]string{"container_id": "/system.slice/kubelet.service"}, 9, true),
 		},
 	}
 	w := build(metrics)
@@ -168,6 +175,9 @@ func TestBuild_ContainerStatsAccumulate(t *testing.T) {
 	}
 	if s.oomKills != 5 || s.restarts != 5 {
 		t.Errorf("oom=%v restarts=%v; want 5 5", s.oomKills, s.restarts)
+	}
+	if len(w.containerStats) != 1 {
+		t.Errorf("stats attached to unexpected apps: %v", w.containerStats)
 	}
 }
 

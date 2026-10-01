@@ -169,3 +169,18 @@ func TestNodeQueries_PodStateAtWindowEnd(t *testing.T) {
 		}
 	}
 }
+
+// The eBPF agent exports container_restarts_total; a query on any other
+// name silently reports zero restarts.
+func TestNodeQueries_RestartsMetricName(t *testing.T) {
+	if !strings.Contains(Queries["container_restarts"], "container_restarts_total{") {
+		t.Errorf("restarts query reads the wrong metric: %s", Queries["container_restarts"])
+	}
+}
+
+// Completed pods report ready=0 and must not be counted as failed instances.
+func TestNodeQueries_PodInfoExcludesCompletedPods(t *testing.T) {
+	if !strings.Contains(Queries["kube_pod_info"], `unless on (cluster, namespace, pod) (kube_pod_status_phase{__CLUSTER__ phase="Succeeded"} == 1)`) {
+		t.Errorf("kube_pod_info should exclude Succeeded pods: %s", Queries["kube_pod_info"])
+	}
+}
