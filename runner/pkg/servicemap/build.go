@@ -1,5 +1,7 @@
 package servicemap
 
+import "strings"
+
 // build populates a *world from the parsed Prometheus results. Mirrors the
 // loadKubernetesMetadata + loadContainers passes, simplified.
 //
@@ -13,55 +15,52 @@ package servicemap
 func build(metrics map[string][]promResult) *world {
 	w := newWorld()
 
-	// Phase 1 — kube_pod_info gives us pod → workload identity, IP → app.
+	// Phase 0 — the eBPF agent's own pod → workload identity. Edges are keyed
+	// by it, so pods must be grouped under the same name for an edge's source
+	// to find its node.
+	podWorkload := podWorkloads(metrics["pod_workload"])
+
+	// Phase 1 — kube_pod_info gives us pods, their IPs and, for pods the eBPF
+	// agent has not reported, a fallback identity from the direct owner.
 	// kube_pod_info labels include: pod, namespace, host_ip, pod_ip,
-	// created_by_kind, created_by_name (the workload).
+	// created_by_kind, created_by_name.
 	for _, r := range metrics["kube_pod_info"] {
 		l := r.Metric
-		ownerKind := labelOr(l, "created_by_kind", "")
-		ownerName := labelOr(l, "created_by_name", "")
-		if ownerKind == "ReplicaSet" {
-			// ReplicaSet maps back to its Deployment by name prefix — the
-			// RS name encodes the Deployment hash.
-			ownerKind = "Deployment"
-			ownerName = trimReplicaSetSuffix(ownerName)
-		}
 		ns := labelOr(l, "namespace", "")
 		podName := labelOr(l, "pod", "")
 		podIP := labelOr(l, "pod_ip", "")
 
-		if ownerName == "" {
-			// Bare pod (no owner); use the pod name as the application name.
-			ownerKind = "Pod"
-			ownerName = podName
+		id, ok := podWorkload[podRef(ns, podName)]
+		if !ok {
+			id = directOwner(l)
 		}
-		id := ApplicationID{Name: ownerName, Kind: ownerKind, Namespace: ns}
 		a := w.upsertApp(id)
 		if podName != "" {
 			a.instances[podName] = Instance{
-				ID:       ApplicationID{Name: podName, Kind: ownerKind, Namespace: ns},
+				ID:       ApplicationID{Name: podName, Kind: id.Kind, Namespace: ns},
 				IsFailed: false,
 			}
+			w.podApp[podRef(ns, podName)] = appKey(id)
 		}
 		if podIP != "" {
 			w.podIPToApp[podIP] = appKey(id)
 		}
 	}
 
-	// Phase 2 — kube_pod_labels (decorates apps with labels).
+	// Phase 2 — kube_pod_labels (decorates apps with labels). It carries the
+	// pod but no owner, so the app comes from the pod index; created_by_* is
+	// honoured when present.
 	for _, r := range metrics["kube_pod_labels"] {
 		l := r.Metric
-		ownerKind := labelOr(l, "created_by_kind", "")
-		ownerName := labelOr(l, "created_by_name", "")
-		if ownerKind == "ReplicaSet" {
-			ownerKind = "Deployment"
-			ownerName = trimReplicaSetSuffix(ownerName)
+		var a *application
+		if k, ok := w.podApp[podRef(labelOr(l, "namespace", ""), labelOr(l, "pod", ""))]; ok {
+			a = w.applications[k]
+		} else if labelOr(l, "created_by_name", "") != "" {
+			a = w.upsertApp(directOwner(l))
 		}
-		ns := labelOr(l, "namespace", "")
-		if ownerName == "" {
+		if a == nil {
 			continue
 		}
-		a := w.upsertApp(ApplicationID{Name: ownerName, Kind: ownerKind, Namespace: ns})
 		for k, v := range l {
 			if matchesLabelPrefix(k) {
 				a.labels[stripLabelPrefix(k)] = v
@@ -73,18 +72,14 @@ func build(metrics map[string][]promResult) *world {
 	for _, r := range metrics["kube_pod_status_ready"] {
 		l := r.Metric
 		podName := labelOr(l, "pod", "")
-		ns := labelOr(l, "namespace", "")
-		if podName == "" {
+		k, ok := w.podApp[podRef(labelOr(l, "namespace", ""), podName)]
+		if !ok {
 			continue
 		}
-		// Find the app this pod belongs to (any instance match).
-		for _, app := range w.applications {
-			if inst, ok := app.instances[podName]; ok && app.id.Namespace == ns {
-				inst.IsFailed = !r.HasVal || r.Last == 0
-				app.instances[podName] = inst
-				break
-			}
-		}
+		app := w.applications[k]
+		inst := app.instances[podName]
+		inst.IsFailed = !r.HasVal || r.Last == 0
+		app.instances[podName] = inst
 	}
 
 	// Phase 4 — Service ClusterIP → backing workload (best effort: services
@@ -191,9 +186,17 @@ func edgeFromConnectionLabels(w *world, l map[string]string) *linkAccum {
 	if srcName == "" {
 		return nil
 	}
+	if nonWorkloadKinds[srcKind] {
+		return nil
+	}
 	srcK, ok := w.resolveApp(srcKind, srcName, srcNS)
 	if !ok {
-		return nil
+		// A source with no pod in the window (its pods are gone, or
+		// kube-state-metrics does not see them) is still a real caller:
+		// register it from the edge labels, as unknown destinations are.
+		id := ApplicationID{Name: srcName, Kind: orDefault(normalizeKind(srcKind), "Deployment"), Namespace: srcNS}
+		w.upsertApp(id)
+		srcK = appKey(id)
 	}
 
 	dstKind := labelOr(l, "destination_workload_kind", "")
@@ -250,6 +253,66 @@ func (w *world) resolveApp(kind, name, namespace string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// nonWorkloadKinds are the eBPF agent's sentinel source kinds for traffic
+// that does not come from a workload: loopback, host-network processes, and
+// addresses outside the cluster.
+var nonWorkloadKinds = map[string]bool{"localhost": true, "node": true, "external": true}
+
+// podWorkloads maps each pod to the workload the eBPF agent attributes its
+// connections to. The agent climbs owner chains kube_pod_info cannot (Pod →
+// Job → CronJob, or custom controllers such as runner scale sets) and
+// aggregates bare pods, so its name is the one edges carry.
+func podWorkloads(results []promResult) map[string]ApplicationID {
+	out := make(map[string]ApplicationID, len(results))
+	for _, r := range results {
+		l := r.Metric
+		ns, pod, ok := podFromContainerID(labelOr(l, "container_id", ""))
+		kind := labelOr(l, "src_workload_kind", "")
+		name := labelOr(l, "src_workload_name", "")
+		if !ok || name == "" || nonWorkloadKinds[kind] {
+			continue
+		}
+		out[podRef(ns, pod)] = ApplicationID{
+			Name:      name,
+			Kind:      orDefault(normalizeKind(kind), "Deployment"),
+			Namespace: labelOr(l, "src_workload_namespace", ns),
+		}
+	}
+	return out
+}
+
+// podFromContainerID splits the eBPF agent's container id,
+// /k8s/<namespace>/<pod>/<container>, into namespace and pod.
+func podFromContainerID(id string) (namespace, pod string, ok bool) {
+	parts := strings.Split(id, "/")
+	if len(parts) != 5 || parts[0] != "" || parts[1] != "k8s" || parts[2] == "" || parts[3] == "" {
+		return "", "", false
+	}
+	return parts[2], parts[3], true
+}
+
+func podRef(namespace, pod string) string { return namespace + "/" + pod }
+
+// directOwner is a pod's workload as kube_pod_info's created_by_* labels
+// describe it: one hop up, with a ReplicaSet mapped to its Deployment and an
+// unowned pod standing for itself.
+func directOwner(l map[string]string) ApplicationID {
+	kind := labelOr(l, "created_by_kind", "")
+	name := labelOr(l, "created_by_name", "")
+	if kind == "ReplicaSet" {
+		// ReplicaSet maps back to its Deployment by name prefix — the RS
+		// name encodes the Deployment hash.
+		kind = "Deployment"
+		name = trimReplicaSetSuffix(name)
+	}
+	if name == "" {
+		// Bare pod (no owner); use the pod name as the application name.
+		kind = "Pod"
+		name = labelOr(l, "pod", "")
+	}
+	return ApplicationID{Name: name, Kind: kind, Namespace: labelOr(l, "namespace", "")}
 }
 
 // normalizeKind collapses "ReplicaSet" → "Deployment" (RS pods belong to a

@@ -9,6 +9,9 @@ type world struct {
 	// pod IP → app key (built from kube_pod_info)
 	podIPToApp map[string]string
 
+	// "<namespace>/<pod>" → app key (built from kube_pod_info)
+	podApp map[string]string
+
 	// service ClusterIP → app key (built from kube_service_info; service IPs
 	// also alias to the workload they front)
 	serviceIPToApp map[string]string
@@ -49,6 +52,7 @@ func newWorld() *world {
 	return &world{
 		applications:   map[string]*application{},
 		podIPToApp:     map[string]string{},
+		podApp:         map[string]string{},
 		serviceIPToApp: map[string]string{},
 		containerStats: map[string]*containerSums{},
 		edges:          map[string]map[string]*linkAccum{},
