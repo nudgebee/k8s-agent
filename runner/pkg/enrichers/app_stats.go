@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
 	"strconv"
@@ -191,10 +192,13 @@ func (a *AppStatsEnricher) runQueries(
 
 	out := make(map[string][]metricSeries, len(queries))
 	for r := range resCh {
-		// Per-query errors are logged but don't fail the whole call.
-		if r.err == nil {
-			out[r.key] = r.vals
+		// Per-query errors are logged but don't fail the whole call. Before they
+		// were dropped silently, which hid an unparseable SLO matcher (#39800).
+		if r.err != nil {
+			slog.Warn("enrichers: prometheus query failed", "key", r.key, "err", r.err)
+			continue
 		}
+		out[r.key] = r.vals
 	}
 	return out
 }
