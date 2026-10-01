@@ -121,11 +121,12 @@ type edgeMetric struct {
 // edgeMetrics is the single list both query sets are generated from, so the
 // filtered map cannot silently lose a metric the unfiltered map has.
 var edgeMetrics = func() []edgeMetric {
-	out := []edgeMetric{
-		{key: "container_net_tcp_successful_connects", agg: "sum", expr: "rate(container_net_tcp_successful_connects_total{__EDGE__}[$RANGE])"},
-		{key: "container_net_tcp_bytes_sent", agg: "sum", expr: "rate(container_net_tcp_bytes_sent_total{__EDGE__}[$RANGE])"},
-		{key: "container_net_tcp_bytes_received", agg: "sum", expr: "rate(container_net_tcp_bytes_received_total{__EDGE__}[$RANGE])"},
-	}
+	out := make([]edgeMetric, 0, 3+2*len(l7Protocols))
+	out = append(out,
+		edgeMetric{key: "container_net_tcp_successful_connects", agg: "sum", expr: "rate(container_net_tcp_successful_connects_total{__EDGE__}[$RANGE])"},
+		edgeMetric{key: "container_net_tcp_bytes_sent", agg: "sum", expr: "rate(container_net_tcp_bytes_sent_total{__EDGE__}[$RANGE])"},
+		edgeMetric{key: "container_net_tcp_bytes_received", agg: "sum", expr: "rate(container_net_tcp_bytes_received_total{__EDGE__}[$RANGE])"},
+	)
 	for _, p := range l7Protocols {
 		// Requests stay split by status so one query yields both the request
 		// rate and the failure rate.

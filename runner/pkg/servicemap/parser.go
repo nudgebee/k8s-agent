@@ -2,6 +2,7 @@ package servicemap
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 )
 
@@ -67,7 +68,9 @@ func parsePromResponse(raw json.RawMessage) ([]promResult, error) {
 
 // lastValue extracts the final sample's float from a Prometheus values pair
 // list. Each sample is [timestamp, "<float as string>"]. Returns false if
-// the list is empty or the value can't parse.
+// the list is empty, the value can't parse, or it is NaN or ±Inf: build.go
+// sums samples into each edge, and one non-finite sample would turn the
+// whole sum into NaN, which render then reports as 0.
 func lastValue(values [][]any) (float64, bool) {
 	if len(values) == 0 {
 		return 0, false
@@ -81,7 +84,7 @@ func lastValue(values [][]any) (float64, bool) {
 		return 0, false
 	}
 	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false
 	}
 	return v, true
