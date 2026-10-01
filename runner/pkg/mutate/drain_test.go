@@ -122,7 +122,11 @@ func TestDrain_CordonsAndPartitionsPods(t *testing.T) {
 		if action.GetSubresource() != "eviction" {
 			return false, nil, nil
 		}
-		evicted, err := meta.Accessor(action.(k8stesting.CreateAction).GetObject())
+		create, ok := action.(k8stesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		evicted, err := meta.Accessor(create.GetObject())
 		if err != nil {
 			return true, nil, err
 		}
