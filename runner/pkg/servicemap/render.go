@@ -76,18 +76,26 @@ func render(w *world) []Application {
 				used[dstK] = true
 			}
 		}
-		// Downstream pointers (reverse edges). Id stays an object here.
+		// Downstream pointers (reverse edges). Id stays an object here; the
+		// stats are the same edge's, read from the caller's side.
 		if srcs, ok := downstreams[k]; ok {
 			for srcK := range srcs {
 				src, ok := w.applications[srcK]
 				if !ok {
 					continue
 				}
+				la := w.edges[srcK][k]
 				app.Downstreams = append(app.Downstreams, DownstreamLink{
-					ID:       src.id,
-					Status:   StatusUnknown,
-					Stats:    []string{},
-					Protocol: "Unknown",
+					ID:            src.id,
+					Status:        StatusUnknown,
+					Stats:         []string{},
+					Weight:        saneFloat(la.requests),
+					Latency:       saneFloat(la.latency),
+					RequestCount:  saneFloat(la.requests),
+					FailureCount:  saneFloat(la.failures),
+					Protocol:      protocolOrDefault(la.protocol),
+					BytesSent:     saneFloat(la.bytesSent),
+					BytesReceived: saneFloat(la.bytesRecv),
 				})
 				used[k] = true
 				used[srcK] = true

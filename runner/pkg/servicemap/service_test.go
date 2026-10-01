@@ -53,9 +53,9 @@ func TestService_Build_FetchesAndRenders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// We sent 65+ queries (len(Queries) ≈ 65); each one fetched once.
-	if fetchCount.Load() < 50 {
-		t.Errorf("fetchCount = %d; expected ≥50 parallel fetches", fetchCount.Load())
+	// Each query in the catalog is fetched exactly once.
+	if got := fetchCount.Load(); got != int64(len(Queries)) {
+		t.Errorf("fetchCount = %d; want %d (one per query)", got, len(Queries))
 	}
 
 	// Should produce at least frontend + backend.

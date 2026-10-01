@@ -11,7 +11,7 @@ func TestQueries_HasExpectedKeys(t *testing.T) {
 		"kube_deployment_spec_replicas", "container_net_tcp_successful_connects",
 		"container_http_requests_count", "container_http_requests_latency",
 		"container_oom_kills_total", "container_restarts",
-		"ip_to_fqdn",
+		"container_http_requests_failure_count", "container_net_tcp_bytes_sent",
 	}
 	for _, k := range want {
 		if _, ok := Queries[k]; !ok {
@@ -20,12 +20,62 @@ func TestQueries_HasExpectedKeys(t *testing.T) {
 	}
 }
 
-func TestApplicationQueries_HasFilteredVariants(t *testing.T) {
-	for _, k := range []string{"container_net_tcp_successful_connects", "container_http_requests_count"} {
-		q := ApplicationQueries[k]
-		if !strings.Contains(q, "$SRC_FILTER") || !strings.Contains(q, "$DST_FILTER") {
-			t.Errorf("%s should reference $SRC_FILTER and $DST_FILTER, got: %s", k, q)
+// Every query the builder reads must exist in both sets: a key missing from
+// ApplicationQueries silently zeroes that field whenever the UI scopes the
+// map to a namespace, which is how latency went missing.
+func TestQuerySets_SameKeys(t *testing.T) {
+	if len(Queries) != len(ApplicationQueries) {
+		t.Errorf("len(Queries)=%d, len(ApplicationQueries)=%d", len(Queries), len(ApplicationQueries))
+	}
+	for k := range Queries {
+		if _, ok := ApplicationQueries[k]; !ok {
+			t.Errorf("ApplicationQueries missing %q", k)
 		}
+	}
+}
+
+func TestApplicationQueries_EdgeMetricsFiltered(t *testing.T) {
+	for _, m := range edgeMetrics {
+		q := ApplicationQueries[m.key]
+		if !strings.Contains(q, "$SRC_FILTER") || !strings.Contains(q, "$DST_FILTER") {
+			t.Errorf("%s should reference $SRC_FILTER and $DST_FILTER, got: %s", m.key, q)
+		}
+		if strings.Contains(Queries[m.key], "$SRC_FILTER") {
+			t.Errorf("unfiltered %s should not reference $SRC_FILTER: %s", m.key, Queries[m.key])
+		}
+		if !strings.HasSuffix(q, " > 0") || !strings.HasSuffix(Queries[m.key], " > 0") {
+			t.Errorf("%s should drop zero-traffic edges with > 0", m.key)
+		}
+	}
+}
+
+// kube_pod_status_ready has one series per condition; without the
+// condition="true" matcher the false/unknown series (value 0) mark every
+// pod as failed.
+func TestQuerySets_PodReadyOnlyTrueCondition(t *testing.T) {
+	for name, qs := range map[string]map[string]string{"Queries": Queries, "ApplicationQueries": ApplicationQueries} {
+		if !strings.Contains(qs["kube_pod_status_ready"], `condition="true"`) {
+			t.Errorf("%s kube_pod_status_ready lacks condition=\"true\": %s", name, qs["kube_pod_status_ready"])
+		}
+	}
+}
+
+func TestEdgeQuery_Expansion(t *testing.T) {
+	m := edgeMetric{"failures", "sum", `rate(container_http_requests_total{__EDGE__ status=~"5.."}[$RANGE])`}
+	src := `src_workload_namespace=~"shop"`
+	dst := `destination_workload_namespace=~"shop"`
+
+	got := expandPlaceholders(edgeQuery(m, false), "60s", src, dst, "", "", "")
+	want := `sum by (` + edgeGroupBy + `) (rate(container_http_requests_total{ status=~"5.."}[60s])) > 0`
+	if got != want {
+		t.Errorf("unfiltered:\n got:  %s\n want: %s", got, want)
+	}
+
+	got = expandPlaceholders(edgeQuery(m, true), "60s", src, dst, "", "", `cluster="c1",`)
+	want = `sum by (` + edgeGroupBy + `) ((rate(container_http_requests_total{cluster="c1", ` + src + `, status=~"5.."}[60s]))` +
+		` or (rate(container_http_requests_total{cluster="c1", ` + dst + `, status=~"5.."}[60s]))) > 0`
+	if got != want {
+		t.Errorf("filtered:\n got:  %s\n want: %s", got, want)
 	}
 }
 
