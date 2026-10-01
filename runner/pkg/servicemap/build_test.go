@@ -33,7 +33,7 @@ func TestBuild_SingleEdge(t *testing.T) {
 				"destination_workload_namespace": "shop",
 			}, 5.0, true),
 		},
-		"container_http_requests_count": {
+		"l7_requests:HTTP": {
 			metric(map[string]string{
 				"src_workload_name":              "frontend",
 				"src_workload_namespace":         "shop",
@@ -138,26 +138,33 @@ func TestBuild_FailedInstance(t *testing.T) {
 	}
 }
 
+// The eBPF agent's container metrics name only the container (and through
+// it the pod); stats reach the app via the pod index.
 func TestBuild_ContainerStatsAccumulate(t *testing.T) {
+	stat := func(container string, v float64) promResult {
+		return metric(map[string]string{"container_id": "/k8s/shop/" + container}, v, true)
+	}
 	metrics := map[string][]promResult{
 		"kube_pod_info": {
 			metric(map[string]string{
-				"pod": "frontend-a", "namespace": "shop", "pod_ip": "10.0.0.1",
+				"pod": "frontend-abc-1", "namespace": "shop", "pod_ip": "10.0.0.1",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+			}, 1, true),
+			metric(map[string]string{
+				"pod": "frontend-abc-2", "namespace": "shop", "pod_ip": "10.0.0.2",
 				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
 			}, 1, true),
 		},
 		"container_oom_kills_total": {
-			metric(map[string]string{
-				"workload_kind": "Deployment", "workload_name": "frontend", "namespace": "shop",
-			}, 3, true),
-			metric(map[string]string{
-				"workload_kind": "Deployment", "workload_name": "frontend", "namespace": "shop",
-			}, 2, true),
+			stat("frontend-abc-1/app", 3),
+			stat("frontend-abc-2/app", 2),
+			// a pod that is not in kube_pod_info is skipped
+			stat("gone-1/app", 7),
 		},
 		"container_restarts": {
-			metric(map[string]string{
-				"workload_kind": "Deployment", "workload_name": "frontend", "namespace": "shop",
-			}, 5, true),
+			stat("frontend-abc-1/sidecar", 5),
+			// not a pod container id
+			metric(map[string]string{"container_id": "/system.slice/kubelet.service"}, 9, true),
 		},
 	}
 	w := build(metrics)
@@ -168,6 +175,9 @@ func TestBuild_ContainerStatsAccumulate(t *testing.T) {
 	}
 	if s.oomKills != 5 || s.restarts != 5 {
 		t.Errorf("oom=%v restarts=%v; want 5 5", s.oomKills, s.restarts)
+	}
+	if len(w.containerStats) != 1 {
+		t.Errorf("stats attached to unexpected apps: %v", w.containerStats)
 	}
 }
 
@@ -273,7 +283,7 @@ func TestBuild_SourceGroupedByEBPFIdentity(t *testing.T) {
 		"kube_pod_status_ready": {
 			metric(map[string]string{"pod": "runner-x7k2p", "namespace": "ci"}, 1, true),
 		},
-		"container_http_requests_count": {
+		"l7_requests:HTTP": {
 			metric(map[string]string{
 				"src_workload_kind": "AutoscalingRunnerSet", "src_workload_name": "linux-runners", "src_workload_namespace": "ci",
 				"destination_workload_kind": "external", "destination_workload_name": "api.example.com", "destination_workload_namespace": "external",
@@ -310,7 +320,7 @@ func TestBuild_SourceGroupedByEBPFIdentity(t *testing.T) {
 // from the edge labels instead of dropping its traffic.
 func TestBuild_UnknownSourceRegistered(t *testing.T) {
 	metrics := map[string][]promResult{
-		"container_http_requests_count": {
+		"l7_requests:HTTP": {
 			metric(map[string]string{
 				"src_workload_kind": "OpenTelemetryCollector", "src_workload_name": "collector", "src_workload_namespace": "obs",
 				"destination_workload_kind": "Deployment", "destination_workload_name": "backend", "destination_workload_namespace": "shop",
@@ -351,6 +361,58 @@ func TestPodWorkloads(t *testing.T) {
 	want := map[string]ApplicationID{"shop/api-7c9f8-abcde": {Name: "api", Kind: "Deployment", Namespace: "shop"}}
 	if len(got) != len(want) || got["shop/api-7c9f8-abcde"] != want["shop/api-7c9f8-abcde"] {
 		t.Errorf("podWorkloads = %v; want %v", got, want)
+	}
+}
+
+// An edge reports decoded protocol requests when there are any, and new TCP
+// connections only when the agent decoded nothing; the two are never added.
+// Failures come from the protocol's own status values.
+func TestBuild_RequestRateAndProtocol(t *testing.T) {
+	edge := func(dst string, extra map[string]string) map[string]string {
+		l := map[string]string{
+			"src_workload_kind": "Deployment", "src_workload_name": "api", "src_workload_namespace": "shop",
+			"destination_workload_kind": "Deployment", "destination_workload_name": dst, "destination_workload_namespace": "shop",
+		}
+		for k, v := range extra {
+			l[k] = v
+		}
+		return l
+	}
+	metrics := map[string][]promResult{
+		"container_net_tcp_successful_connects": {
+			metric(edge("db", nil), 0.5, true),
+			metric(edge("legacy", nil), 0.2, true),
+		},
+		"l7_requests:Postgres": {
+			metric(edge("db", map[string]string{"status": "ok"}), 30, true),
+			metric(edge("db", map[string]string{"status": "failed"}), 2, true),
+		},
+		"l7_latency:Postgres": {
+			metric(edge("db", nil), 0.004, true),
+		},
+		// a little HTTP on the same edge: still labelled with the busier protocol
+		"l7_requests:HTTP": {
+			metric(edge("db", map[string]string{"status": "500"}), 1, true),
+		},
+	}
+	w := build(metrics)
+	src := appKey(ApplicationID{Name: "api", Kind: "Deployment", Namespace: "shop"})
+
+	db := w.edges[src][appKey(ApplicationID{Name: "db", Kind: "Deployment", Namespace: "shop"})]
+	if db == nil {
+		t.Fatal("api→db edge missing")
+	}
+	if db.protocol != "Postgres" || db.requestRate() != 33 || db.failures != 3 || db.latency != 0.004 {
+		t.Errorf("api→db = protocol %q rate %v failures %v latency %v; want Postgres 33 3 0.004",
+			db.protocol, db.requestRate(), db.failures, db.latency)
+	}
+
+	legacy := w.edges[src][appKey(ApplicationID{Name: "legacy", Kind: "Deployment", Namespace: "shop"})]
+	if legacy == nil {
+		t.Fatal("api→legacy edge missing")
+	}
+	if legacy.protocol != "" || legacy.requestRate() != 0.2 {
+		t.Errorf("api→legacy = protocol %q rate %v; want undecoded edge at its connection rate 0.2", legacy.protocol, legacy.requestRate())
 	}
 }
 

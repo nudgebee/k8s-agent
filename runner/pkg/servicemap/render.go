@@ -63,9 +63,9 @@ func render(w *world) []Application {
 					ID:            idToText(dst.id),
 					Status:        StatusUnknown,
 					Stats:         []string{},
-					Weight:        saneFloat(la.requests),
+					Weight:        saneFloat(la.requestRate()),
 					Latency:       saneFloat(la.latency),
-					RequestCount:  saneFloat(la.requests),
+					RequestCount:  saneFloat(la.requestRate()),
 					FailureCount:  saneFloat(la.failures),
 					Protocol:      protocolOrDefault(la.protocol),
 					BytesSent:     saneFloat(la.bytesSent),
@@ -89,9 +89,9 @@ func render(w *world) []Application {
 					ID:            src.id,
 					Status:        StatusUnknown,
 					Stats:         []string{},
-					Weight:        saneFloat(la.requests),
+					Weight:        saneFloat(la.requestRate()),
 					Latency:       saneFloat(la.latency),
-					RequestCount:  saneFloat(la.requests),
+					RequestCount:  saneFloat(la.requestRate()),
 					FailureCount:  saneFloat(la.failures),
 					Protocol:      protocolOrDefault(la.protocol),
 					BytesSent:     saneFloat(la.bytesSent),
@@ -102,11 +102,9 @@ func render(w *world) []Application {
 			}
 		}
 
-		// Health computation.
-		if app.CPUThrottlingTime > 0 {
-			app.IsHealthy = false
-			app.HealthReason = "CPUThrottling"
-		}
+		// Health computation. CPU throttling is reported in CPUThrottlingTime
+		// but does not make an app unhealthy: brief throttling is common and
+		// is not a fault on its own.
 		if app.OOMKills > 0 {
 			app.IsHealthy = false
 			app.HealthReason = "OOMKills"
