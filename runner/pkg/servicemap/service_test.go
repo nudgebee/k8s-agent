@@ -26,8 +26,8 @@ func TestService_Build_FetchesAndRenders(t *testing.T) {
 		switch {
 		case strings.Contains(q, "kube_pod_info"):
 			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
-				{"metric":{"pod":"frontend-abc-1","namespace":"shop","pod_ip":"10.0.0.1","created_by_kind":"ReplicaSet","created_by_name":"frontend-abc"},"value":[1,"1"]},
-				{"metric":{"pod":"backend-def-1","namespace":"shop","pod_ip":"10.0.0.2","created_by_kind":"ReplicaSet","created_by_name":"backend-def"},"value":[1,"1"]}
+				{"metric":{"pod":"frontend-abc-1","namespace":"shop","pod_ip":"10.0.0.1","created_by_kind":"ReplicaSet","created_by_name":"frontend-6f7d9c8b4"},"value":[1,"1"]},
+				{"metric":{"pod":"backend-def-1","namespace":"shop","pod_ip":"10.0.0.2","created_by_kind":"ReplicaSet","created_by_name":"backend-5d8c7b9f6"},"value":[1,"1"]}
 			]}}`))
 		case strings.Contains(q, "container_net_tcp_successful_connects"):
 			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[

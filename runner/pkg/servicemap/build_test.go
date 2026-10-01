@@ -16,11 +16,11 @@ func TestBuild_SingleEdge(t *testing.T) {
 		"kube_pod_info": {
 			metric(map[string]string{
 				"pod": "frontend-abc-1", "namespace": "shop", "pod_ip": "10.0.0.1",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 			}, 1, true),
 			metric(map[string]string{
 				"pod": "backend-def-1", "namespace": "shop", "pod_ip": "10.0.0.2",
-				"created_by_kind": "ReplicaSet", "created_by_name": "backend-def",
+				"created_by_kind": "ReplicaSet", "created_by_name": "backend-5d8c7b9f6",
 			}, 1, true),
 		},
 		"container_net_tcp_successful_connects": {
@@ -84,18 +84,34 @@ func TestBuild_BarePod(t *testing.T) {
 	}
 }
 
+// A pod owned by a ReplicaSet created directly belongs to that ReplicaSet,
+// not to a Deployment named after a truncated prefix.
+func TestBuild_BareReplicaSetOwner(t *testing.T) {
+	w := build(map[string][]promResult{
+		"kube_pod_info": {
+			metric(map[string]string{
+				"pod": "batch-worker-x2k9p", "namespace": "n", "pod_ip": "10.0.0.9",
+				"created_by_kind": "ReplicaSet", "created_by_name": "batch-worker",
+			}, 1, true),
+		},
+	})
+	if _, ok := w.applications[appKey(ApplicationID{Name: "batch-worker", Kind: "ReplicaSet", Namespace: "n"})]; !ok {
+		t.Errorf("bare ReplicaSet app missing: %v", keysOf(w.applications))
+	}
+}
+
 func TestBuild_LabelsExtractedFromPodLabels(t *testing.T) {
 	metrics := map[string][]promResult{
 		"kube_pod_info": {
 			metric(map[string]string{
 				"pod": "frontend-a", "namespace": "shop", "pod_ip": "10.0.0.1",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 			}, 1, true),
 		},
 		"kube_pod_labels": {
 			metric(map[string]string{
 				"namespace":       "shop",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 				"label_app":   "frontend",
 				"label_env":   "prod",
 				"non_label_x": "ignore-me",
@@ -120,7 +136,7 @@ func TestBuild_FailedInstance(t *testing.T) {
 		"kube_pod_info": {
 			metric(map[string]string{
 				"pod": "frontend-a", "namespace": "shop", "pod_ip": "10.0.0.1",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 			}, 1, true),
 		},
 		"kube_pod_status_ready": {
@@ -148,11 +164,11 @@ func TestBuild_ContainerStatsAccumulate(t *testing.T) {
 		"kube_pod_info": {
 			metric(map[string]string{
 				"pod": "frontend-abc-1", "namespace": "shop", "pod_ip": "10.0.0.1",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 			}, 1, true),
 			metric(map[string]string{
 				"pod": "frontend-abc-2", "namespace": "shop", "pod_ip": "10.0.0.2",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 			}, 1, true),
 		},
 		"container_oom_kills_total": {
@@ -198,9 +214,10 @@ func TestBuild_ServiceClusterIPMappedToService(t *testing.T) {
 }
 
 // TestBuild_UnknownDestinationNameKeptWhole covers destinations that
-// kube_pod_info never registered. Only a ReplicaSet name may lose its
-// "-<hash>" suffix; external hostnames and other kinds must keep the full
-// name, or distinct hosts collapse into one node (e.g. every
+// kube_pod_info never registered. Only a ReplicaSet name ending in a
+// pod-template hash may lose its suffix; external hostnames, other kinds and
+// a ReplicaSet created directly must keep the full name, or distinct
+// workloads collapse into one node (e.g. every
 // "us-central1-*.googleapis.com" endpoint becoming "us-central1").
 func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
 	conn := func(kind, name, ns string) promResult {
@@ -217,7 +234,7 @@ func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
 		"kube_pod_info": {
 			metric(map[string]string{
 				"pod": "frontend-abc-1", "namespace": "shop", "pod_ip": "10.0.0.1",
-				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-abc",
+				"created_by_kind": "ReplicaSet", "created_by_name": "frontend-6f7d9c8b4",
 			}, 1, true),
 		},
 		"container_net_tcp_successful_connects": {
@@ -225,7 +242,8 @@ func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
 			conn("external", "us-central1-artifactregistry.googleapis.com", "external"),
 			conn("external", "kms.us-east-1.amazonaws.com", "external"),
 			conn("Service", "redis-master", "shop"),
-			conn("ReplicaSet", "api-7c9f8", "shop"),
+			conn("ReplicaSet", "api-7c9f8bd5d", "shop"),
+			conn("ReplicaSet", "batch-worker", "shop"),
 		},
 	}
 
@@ -237,6 +255,7 @@ func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
 		{Name: "kms.us-east-1.amazonaws.com", Kind: "external", Namespace: "external"},
 		{Name: "redis-master", Kind: "Service", Namespace: "shop"},
 		{Name: "api", Kind: "Deployment", Namespace: "shop"},
+		{Name: "batch-worker", Kind: "ReplicaSet", Namespace: "shop"},
 	}
 	for _, id := range want {
 		if _, ok := w.applications[appKey(id)]; !ok {
@@ -247,6 +266,7 @@ func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
 		{Name: "us-central1", Kind: "external", Namespace: "external"},
 		{Name: "kms.us-east", Kind: "external", Namespace: "external"},
 		{Name: "redis", Kind: "Service", Namespace: "shop"},
+		{Name: "batch", Kind: "Deployment", Namespace: "shop"},
 	} {
 		if _, ok := w.applications[appKey(truncated)]; ok {
 			t.Errorf("truncated app %s should not exist", appKey(truncated))
@@ -335,6 +355,35 @@ func TestBuild_UnknownSourceRegistered(t *testing.T) {
 	}
 }
 
+// Unknown sources are named the way the eBPF agent names them: a
+// ReplicaSet created directly keeps its name; a hash-suffixed one (as an
+// older agent could report) joins its Deployment.
+func TestBuild_UnknownReplicaSetSourceNamed(t *testing.T) {
+	conn := func(name string) promResult {
+		return metric(map[string]string{
+			"src_workload_kind": "ReplicaSet", "src_workload_name": name, "src_workload_namespace": "shop",
+			"destination_workload_kind": "Deployment", "destination_workload_name": "backend", "destination_workload_namespace": "shop",
+		}, 1, true)
+	}
+	w := build(map[string][]promResult{"container_net_tcp_successful_connects": {conn("batch-worker"), conn("api-7c9f8bd5d")}})
+	for _, id := range []ApplicationID{
+		{Name: "batch-worker", Kind: "ReplicaSet", Namespace: "shop"},
+		{Name: "api", Kind: "Deployment", Namespace: "shop"},
+	} {
+		if len(w.edges[appKey(id)]) != 1 {
+			t.Errorf("source %s should have one edge; apps=%v", appKey(id), keysOf(w.applications))
+		}
+	}
+	for _, id := range []ApplicationID{
+		{Name: "batch", Kind: "Deployment", Namespace: "shop"},
+		{Name: "api-7c9f8bd5d", Kind: "Deployment", Namespace: "shop"},
+	} {
+		if _, ok := w.applications[appKey(id)]; ok {
+			t.Errorf("app %s should not exist", appKey(id))
+		}
+	}
+}
+
 func TestBuild_NonWorkloadSourcesDropped(t *testing.T) {
 	var conns []promResult
 	for _, kind := range []string{"localhost", "node", "external"} {
@@ -416,16 +465,24 @@ func TestBuild_RequestRateAndProtocol(t *testing.T) {
 	}
 }
 
-func TestTrimReplicaSetSuffix(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"frontend-abc123", "frontend"},
-		{"my-app", "my"},
-		{"single", "single"},
-		{"", ""},
+func TestWorkloadID(t *testing.T) {
+	cases := []struct {
+		kind, name string
+		want       ApplicationID
+	}{
+		// a Deployment's ReplicaSet stands for the Deployment
+		{"ReplicaSet", "frontend-7c9f8bd5d", ApplicationID{Name: "frontend", Kind: "Deployment", Namespace: "n"}},
+		{"ReplicaSet", "foo-2456789-7d9f8bcdfg", ApplicationID{Name: "foo-2456789", Kind: "Deployment", Namespace: "n"}},
+		// a ReplicaSet created directly keeps its name and kind
+		{"ReplicaSet", "my-app", ApplicationID{Name: "my-app", Kind: "ReplicaSet", Namespace: "n"}},
+		{"ReplicaSet", "single", ApplicationID{Name: "single", Kind: "ReplicaSet", Namespace: "n"}},
+		// other kinds are untouched, hash-like suffix or not
+		{"StatefulSet", "db-7c9f8bd5d", ApplicationID{Name: "db-7c9f8bd5d", Kind: "StatefulSet", Namespace: "n"}},
+		{"", "api", ApplicationID{Name: "api", Kind: "", Namespace: "n"}},
 	}
 	for _, c := range cases {
-		if got := trimReplicaSetSuffix(c.in); got != c.want {
-			t.Errorf("trimReplicaSetSuffix(%q) = %q; want %q", c.in, got, c.want)
+		if got := workloadID(c.kind, c.name, "n"); got != c.want {
+			t.Errorf("workloadID(%q, %q) = %+v; want %+v", c.kind, c.name, got, c.want)
 		}
 	}
 }

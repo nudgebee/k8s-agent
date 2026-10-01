@@ -1,6 +1,9 @@
 package servicemap
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // build populates a *world from the parsed Prometheus results. Mirrors the
 // loadKubernetesMetadata + loadContainers passes, simplified.
@@ -202,7 +205,8 @@ func edgeFromConnectionLabels(w *world, l map[string]string) *linkAccum {
 		// A source with no pod in the window (its pods are gone, or
 		// kube-state-metrics does not see them) is still a real caller:
 		// register it from the edge labels, as unknown destinations are.
-		id := ApplicationID{Name: srcName, Kind: orDefault(normalizeKind(srcKind), "Deployment"), Namespace: srcNS}
+		id := workloadID(srcKind, srcName, srcNS)
+		id.Kind = orDefault(id.Kind, "Deployment")
 		w.upsertApp(id)
 		srcK = appKey(id)
 	}
@@ -216,22 +220,13 @@ func edgeFromConnectionLabels(w *world, l map[string]string) *linkAccum {
 		if k, ok := w.resolveApp(dstKind, dstName, dstNS); ok {
 			dstK = k
 		} else {
-			// Workload labelled but not yet known — register it as a
-			// Deployment (most common case) so downstream lookups resolve.
-			// Only a ReplicaSet name carries a hash suffix; every other
-			// destination (external hostnames like
-			// "us-central1-aiplatform.googleapis.com", Services,
-			// StatefulSets) is already the real name and must not be cut
-			// at its last "-".
-			name := dstName
-			if dstKind == "ReplicaSet" {
-				name = trimReplicaSetSuffix(dstName)
-			}
-			id := ApplicationID{
-				Name:      name,
-				Kind:      orDefault(normalizeKind(dstKind), "Deployment"),
-				Namespace: dstNS,
-			}
+			// Workload labelled but not yet known — register it (as a
+			// Deployment when the kind is missing, the most common case) so
+			// downstream lookups resolve. The name is kept whole: external
+			// hostnames like "us-central1-aiplatform.googleapis.com",
+			// Services and StatefulSets must not be cut at their last "-".
+			id := workloadID(dstKind, dstName, dstNS)
+			id.Kind = orDefault(id.Kind, "Deployment")
 			w.upsertApp(id)
 			dstK = appKey(id)
 		}
@@ -248,15 +243,15 @@ func edgeFromConnectionLabels(w *world, l map[string]string) *linkAccum {
 // kind is empty (Coroot eBPF metrics often omit it), falls back to a
 // name+namespace search across known apps.
 func (w *world) resolveApp(kind, name, namespace string) (string, bool) {
-	kind = normalizeKind(kind)
-	if kind != "" {
-		k := appKey(ApplicationID{Name: name, Kind: kind, Namespace: namespace})
+	id := workloadID(kind, name, namespace)
+	if id.Kind != "" {
+		k := appKey(id)
 		if _, ok := w.applications[k]; ok {
 			return k, true
 		}
 	}
 	for k, a := range w.applications {
-		if a.id.Name == name && a.id.Namespace == namespace {
+		if a.id.Name == id.Name && a.id.Namespace == namespace {
 			return k, true
 		}
 	}
@@ -282,11 +277,9 @@ func podWorkloads(results []promResult) map[string]ApplicationID {
 		if !ok || name == "" || nonWorkloadKinds[kind] {
 			continue
 		}
-		out[podRef(ns, pod)] = ApplicationID{
-			Name:      name,
-			Kind:      orDefault(normalizeKind(kind), "Deployment"),
-			Namespace: labelOr(l, "src_workload_namespace", ns),
-		}
+		id := workloadID(kind, name, labelOr(l, "src_workload_namespace", ns))
+		id.Kind = orDefault(id.Kind, "Deployment")
+		out[podRef(ns, pod)] = id
 	}
 	return out
 }
@@ -304,32 +297,35 @@ func podFromContainerID(id string) (namespace, pod string, ok bool) {
 func podRef(namespace, pod string) string { return namespace + "/" + pod }
 
 // directOwner is a pod's workload as kube_pod_info's created_by_* labels
-// describe it: one hop up, with a ReplicaSet mapped to its Deployment and an
-// unowned pod standing for itself.
+// describe it: one hop up, with a Deployment's ReplicaSet mapped to the
+// Deployment and an unowned pod standing for itself.
 func directOwner(l map[string]string) ApplicationID {
-	kind := labelOr(l, "created_by_kind", "")
+	ns := labelOr(l, "namespace", "")
 	name := labelOr(l, "created_by_name", "")
-	if kind == "ReplicaSet" {
-		// ReplicaSet maps back to its Deployment by name prefix — the RS
-		// name encodes the Deployment hash.
-		kind = "Deployment"
-		name = trimReplicaSetSuffix(name)
-	}
 	if name == "" {
 		// Bare pod (no owner); use the pod name as the application name.
-		kind = "Pod"
-		name = labelOr(l, "pod", "")
+		return ApplicationID{Name: labelOr(l, "pod", ""), Kind: "Pod", Namespace: ns}
 	}
-	return ApplicationID{Name: name, Kind: kind, Namespace: labelOr(l, "namespace", "")}
+	return workloadID(labelOr(l, "created_by_kind", ""), name, ns)
 }
 
-// normalizeKind collapses "ReplicaSet" → "Deployment" (RS pods belong to a
-// Deployment from a topology perspective).
-func normalizeKind(k string) string {
-	if k == "ReplicaSet" {
-		return "Deployment"
+// podTemplateHashRe matches the pod-template hash a Deployment appends to
+// the names of the ReplicaSets it creates; Kubernetes draws it from this
+// alphabet. The eBPF agent's resolver uses the same pattern.
+var podTemplateHashRe = regexp.MustCompile(`^[bcdfghjklmnpqrstvwxz2456789]{6,11}$`)
+
+// workloadID names a workload the way the eBPF agent does. A ReplicaSet
+// whose name ends in a pod-template hash stands for its Deployment
+// ("api-7c9f8bd5d" → Deployment "api"); a ReplicaSet created directly, with
+// no such suffix, keeps its own kind and name ("my-app" stays "my-app").
+// Every other kind is returned unchanged.
+func workloadID(kind, name, namespace string) ApplicationID {
+	if kind == "ReplicaSet" {
+		if i := strings.LastIndex(name, "-"); i > 0 && podTemplateHashRe.MatchString(name[i+1:]) {
+			return ApplicationID{Name: name[:i], Kind: "Deployment", Namespace: namespace}
+		}
 	}
-	return k
+	return ApplicationID{Name: name, Kind: kind, Namespace: namespace}
 }
 
 func orDefault(s, fallback string) string {
@@ -371,22 +367,6 @@ func addContainerStat(w *world, results []promResult, accumulate func(*container
 		}
 		accumulate(w.containerStatsFor(k), r.Last)
 	}
-}
-
-// trimReplicaSetSuffix strips the typical "-<hash>" suffix Kubernetes
-// appends to ReplicaSet names so we can derive the Deployment name. Best-
-// effort: assumes the suffix is the last "-<chars>" segment.
-func trimReplicaSetSuffix(rsName string) string {
-	if rsName == "" {
-		return rsName
-	}
-	// Walk back to the last '-' and assume the suffix is a hash.
-	for i := len(rsName) - 1; i > 0; i-- {
-		if rsName[i] == '-' {
-			return rsName[:i]
-		}
-	}
-	return rsName
 }
 
 // matchesLabelPrefix returns true when a Prometheus label name is a pod
