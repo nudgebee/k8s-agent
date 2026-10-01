@@ -188,13 +188,13 @@ func fmtSLOQuery(query string, window int, operators []string, labels map[string
 	for k, v := range labels {
 		if k == "le" {
 			// Integer buckets print as 1 or 1.0 depending on the client, so allow
-			// a trailing .0+. The
-			// value is quoted so its own dot is literal, and every backslash is
-			// doubled: a PromQL/MetricsQL double-quoted string uses Go escape
-			// rules, where a lone `\.` is invalid and the whole query fails to
-			// parse — which left every latency SLO without a value (#39800).
+			// a trailing .0+. The value is quoted so its own dot is literal, and
+			// the pattern is written with strconv.Quote: a PromQL/MetricsQL
+			// double-quoted string uses Go escape rules, where a lone `\.` is
+			// invalid and the whole query fails to parse — which left every
+			// latency SLO without a value (#39800).
 			re := "^" + regexp.QuoteMeta(v) + `(\.0+)?$`
-			q = strings.Replace(q, "}", fmt.Sprintf(`, %s=~"%s"}`, k, strings.ReplaceAll(re, `\`, `\\`)), 1)
+			q = strings.Replace(q, "}", fmt.Sprintf(`, %s=~%s}`, k, strconv.Quote(re)), 1)
 		} else {
 			q = strings.Replace(q, "}", fmt.Sprintf(`, %s="%s"}`, k, v), 1)
 		}
