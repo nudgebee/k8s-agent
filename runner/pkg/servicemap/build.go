@@ -121,25 +121,17 @@ func build(metrics map[string][]promResult) *world {
 	// New TCP connections are kept apart from protocol requests: an edge
 	// reports requests when the agent decoded its protocol and falls back to
 	// the connection rate only when it did not.
-	for _, r := range metrics["container_net_tcp_successful_connects"] {
-		la := edgeFromConnectionLabels(w, r.Metric)
-		if la == nil {
-			continue
-		}
+	forEachEdge(w, metrics["container_net_tcp_successful_connects"], func(la *linkAccum, r promResult) {
 		la.connects += r.Last
-	}
+	})
 	for _, p := range l7Protocols {
 		perEdge := map[*linkAccum]float64{}
-		for _, r := range metrics[l7RequestsKey(p)] {
-			la := edgeFromConnectionLabels(w, r.Metric)
-			if la == nil {
-				continue
-			}
+		forEachEdge(w, metrics[l7RequestsKey(p)], func(la *linkAccum, r promResult) {
 			perEdge[la] += r.Last
 			if p.failed(labelOr(r.Metric, "status", "")) {
 				la.failures += r.Last
 			}
-		}
+		})
 		for la, n := range perEdge {
 			la.requests += n
 			// An edge speaking several protocols is labelled with its
@@ -149,33 +141,35 @@ func build(metrics map[string][]promResult) *world {
 				la.protocolRequests = n
 			}
 		}
-		for _, r := range metrics[l7LatencyKey(p)] {
-			la := edgeFromConnectionLabels(w, r.Metric)
-			if la == nil {
-				continue
-			}
+		forEachEdge(w, metrics[l7LatencyKey(p)], func(la *linkAccum, r promResult) {
 			// Mean latency of the slowest series on the edge.
 			if r.Last > la.latency {
 				la.latency = r.Last
 			}
-		}
+		})
 	}
-	for _, r := range metrics["container_net_tcp_bytes_sent"] {
-		la := edgeFromConnectionLabels(w, r.Metric)
-		if la == nil {
-			continue
-		}
+	forEachEdge(w, metrics["container_net_tcp_bytes_sent"], func(la *linkAccum, r promResult) {
 		la.bytesSent += r.Last
-	}
-	for _, r := range metrics["container_net_tcp_bytes_received"] {
-		la := edgeFromConnectionLabels(w, r.Metric)
-		if la == nil {
-			continue
-		}
+	})
+	forEachEdge(w, metrics["container_net_tcp_bytes_received"], func(la *linkAccum, r promResult) {
 		la.bytesRecv += r.Last
-	}
+	})
 
 	return w
+}
+
+// forEachEdge hands each series with a value to fn along with its edge.
+// Series without one (no sample, or a NaN/Inf sample the parser dropped) are
+// skipped before resolving, so they cannot register apps or empty edges.
+func forEachEdge(w *world, results []promResult, fn func(la *linkAccum, r promResult)) {
+	for _, r := range results {
+		if !r.HasVal {
+			continue
+		}
+		if la := edgeFromConnectionLabels(w, r.Metric); la != nil {
+			fn(la, r)
+		}
+	}
 }
 
 // edgeFromConnectionLabels resolves the (src_app, dst_app) pair from one

@@ -113,7 +113,13 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
+			// Don't queue behind running queries once the caller has given up.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				resultsCh <- fetchResult{key: key, err: ctx.Err()}
+				return
+			}
 			defer func() { <-sem }()
 
 			expanded := expandPlaceholders(q, rangeStr, srcFilter, dstFilter, podFilter, nsFilter, clusterFilter)

@@ -384,6 +384,25 @@ func TestBuild_UnknownReplicaSetSourceNamed(t *testing.T) {
 	}
 }
 
+// A series with no finite value (the parser drops NaN/Inf samples) must not
+// register its endpoints or an empty edge.
+func TestBuild_SeriesWithoutValueIgnored(t *testing.T) {
+	l := map[string]string{
+		"src_workload_kind": "Deployment", "src_workload_name": "api", "src_workload_namespace": "shop",
+		"destination_workload_kind": "Deployment", "destination_workload_name": "db", "destination_workload_namespace": "shop",
+	}
+	w := build(map[string][]promResult{
+		"container_net_tcp_successful_connects": {metric(l, 0, false)},
+		"l7_requests:HTTP":                      {metric(l, 0, false)},
+		"l7_latency:HTTP":                       {metric(l, 0, false)},
+		"container_net_tcp_bytes_sent":          {metric(l, 0, false)},
+		"container_net_tcp_bytes_received":      {metric(l, 0, false)},
+	})
+	if len(w.edges) != 0 || len(w.applications) != 0 {
+		t.Errorf("valueless series created apps %v / edges %v", keysOf(w.applications), w.edges)
+	}
+}
+
 func TestBuild_NonWorkloadSourcesDropped(t *testing.T) {
 	var conns []promResult
 	for _, kind := range []string{"localhost", "node", "external"} {
