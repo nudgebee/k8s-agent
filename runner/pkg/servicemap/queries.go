@@ -35,11 +35,12 @@ const edgeGroupBy = "src_workload_kind, src_kind, src_workload_name, " +
 // application that ends up without an edge, so filtering them would only
 // lose pods of the filtered workload's peers.
 var nodeQueries = map[string]string{
-	"kube_pod_info":                                  "kube_pod_info{__CLUSTER__}",
-	"kube_pod_labels":                                "kube_pod_labels{__CLUSTER__}",
-	"kube_pod_status_ready":                          `kube_pod_status_ready{__CLUSTER__ condition="true"}`,
-	"kube_service_info":                              "kube_service_info{__CLUSTER__}",
-	"kube_deployment_spec_replicas":                  "kube_deployment_spec_replicas{__CLUSTER__}",
+	"kube_pod_info":                 "kube_pod_info{__CLUSTER__}",
+	"pod_workload":                  "count by (container_id, src_workload_kind, src_workload_name, src_workload_namespace) (container_net_tcp_bytes_sent_total{__CLUSTER__})",
+	"kube_pod_labels":               "kube_pod_labels{__CLUSTER__}",
+	"kube_pod_status_ready":         `kube_pod_status_ready{__CLUSTER__ condition="true"}`,
+	"kube_service_info":             "kube_service_info{__CLUSTER__}",
+	"kube_deployment_spec_replicas": "kube_deployment_spec_replicas{__CLUSTER__}",
 	"kube_daemonset_status_desired_number_scheduled": "kube_daemonset_status_desired_number_scheduled{__CLUSTER__}",
 	"kube_statefulset_replicas":                      "kube_statefulset_replicas{__CLUSTER__}",
 	"container_oom_kills_total":                      "increase(container_oom_kills_total{__CLUSTER__}[$RANGE]) % 10000000",

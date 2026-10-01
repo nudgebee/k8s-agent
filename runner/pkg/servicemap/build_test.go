@@ -248,6 +248,112 @@ func TestBuild_UnknownDestinationNameKeptWhole(t *testing.T) {
 	}
 }
 
+// TestBuild_SourceGroupedByEBPFIdentity covers pods whose direct owner is
+// not the workload the eBPF agent reports: a runner pod owned by a per-job
+// custom resource that the agent attributes to its long-lived scale set.
+// The pod must join the scale set's node so the edge (keyed by the scale
+// set) keeps its source instead of being dropped.
+func TestBuild_SourceGroupedByEBPFIdentity(t *testing.T) {
+	metrics := map[string][]promResult{
+		"pod_workload": {
+			metric(map[string]string{
+				"container_id":      "/k8s/ci/runner-x7k2p/runner",
+				"src_workload_kind": "AutoscalingRunnerSet", "src_workload_name": "linux-runners", "src_workload_namespace": "ci",
+			}, 1, true),
+		},
+		"kube_pod_info": {
+			metric(map[string]string{
+				"pod": "runner-x7k2p", "namespace": "ci", "pod_ip": "10.0.0.7",
+				"created_by_kind": "EphemeralRunner", "created_by_name": "runner-x7k2p",
+			}, 1, true),
+		},
+		"kube_pod_labels": {
+			metric(map[string]string{"pod": "runner-x7k2p", "namespace": "ci", "label_team": "platform"}, 1, true),
+		},
+		"kube_pod_status_ready": {
+			metric(map[string]string{"pod": "runner-x7k2p", "namespace": "ci"}, 1, true),
+		},
+		"container_http_requests_count": {
+			metric(map[string]string{
+				"src_workload_kind": "AutoscalingRunnerSet", "src_workload_name": "linux-runners", "src_workload_namespace": "ci",
+				"destination_workload_kind": "external", "destination_workload_name": "api.example.com", "destination_workload_namespace": "external",
+			}, 2.5, true),
+		},
+	}
+	w := build(metrics)
+
+	setK := appKey(ApplicationID{Name: "linux-runners", Kind: "AutoscalingRunnerSet", Namespace: "ci"})
+	set := w.applications[setK]
+	if set == nil {
+		t.Fatalf("scale-set app missing; have %v", keysOf(w.applications))
+	}
+	if _, ok := set.instances["runner-x7k2p"]; !ok {
+		t.Errorf("runner pod should be an instance of the scale set: %+v", set.instances)
+	}
+	if set.labels["team"] != "platform" {
+		t.Errorf("pod labels should attach via the pod: %v", set.labels)
+	}
+	if _, ok := w.applications[appKey(ApplicationID{Name: "runner-x7k2p", Kind: "EphemeralRunner", Namespace: "ci"})]; ok {
+		t.Error("per-job owner should not become its own app when the eBPF identity is known")
+	}
+	if w.podIPToApp["10.0.0.7"] != setK {
+		t.Errorf("pod IP should resolve to the scale set, got %q", w.podIPToApp["10.0.0.7"])
+	}
+	dst := appKey(ApplicationID{Name: "api.example.com", Kind: "external", Namespace: "external"})
+	la := w.edges[setK][dst]
+	if la == nil || la.requests != 2.5 || la.protocol != "HTTP" {
+		t.Errorf("edge from scale set = %+v; want 2.5 HTTP requests", la)
+	}
+}
+
+// A caller with no pod in the window is still a real source: register it
+// from the edge labels instead of dropping its traffic.
+func TestBuild_UnknownSourceRegistered(t *testing.T) {
+	metrics := map[string][]promResult{
+		"container_http_requests_count": {
+			metric(map[string]string{
+				"src_workload_kind": "OpenTelemetryCollector", "src_workload_name": "collector", "src_workload_namespace": "obs",
+				"destination_workload_kind": "Deployment", "destination_workload_name": "backend", "destination_workload_namespace": "shop",
+			}, 4, true),
+		},
+	}
+	w := build(metrics)
+	src := appKey(ApplicationID{Name: "collector", Kind: "OpenTelemetryCollector", Namespace: "obs"})
+	dst := appKey(ApplicationID{Name: "backend", Kind: "Deployment", Namespace: "shop"})
+	if la := w.edges[src][dst]; la == nil || la.requests != 4 {
+		t.Errorf("edge collector→backend = %+v; want 4 requests; apps=%v", la, keysOf(w.applications))
+	}
+}
+
+func TestBuild_NonWorkloadSourcesDropped(t *testing.T) {
+	var conns []promResult
+	for _, kind := range []string{"localhost", "node", "external"} {
+		conns = append(conns, metric(map[string]string{
+			"src_workload_kind": kind, "src_workload_name": "x", "src_workload_namespace": kind,
+			"destination_workload_kind": "Deployment", "destination_workload_name": "backend", "destination_workload_namespace": "shop",
+		}, 1, true))
+	}
+	w := build(map[string][]promResult{"container_net_tcp_successful_connects": conns})
+	if len(w.edges) != 0 {
+		t.Errorf("non-workload sources should not produce edges: %v", w.edges)
+	}
+}
+
+func TestPodWorkloads(t *testing.T) {
+	got := podWorkloads([]promResult{
+		metric(map[string]string{"container_id": "/k8s/shop/api-7c9f8-abcde/app", "src_workload_kind": "Deployment", "src_workload_name": "api", "src_workload_namespace": "shop"}, 1, true),
+		// host-network traffic is attributed to the node, not the pod's workload
+		metric(map[string]string{"container_id": "/k8s/kube-system/proxy-1/proxy", "src_workload_kind": "node", "src_workload_name": "node-1", "src_workload_namespace": "node"}, 1, true),
+		// not a pod container id
+		metric(map[string]string{"container_id": "/system.slice/containerd.service", "src_workload_kind": "Deployment", "src_workload_name": "x"}, 1, true),
+		metric(map[string]string{"container_id": "/k8s-cronjob/shop/report/app", "src_workload_kind": "CronJob", "src_workload_name": "report", "src_workload_namespace": "shop"}, 1, true),
+	})
+	want := map[string]ApplicationID{"shop/api-7c9f8-abcde": {Name: "api", Kind: "Deployment", Namespace: "shop"}}
+	if len(got) != len(want) || got["shop/api-7c9f8-abcde"] != want["shop/api-7c9f8-abcde"] {
+		t.Errorf("podWorkloads = %v; want %v", got, want)
+	}
+}
+
 func TestTrimReplicaSetSuffix(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"frontend-abc123", "frontend"},
