@@ -134,7 +134,11 @@ var edgeMetrics = func() []edgeMetric {
 		// rate and the failure rate.
 		out = append(out, edgeMetric{key: l7RequestsKey(p), agg: "sum", by: "status", expr: "rate(" + p.requests + "{__EDGE__}[$RANGE])"})
 		if p.latency != "" {
-			out = append(out, edgeMetric{key: l7LatencyKey(p), agg: "max", expr: "rate(" + p.latency + "_sum{__EDGE__}[$RANGE]) / rate(" + p.latency + "_count{__EDGE__}[$RANGE])"})
+			// Divide only where requests were counted. With none in the
+			// window rate(_count) is exactly 0, but rate(_sum) need not be:
+			// the TSDB can return a stored float sum rounded two different
+			// ways, and that 1-ulp wobble divided by 0 is +Inf, not NaN.
+			out = append(out, edgeMetric{key: l7LatencyKey(p), agg: "max", expr: "rate(" + p.latency + "_sum{__EDGE__}[$RANGE]) / (rate(" + p.latency + "_count{__EDGE__}[$RANGE]) > 0)"})
 		}
 	}
 	return out
