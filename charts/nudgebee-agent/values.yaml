@@ -587,7 +587,9 @@ clickhouse:
             summary: "ClickHouse instance is down"
             description: "ClickHouse node is not responding for more than 2 minutes."
         - alert: ClickHouseHighLatency
-          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / rate(clickhouse_query_duration_seconds_count[5m]) > 1
+          # Divide only where queries ran: with none, rate(_count) is 0 and a
+          # float wobble in _sum turns the ratio into +Inf, firing falsely.
+          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / (rate(clickhouse_query_duration_seconds_count[5m]) > 0) > 1
           for: 5m
           labels:
             severity: warning
