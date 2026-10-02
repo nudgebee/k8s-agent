@@ -184,3 +184,20 @@ func TestNodeQueries_PodInfoExcludesCompletedPods(t *testing.T) {
 		t.Errorf("kube_pod_info should exclude Succeeded pods: %s", Queries["kube_pod_info"])
 	}
 }
+
+// Latency is mean = rate(_sum) / rate(_count). A window with no requests has
+// rate(_count) == 0 while a stored float _sum can still wobble by an ulp, so
+// the divisor must be filtered to > 0 or the edge reports +Inf seconds.
+func TestL7LatencyQueries_GuardZeroCount(t *testing.T) {
+	for _, qs := range []map[string]string{Queries, ApplicationQueries} {
+		for _, p := range l7Protocols {
+			q, ok := qs[l7LatencyKey(p)]
+			if !ok {
+				continue
+			}
+			if !strings.Contains(q, "/ (rate("+p.latency+"_count{") || !strings.Contains(q, "[$RANGE]) > 0)") {
+				t.Errorf("%s divides by an unguarded count: %s", p.name, q)
+			}
+		}
+	}
+}
