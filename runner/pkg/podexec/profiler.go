@@ -772,13 +772,15 @@ func toolProduces(tool ProfilingTool, pt ProfileType, output OutputType) bool {
 func resolveTool(lang ProgrammingLanguage, req ProfileRequest) (ProfilingTool, OutputType, error) {
 	if req.ProfileTool != "" || req.ProfileType == "" {
 		tool, output := req.ProfileTool, req.OutputType
+		// Default the output before deriving the tool from it: Java's tool
+		// depends on the output, and an empty one matched none of its cases,
+		// so a bare Java request fell through to eBPF (no JIT frames) instead
+		// of async-profiler.
+		if output == "" {
+			output = OutputFlameGraph
+		}
 		if tool == "" {
 			tool = profilingToolForOutput(lang, output)
-		}
-		if output == "" {
-			// No default for output when only tool is known — leaving it
-			// empty is the explicit "let the profiler tool decide" signal.
-			output = OutputFlameGraph
 		}
 		return tool, output, nil
 	}
