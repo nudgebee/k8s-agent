@@ -19,11 +19,13 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -354,6 +356,9 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 
 	pod, err := h.cs.CoreV1().Pods(req.Namespace).Get(ctx, req.Name, metav1.GetOptions{})
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, h.targetGoneError(ctx, req.Namespace, req.Name)
+		}
 		return nil, fmt.Errorf("pod_profiler: get target pod: %w", err)
 	}
 	if pod.Spec.NodeName == "" {
@@ -452,6 +457,87 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 		return nil, err
 	}
 	return res, nil
+}
+
+// replicaSetPodName matches the name a ReplicaSet gives its pods,
+// "<replicaset>-<5 chars>", the suffix drawn from apimachinery's random-name
+// alphabet (no vowels, no 0/1/3).
+var replicaSetPodName = regexp.MustCompile(`^(.+)-[bcdfghjklmnpqrstvwxz2456789]{5}$`)
+
+// maxLivePods caps how many replacement pods the "no longer exists" error
+// lists.
+const maxLivePods = 5
+
+// targetGoneError reports a target pod that is not there. Callers usually
+// pass a name they read a while ago, and a Deployment's pods are renamed on
+// every rollout or reschedule — so when the name looks ReplicaSet-generated,
+// the error lists the pods the same workload runs now.
+func (h *ProfilerHandler) targetGoneError(ctx context.Context, namespace, name string) error {
+	msg := fmt.Sprintf("pod_profiler: pod %s/%s no longer exists", namespace, name)
+	if hint := h.livePodsHint(ctx, namespace, name); hint != "" {
+		msg += "; " + hint
+	}
+	return errors.New(msg)
+}
+
+// livePodsHint names the pods currently run by the workload that owned the
+// missing pod, or returns "" when that cannot be worked out. Every lookup is
+// best effort: a ReplicaSet that is gone too, or RBAC that does not allow the
+// read, leaves the plain "no longer exists" message.
+func (h *ProfilerHandler) livePodsHint(ctx context.Context, namespace, name string) string {
+	m := replicaSetPodName.FindStringSubmatch(name)
+	if m == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rs, err := h.cs.AppsV1().ReplicaSets(namespace).Get(ctx, m[1], metav1.GetOptions{})
+	if err != nil {
+		return ""
+	}
+	owner, selector := "replicaset "+rs.Name, rs.Spec.Selector
+	// A rollout scales the old ReplicaSet to zero, so its own pod list is
+	// empty exactly when the caller's name went stale. The Deployment's
+	// selector spans its ReplicaSets and finds the replacements.
+	if ref := metav1.GetControllerOf(rs); ref != nil && ref.Kind == "Deployment" {
+		if dep, err := h.cs.AppsV1().Deployments(namespace).Get(ctx, ref.Name, metav1.GetOptions{}); err == nil {
+			owner, selector = "deployment "+dep.Name, dep.Spec.Selector
+		}
+	}
+	sel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil || sel.Empty() {
+		return ""
+	}
+	list, err := h.cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: sel.String()})
+	if err != nil {
+		return ""
+	}
+	live := make([]corev1.Pod, 0, len(list.Items))
+	for _, p := range list.Items {
+		if p.DeletionTimestamp == nil {
+			live = append(live, p)
+		}
+	}
+	if len(live) == 0 {
+		return owner + " currently has no pods"
+	}
+	// Running pods first: those are the ones a profile can attach to.
+	sort.SliceStable(live, func(i, j int) bool {
+		ri, rj := live[i].Status.Phase == corev1.PodRunning, live[j].Status.Phase == corev1.PodRunning
+		if ri != rj {
+			return ri
+		}
+		return live[i].Name < live[j].Name
+	})
+	names := make([]string, 0, maxLivePods)
+	for _, p := range live[:min(len(live), maxLivePods)] {
+		names = append(names, fmt.Sprintf("%s (%s)", p.Name, p.Status.Phase))
+	}
+	hint := owner + " currently runs " + strings.Join(names, ", ")
+	if extra := len(live) - maxLivePods; extra > 0 {
+		hint += fmt.Sprintf(" and %d more", extra)
+	}
+	return hint
 }
 
 // targetContainer reads container_id + pod_uid from the target pod's

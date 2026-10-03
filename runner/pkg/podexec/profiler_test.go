@@ -533,8 +533,13 @@ func TestProfile_RejectsMissingTargetPod(t *testing.T) {
 	_, err := h.Profile(context.Background(), ProfileRequest{
 		Name: "missing", Namespace: "shop",
 	})
-	if err == nil || !strings.Contains(err.Error(), "get target pod") {
-		t.Errorf("err = %v; want 'get target pod' wrapping", err)
+	if err == nil || err.Error() != "pod_profiler: pod shop/missing no longer exists" {
+		t.Errorf("err = %v; want 'pod shop/missing no longer exists'", err)
+	}
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "create" {
+			t.Errorf("unexpected %s %s for a missing target", a.GetVerb(), a.GetResource().Resource)
+		}
 	}
 }
 
