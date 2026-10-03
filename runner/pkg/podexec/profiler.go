@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,10 +51,24 @@ const (
 	LangUnknown       ProgrammingLanguage = "unknown"
 )
 
-// langDetectTimeout bounds the container_application_type lookup. It runs
-// before the debugger pod is created and inside the dispatcher's 180s
-// budget, so it has to stay small enough to be noise.
+// langDetectTimeout bounds the container_application_type lookup, its one
+// retry included. It runs before the debugger pod is created and inside the
+// dispatcher's 180s budget, so it has to stay small enough to be noise.
 const langDetectTimeout = 10 * time.Second
+
+// langDetectFirstAttempt caps the first lookup so that a connection which
+// hangs still leaves the retry part of langDetectTimeout. A lookup that fails
+// fast (a reset or refused connection) leaves the retry nearly all of it.
+const langDetectFirstAttempt = 6 * time.Second
+
+// langDetectRetryDelay is the pause before a failed lookup's one retry.
+const langDetectRetryDelay = 2 * time.Second
+
+// langDetectWindow is how far back the lookup reads container_application_type.
+// The node-agent reports it on every scrape, but a series that missed a scrape
+// or two has no sample at "now" — an instant selector returns nothing for it,
+// and the run fails as if the pod had never reported a language.
+const langDetectWindow = "15m"
 
 // profileOverhead is what a run costs on top of the profile window itself:
 // scheduling the debugger pod, pulling its image, the profiler's staggered
@@ -147,6 +162,9 @@ type ProfilerHandler struct {
 	// the target's language when the caller didn't pass one. Nil when the
 	// agent has no Prometheus configured — detection is then skipped.
 	prom promQuerier
+	// langRetryDelay is langDetectRetryDelay, held per handler so tests
+	// need not wait it out.
+	langRetryDelay time.Duration
 }
 
 // promQuerier is the slice of the Prometheus client this package needs.
@@ -161,9 +179,10 @@ type promQuerier interface {
 // agent has no in-cluster client.
 func NewProfilerHandler(cs kubernetes.Interface, restCfg *rest.Config) *ProfilerHandler {
 	return &ProfilerHandler{
-		cs:      cs,
-		restCfg: restCfg,
-		image:   defaultProfilerImage,
+		cs:             cs,
+		restCfg:        restCfg,
+		image:          defaultProfilerImage,
+		langRetryDelay: langDetectRetryDelay,
 	}
 }
 
@@ -205,13 +224,25 @@ func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string)
 		return LangUnknown, "the agent has no Prometheus configured, so the language could not be looked up"
 	}
 	// container_id is "/k8s/<namespace>/<pod>/<container>"; escape so a dot
-	// in a pod name can't widen the match.
-	query := fmt.Sprintf(`container_application_type{container_id=~"/k8s/%s/%s/.*"}`,
-		promMatcherValue(namespace), promMatcherValue(pod))
+	// in a pod name can't widen the match. last_over_time keeps the
+	// application_type label, so the result reads the same as an instant
+	// vector would.
+	query := fmt.Sprintf(`last_over_time(container_application_type{container_id=~"/k8s/%s/%s/.*"}[%s])`,
+		promMatcherValue(namespace), promMatcherValue(pod), langDetectWindow)
 
 	qctx, cancel := context.WithTimeout(ctx, langDetectTimeout)
 	defer cancel()
-	raw, err := h.prom.Query(qctx, query, "", "10s")
+	raw, err := h.queryLang(qctx, query, langDetectFirstAttempt)
+	if err != nil && qctx.Err() == nil {
+		// One retry for a failed lookup: a dropped connection or a busy
+		// Prometheus is usually gone two seconds later. An empty result is
+		// an answer, not a failure, so it is not retried.
+		select {
+		case <-time.After(h.langRetryDelay):
+			raw, err = h.queryLang(qctx, query, 0)
+		case <-qctx.Done():
+		}
+	}
 	if err != nil {
 		return LangUnknown, fmt.Sprintf("the container_application_type lookup failed: %v", err)
 	}
@@ -239,9 +270,27 @@ func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string)
 		}
 	}
 	if len(resp.Data.Result) == 0 {
-		return LangUnknown, "no container_application_type metric reported for it"
+		return LangUnknown, fmt.Sprintf("no container_application_type metric reported for it in the last %s", langDetectWindow)
 	}
 	return LangUnknown, "it reports no language we have a profiler for"
+}
+
+// queryLang runs one language lookup, capped at limit when limit > 0 and
+// otherwise at whatever ctx has left. The same cap goes to Prometheus as its
+// evaluation timeout so the server stops working when the agent stops waiting.
+func (h *ProfilerHandler) queryLang(ctx context.Context, query string, limit time.Duration) (json.RawMessage, error) {
+	if limit > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
+	}
+	timeout := ""
+	if deadline, ok := ctx.Deadline(); ok {
+		if secs := int(time.Until(deadline).Seconds()); secs > 0 {
+			timeout = strconv.Itoa(secs) + "s"
+		}
+	}
+	return h.prom.Query(ctx, query, "", timeout)
 }
 
 // defaultProfilerImage picks the image variant by tool first, then

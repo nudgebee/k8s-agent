@@ -542,14 +542,23 @@ func TestProfile_RejectsMissingTargetPod(t *testing.T) {
 
 // fakeProm returns a canned /api/v1/query body (or an error) for
 // detectLang. It records the query so the test can assert the matcher.
+// failures are returned, in order, by the first calls; err by every call.
 type fakeProm struct {
 	body     string
 	err      error
+	failures []error
+	calls    int
 	lastSeen string
 }
 
 func (f *fakeProm) Query(_ context.Context, query, _, _ string) (json.RawMessage, error) {
 	f.lastSeen = query
+	f.calls++
+	if len(f.failures) > 0 {
+		err := f.failures[0]
+		f.failures = f.failures[1:]
+		return nil, err
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -596,6 +605,7 @@ func TestDetectLang(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+			h.langRetryDelay = time.Millisecond
 			if !tc.noSet {
 				h.SetLanguageDetector(tc.prom)
 			}
@@ -621,9 +631,69 @@ func TestDetectLang_QuotesMatcher(t *testing.T) {
 	// The backslash QuoteMeta adds must reach Prometheus as a literal, so it
 	// is doubled: a bare `\.` inside a PromQL string literal is an unknown
 	// escape sequence and fails the whole query at parse time.
-	want := `container_application_type{container_id=~"/k8s/shop/cart\\.0/.*"}`
+	// last_over_time reaches back past a missed scrape, where an instant
+	// selector would find no sample at "now".
+	want := `last_over_time(container_application_type{container_id=~"/k8s/shop/cart\\.0/.*"}[15m])`
 	if p.lastSeen != want {
 		t.Errorf("query = %s; want %s", p.lastSeen, want)
+	}
+}
+
+// TestDetectLang_RetriesFailedLookup — one failed lookup (a dropped
+// connection, a busy Prometheus) is retried; an empty answer is not.
+func TestDetectLang_RetriesFailedLookup(t *testing.T) {
+	cases := []struct {
+		name      string
+		prom      *fakeProm
+		want      ProgrammingLanguage
+		wantCalls int
+		wantWhy   string
+	}{
+		{name: "transient failure then answer",
+			prom: &fakeProm{failures: []error{errors.New("connection reset by peer")}, body: promVector("golang")},
+			want: LangGo, wantCalls: 2},
+		{name: "failure twice",
+			prom: &fakeProm{err: errors.New("connection refused")},
+			want: LangUnknown, wantCalls: 2, wantWhy: "the container_application_type lookup failed: connection refused"},
+		{name: "no series is an answer",
+			prom: &fakeProm{body: promVector()},
+			want: LangUnknown, wantCalls: 1, wantWhy: "no container_application_type metric reported for it"},
+		{name: "rejected query is an answer",
+			prom: &fakeProm{body: `{"status":"error","error":"bad"}`},
+			want: LangUnknown, wantCalls: 1, wantWhy: "Prometheus rejected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+			h.langRetryDelay = time.Millisecond
+			h.SetLanguageDetector(tc.prom)
+			got, why := h.detectLang(context.Background(), "shop", "cart-0")
+			if got != tc.want {
+				t.Errorf("detectLang = %q (%s); want %q", got, why, tc.want)
+			}
+			if tc.prom.calls != tc.wantCalls {
+				t.Errorf("queries = %d; want %d", tc.prom.calls, tc.wantCalls)
+			}
+			if !strings.Contains(why, tc.wantWhy) {
+				t.Errorf("why = %q; want it to contain %q", why, tc.wantWhy)
+			}
+		})
+	}
+}
+
+// TestDetectLang_NoRetryOnceCancelled — a lookup that failed because the
+// run itself is over is not retried.
+func TestDetectLang_NoRetryOnceCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &fakeProm{err: context.Canceled}
+	h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+	h.SetLanguageDetector(p)
+	if got, _ := h.detectLang(ctx, "shop", "cart-0"); got != LangUnknown {
+		t.Errorf("detectLang = %q; want unknown", got)
+	}
+	if p.calls != 1 {
+		t.Errorf("queries = %d; want 1", p.calls)
 	}
 }
 
