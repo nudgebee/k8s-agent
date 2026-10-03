@@ -28,27 +28,126 @@ func TestProfilingToolForType(t *testing.T) {
 		ptype    ProfileType
 		wantTool ProfilingTool
 		wantOut  OutputType
+		wantOK   bool
 	}{
-		{LangJava, ProfileMemory, ToolJcmd, OutputHeapHistogram},
-		{LangJava, ProfileCPU, ToolJcmd, OutputThreadDump},
-		{LangPython, ProfileCPU, ToolPyspy, OutputFlameGraph},
-		{LangPython, ProfileMemory, ToolAustin, OutputRaw},
-		{LangNode, ProfileCPU, ToolPerf, OutputFlameGraph},
-		{LangNode, ProfileMemory, ToolPerf, OutputHeapDump},
-		{LangGo, ProfileCPU, ToolPprof, OutputPprof},
-		{LangGo, ProfileMemory, ToolPprof, OutputHeapDump},
-		{LangRuby, ProfileCPU, ToolRbspy, OutputFlameGraph},
-		// Fallback path — `Bpf, FlameGraph` for anything not explicitly mapped.
-		{LangRust, ProfileCPU, ToolBpf, OutputFlameGraph},
-		{LangClang, ProfileMemory, ToolBpf, OutputFlameGraph},
-		{LangUnknown, ProfileCPU, ToolBpf, OutputFlameGraph},
+		{LangJava, ProfileMemory, ToolJcmd, OutputHeapHistogram, true},
+		{LangJava, ProfileCPU, ToolJcmd, OutputThreadDump, true},
+		{LangPython, ProfileCPU, ToolPyspy, OutputFlameGraph, true},
+		{LangPython, ProfileMemory, ToolAustin, OutputRaw, true},
+		{LangNode, ProfileCPU, ToolPerf, OutputFlameGraph, true},
+		{LangGo, ProfileCPU, ToolPprof, OutputPprof, true},
+		{LangGo, ProfileMemory, ToolPprof, OutputHeapDump, true},
+		{LangRuby, ProfileCPU, ToolRbspy, OutputFlameGraph, true},
+		// Fallback path — `Bpf, FlameGraph` for any CPU profile not explicitly mapped.
+		{LangRust, ProfileCPU, ToolBpf, OutputFlameGraph, true},
+		{LangUnknown, ProfileCPU, ToolBpf, OutputFlameGraph, true},
+		// No memory profiler for these: they used to come back as a CPU
+		// flamegraph labelled "memory".
+		{LangNode, ProfileMemory, "", "", false},
+		{LangRuby, ProfileMemory, "", "", false},
+		{LangClang, ProfileMemory, "", "", false},
+		{LangRust, ProfileMemory, "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.lang)+"/"+string(tc.ptype), func(t *testing.T) {
-			tool, out := profilingToolForType(tc.lang, tc.ptype)
+			tool, out, ok := profilingToolForType(tc.lang, tc.ptype)
+			if tool != tc.wantTool || out != tc.wantOut || ok != tc.wantOK {
+				t.Errorf("profilingToolForType(%q,%q) = (%q,%q,%v); want (%q,%q,%v)",
+					tc.lang, tc.ptype, tool, out, ok, tc.wantTool, tc.wantOut, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestResolveTool covers the requests the profiler screen and API callers
+// send. The screen sends output_type "flamegraph" with every cpu/memory
+// request; before profile_type decided the tool, that output silently won
+// and every "memory" request for Python or Go came back as a CPU profile.
+func TestResolveTool(t *testing.T) {
+	cases := []struct {
+		name     string
+		lang     ProgrammingLanguage
+		req      ProfileRequest
+		wantTool ProfilingTool
+		wantOut  OutputType
+		wantErr  string
+	}{
+		// Profile type decides; flamegraph kept where the tool draws one.
+		{name: "python memory flamegraph", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantTool: ToolAustin, wantOut: OutputFlameGraph},
+		{name: "python memory default", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileMemory},
+			wantTool: ToolAustin, wantOut: OutputRaw},
+		{name: "python cpu flamegraph", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolPyspy, wantOut: OutputFlameGraph},
+		// go_pprof cannot draw a flamegraph; the profiler would hand back
+		// a CPU pprof for either type, so the type's own output is used.
+		{name: "go memory flamegraph", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantTool: ToolPprof, wantOut: OutputHeapDump},
+		{name: "go cpu flamegraph", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolPprof, wantOut: OutputPprof},
+		{name: "go cpu raw is not buildable", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputRaw},
+			wantTool: ToolPprof, wantOut: OutputPprof},
+		{name: "node cpu flamegraph", lang: LangNode,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolPerf, wantOut: OutputFlameGraph},
+		{name: "node memory unsupported", lang: LangNode,
+			req:     ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantErr: "memory profiling is not available for node targets"},
+		{name: "ruby memory unsupported", lang: LangRuby,
+			req:     ProfileRequest{ProfileType: ProfileMemory},
+			wantErr: "memory profiling is not available for ruby targets"},
+		// Same profile type, another tool of the same language.
+		{name: "java cpu flamegraph via async-profiler", lang: LangJava,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolAsyncProfiler, wantOut: OutputFlameGraph},
+		{name: "java memory flamegraph stays a heap profile", lang: LangJava,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantTool: ToolJcmd, wantOut: OutputHeapHistogram},
+		{name: "java memory heapdump", lang: LangJava,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputHeapDump},
+			wantTool: ToolJcmd, wantOut: OutputHeapDump},
+		{name: "unknown profile type", lang: LangGo,
+			req:     ProfileRequest{ProfileType: "wall"},
+			wantErr: `unknown profile_type "wall"`},
+		// A named tool runs as asked, whatever the profile type says.
+		{name: "explicit tool kept", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileMemory, ProfileTool: ToolPprof, OutputType: OutputFlameGraph},
+			wantTool: ToolPprof, wantOut: OutputFlameGraph},
+		{name: "explicit tool no output", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileCPU, ProfileTool: ToolPyspy},
+			wantTool: ToolPyspy, wantOut: OutputFlameGraph},
+		// No profile type: output_type picks the tool, as before (the
+		// screen's Java and native-language paths).
+		{name: "java jfr no type", lang: LangJava,
+			req:      ProfileRequest{OutputType: OutputJfr},
+			wantTool: ToolJcmd, wantOut: OutputJfr},
+		{name: "ruby flamegraph no type", lang: LangRuby,
+			req:      ProfileRequest{OutputType: OutputFlameGraph},
+			wantTool: ToolRbspy, wantOut: OutputFlameGraph},
+		{name: "nothing given", lang: LangRust,
+			req:      ProfileRequest{},
+			wantTool: ToolBpf, wantOut: OutputFlameGraph},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool, out, err := resolveTool(tc.lang, tc.req)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v; want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			if tool != tc.wantTool || out != tc.wantOut {
-				t.Errorf("profilingToolForType(%q,%q) = (%q,%q); want (%q,%q)",
-					tc.lang, tc.ptype, tool, out, tc.wantTool, tc.wantOut)
+				t.Errorf("resolveTool = (%q,%q); want (%q,%q)", tool, out, tc.wantTool, tc.wantOut)
 			}
 		})
 	}
