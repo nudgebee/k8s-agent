@@ -389,18 +389,9 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 		}
 		lang = detected
 	}
-	tool := req.ProfileTool
-	output := req.OutputType
-	if req.ProfileType != "" && tool == "" && output == "" {
-		tool, output = profilingToolForType(lang, req.ProfileType)
-	}
-	if tool == "" {
-		tool = profilingToolForOutput(lang, output)
-	}
-	if output == "" {
-		// No default for output when only tool is known — leaving it
-		// empty is the explicit "let the profiler tool decide" signal.
-		output = OutputFlameGraph
+	tool, output, err := resolveTool(lang, req)
+	if err != nil {
+		return nil, err
 	}
 
 	runtimeName, runtimePath := containerRuntimeFor(node)
@@ -574,42 +565,153 @@ func containerRuntimeFor(node *corev1.Node) (runtimeName, runtimePath string) {
 }
 
 // profilingToolForType is the (lang, profile_type) → (tool, output) map.
-// Kept verbatim so the same UI calls produce the same artefacts.
-func profilingToolForType(lang ProgrammingLanguage, pt ProfileType) (ProfilingTool, OutputType) {
+// The CPU rows are the legacy map, kept so the same UI calls produce the
+// same artefacts. ok is false when the profiler image has no tool that takes
+// that kind of profile for the language: those requests used to fall through
+// to a CPU sampler, so a "memory" profile came back as a CPU flamegraph with
+// nothing saying so.
+func profilingToolForType(lang ProgrammingLanguage, pt ProfileType) (tool ProfilingTool, output OutputType, ok bool) {
 	switch lang {
 	case LangJava:
 		if pt == ProfileMemory {
-			return ToolJcmd, OutputHeapHistogram
+			return ToolJcmd, OutputHeapHistogram, true
 		}
 		if pt == ProfileCPU {
-			return ToolJcmd, OutputThreadDump
+			return ToolJcmd, OutputThreadDump, true
 		}
 	case LangPython:
 		if pt == ProfileCPU {
-			return ToolPyspy, OutputFlameGraph
+			return ToolPyspy, OutputFlameGraph, true
 		}
 		if pt == ProfileMemory {
-			return ToolAustin, OutputRaw
+			return ToolAustin, OutputRaw, true
 		}
 	case LangNode:
 		if pt == ProfileCPU {
-			return ToolPerf, OutputFlameGraph
+			return ToolPerf, OutputFlameGraph, true
 		}
-		if pt == ProfileMemory {
-			return ToolPerf, OutputHeapDump
-		}
+		// No Node memory row. perf only samples stacks, so the profiler
+		// replaced the heapdump this used to ask it for with a CPU
+		// flamegraph. Its one Node heap path (node-dummy) signals the target
+		// to write a heap snapshot, which only a process started with
+		// --heapsnapshot-signal does: with no signal configured the profiler
+		// sends signal 0, a no-op, and waits out a two-minute timeout; a real
+		// one (SIGUSR2) terminates a process that did not opt in, and nothing
+		// here can tell whether the target did. Its result also arrives in
+		// chunks, which fetchResultFile does not reassemble.
 	case LangGo:
 		if pt == ProfileCPU {
-			return ToolPprof, OutputPprof
+			return ToolPprof, OutputPprof, true
 		}
 		if pt == ProfileMemory {
-			return ToolPprof, OutputHeapDump
+			return ToolPprof, OutputHeapDump, true
 		}
 	case LangRuby:
-		return ToolRbspy, OutputFlameGraph
+		if pt == ProfileCPU {
+			return ToolRbspy, OutputFlameGraph, true
+		}
+	}
+	if pt == ProfileMemory {
+		return "", "", false
 	}
 	// Default fallback — (Bpf, FlameGraph) for everything not explicitly mapped.
-	return ToolBpf, OutputFlameGraph
+	return ToolBpf, OutputFlameGraph, true
+}
+
+// toolOutputs is what each tool really returns for each kind of profile. It
+// follows the profiler's own tool → output table, narrowed to what each tool's
+// code path produces for that profile type and that the image can build
+// (pprof's raw output needs a Go toolchain the image does not ship). The
+// profiler swaps an output its tool cannot produce for that tool's default
+// without saying so — asked for a flamegraph, go_pprof returns a CPU profile —
+// so a caller's output_type is only safe to pass on when it is listed here.
+var toolOutputs = map[ProfilingTool]map[ProfileType][]OutputType{
+	ToolJcmd: {
+		ProfileCPU:    {OutputThreadDump, OutputJfr},
+		ProfileMemory: {OutputHeapHistogram, OutputHeapDump},
+	},
+	// async-profiler runs with the itimer event (see buildDebuggerPod),
+	// which samples CPU time.
+	ToolAsyncProfiler: {
+		ProfileCPU: {OutputFlameGraph, OutputFlat, OutputTraces, OutputCollapsed, OutputTree, OutputRaw},
+	},
+	ToolPyspy: {
+		ProfileCPU: {OutputFlameGraph, OutputThreadDump, OutputRaw},
+	},
+	// austin always runs in memory mode here; both outputs render the same
+	// allocation samples.
+	ToolAustin: {
+		ProfileMemory: {OutputRaw, OutputFlameGraph},
+	},
+	ToolPerf: {
+		ProfileCPU: {OutputFlameGraph, OutputRaw},
+	},
+	ToolBpf: {
+		ProfileCPU: {OutputFlameGraph, OutputRaw},
+	},
+	ToolPprof: {
+		ProfileCPU:    {OutputPprof},
+		ProfileMemory: {OutputHeapDump},
+	},
+	ToolRbspy: {
+		ProfileCPU: {OutputFlameGraph},
+	},
+}
+
+func toolProduces(tool ProfilingTool, pt ProfileType, output OutputType) bool {
+	for _, o := range toolOutputs[tool][pt] {
+		if o == output {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveTool picks the (tool, output) pair for a request whose language is
+// known.
+//
+// profile_type, when set, decides the tool: it is what the user asked for
+// ("memory"), while output_type is a rendering preference — the profiler
+// screen sends "flamegraph" with every cpu and memory request. output_type is
+// honoured only when a tool that takes this kind of profile can return it;
+// otherwise the profile type's default output is used. A caller that names
+// the tool gets exactly that tool, as before.
+func resolveTool(lang ProgrammingLanguage, req ProfileRequest) (ProfilingTool, OutputType, error) {
+	if req.ProfileTool != "" || req.ProfileType == "" {
+		tool, output := req.ProfileTool, req.OutputType
+		if tool == "" {
+			tool = profilingToolForOutput(lang, output)
+		}
+		if output == "" {
+			// No default for output when only tool is known — leaving it
+			// empty is the explicit "let the profiler tool decide" signal.
+			output = OutputFlameGraph
+		}
+		return tool, output, nil
+	}
+	if req.ProfileType != ProfileCPU && req.ProfileType != ProfileMemory {
+		return "", "", fmt.Errorf("pod_profiler: unknown profile_type %q (want %q or %q)",
+			req.ProfileType, ProfileCPU, ProfileMemory)
+	}
+	tool, output, ok := profilingToolForType(lang, req.ProfileType)
+	if !ok {
+		return "", "", fmt.Errorf("pod_profiler: %s profiling is not available for %s targets — "+
+			"the profiler has no %s profiler for this language; ask for a cpu profile instead",
+			req.ProfileType, lang, req.ProfileType)
+	}
+	want := req.OutputType
+	switch {
+	case want == "" || want == output:
+	case toolProduces(tool, req.ProfileType, want):
+		output = want
+	default:
+		// Same profile type, another tool: Java's CPU default is jcmd's
+		// thread dump, but a CPU flamegraph comes from async-profiler.
+		if alt := profilingToolForOutput(lang, want); toolProduces(alt, req.ProfileType, want) {
+			tool, output = alt, want
+		}
+	}
+	return tool, output, nil
 }
 
 // profilingToolForOutput is the inverse map (lang, output) → tool. Used
