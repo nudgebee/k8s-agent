@@ -133,6 +133,12 @@ func TestResolveTool(t *testing.T) {
 		{name: "nothing given", lang: LangRust,
 			req:      ProfileRequest{},
 			wantTool: ToolBpf, wantOut: OutputFlameGraph},
+		{name: "nothing given, java", lang: LangJava,
+			req:      ProfileRequest{},
+			wantTool: ToolAsyncProfiler, wantOut: OutputFlameGraph},
+		{name: "tool given without output keeps the tool", lang: LangJava,
+			req:      ProfileRequest{ProfileTool: ToolJcmd},
+			wantTool: ToolJcmd, wantOut: OutputFlameGraph},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
