@@ -2,6 +2,7 @@ package podexec
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,10 @@ import (
 // These tests drive Profile end to end against the fake clientset: the
 // debugger pod is created, its status and log are served by reactors, and
 // only the SPDY file copy is stubbed (copyFile).
+
+const testPprof401 = `failed to fetch CPU profile for PID 7: failed to nsenter+wget ` +
+	`"http://127.0.0.1:6060/debug/pprof/profile?seconds=10" error wget: server returned error: ` +
+	`HTTP/1.1 401 Unauthorized` + "\n" + `: exit status 1`
 
 // profileTarget is a scheduled, running target pod and its node.
 func profileTarget() []runtime.Object {
@@ -96,6 +101,11 @@ func resultLine(file string) string {
 		`{"type":"result","data":{"file":"` + file + `","compressor-type":"gzip"}}` + "\n"
 }
 
+func errorLine(reason string) string {
+	b, _ := json.Marshal(map[string]any{"type": "error", "data": map[string]string{"reason": reason}})
+	return `{"type":"progress","data":{"stage":"started"}}` + "\n" + string(b) + "\n"
+}
+
 // newRunHandler wires a handler whose file copy returns contents for any
 // path, with production's image-variant choice under a fixed template.
 func newRunHandler(t *testing.T, cs *fake.Clientset, contents string) *ProfilerHandler {
@@ -145,7 +155,7 @@ func TestProfile_MemoryRequestRunsHeapProfiler(t *testing.T) {
 	if args["--profiling-tool"] != "pprof" || args["--output-type"] != "heapdump" {
 		t.Errorf("debugger asked for (%s, %s); want (pprof, heapdump)", args["--profiling-tool"], args["--output-type"])
 	}
-	if res.ProfileTool != "pprof" || res.ProfileType != "memory" {
+	if res.ProfileTool != "pprof" || res.ProfileType != "memory" || res.FallbackFrom != "" {
 		t.Errorf("result = %+v", res)
 	}
 	if debuggerPodsLeft(t, cs) != 0 {
@@ -459,5 +469,184 @@ func TestLivePodsHint_CapsList(t *testing.T) {
 	hint := h.livePodsHint(context.Background(), "shop", "web-6d8f7c9b4-x2v4k")
 	if strings.Count(hint, "(Running)") != maxLivePods || !strings.HasSuffix(hint, " and 2 more") {
 		t.Errorf("hint = %q", hint)
+	}
+}
+
+// ---------- Go pprof endpoint fallback ----------
+
+func TestClassifyPprofFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		ok     bool
+		want   string
+	}{
+		{name: "401", reason: testPprof401, ok: true,
+			want: "the pprof endpoint on :6060 requires authentication (HTTP 401)"},
+		{name: "403", reason: `failed to nsenter+wget "http://127.0.0.1:8080/debug/pprof/heap?gc=1" error wget: server returned error: HTTP/1.1 403 Forbidden`,
+			ok: true, want: "the pprof endpoint on :8080 refused the request (HTTP 403)"},
+		{name: "404", reason: `failed to nsenter+wget "http://127.0.0.1:8080/debug/pprof/profile?seconds=30" error wget: server returned error: HTTP/1.1 404 Not Found`,
+			ok: true, want: "the target serves no /debug/pprof on :8080 (HTTP 404)"},
+		{name: "refused", reason: `failed to nsenter+wget "http://127.0.0.1:8080/debug/pprof/profile?seconds=30" error wget: can't connect to remote host (127.0.0.1): Connection refused`,
+			ok: true, want: "nothing in the target accepted a connection to its pprof endpoint on :8080"},
+		// A gRPC (HTTP/2-only) listener drops an HTTP/1.1 request.
+		{name: "reset", reason: `failed to fetch CPU profile for PID 7: failed to nsenter+wget "http://127.0.0.1:8080/debug/pprof/profile?seconds=15" error wget: error getting response: Connection reset by peer`,
+			ok: true, want: "the target reset the connection to its pprof endpoint on :8080 without answering — that port does not serve /debug/pprof over HTTP"},
+		{name: "no port", reason: "failed to find listening port: no listening port found for PID",
+			ok: true, want: "nothing in the target accepted a connection to its pprof endpoint"},
+		{name: "unrelated", reason: "no PIDs found for container ID: abc"},
+		{name: "500 is not an endpoint problem", reason: `failed to nsenter+wget "http://127.0.0.1:8080/debug/pprof/profile" error wget: server returned error: HTTP/1.1 500 Internal Server Error`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, ok := classifyPprofFailure(tc.reason)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v; want %v", ok, tc.ok)
+			}
+			if ok && f.String() != tc.want {
+				t.Errorf("String() = %q; want %q", f.String(), tc.want)
+			}
+		})
+	}
+}
+
+func goPprofLogs(bpfLog string) func(string) string {
+	return func(tool string) string {
+		if tool == string(ToolPprof) {
+			return errorLine(testPprof401)
+		}
+		return bpfLog
+	}
+}
+
+// TestProfile_GoCPUFallsBackToBpf — a Go CPU profile whose pprof endpoint
+// sits behind auth is retaken with eBPF sampling, and the result says so.
+func TestProfile_GoCPUFallsBackToBpf(t *testing.T) {
+	cs := fake.NewClientset(profileTarget()...)
+	sim := &debuggerSim{logs: goPprofLogs(resultLine("/tmp/agent-flamegraph-7-1.svg.gz"))}
+	sim.install(cs)
+	h := newRunHandler(t, cs, "<svg/>")
+
+	res, err := h.Profile(context.Background(), ProfileRequest{
+		Name: "cart-0", Namespace: "shop", Seconds: 10, Lang: LangGo,
+		ProfileType: ProfileCPU, OutputType: OutputFlameGraph,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sim.created) != 2 {
+		t.Fatalf("debugger pods created = %d; want 2", len(sim.created))
+	}
+	first := flagMap(sim.created[0].Spec.Containers[0].Command)
+	second := flagMap(sim.created[1].Spec.Containers[0].Command)
+	if first["--profiling-tool"] != "pprof" || first["--output-type"] != "pprof" {
+		t.Errorf("first run = (%s, %s); want (pprof, pprof)", first["--profiling-tool"], first["--output-type"])
+	}
+	if second["--profiling-tool"] != "bpf" || second["--output-type"] != "flamegraph" {
+		t.Errorf("fallback run = (%s, %s); want (bpf, flamegraph)", second["--profiling-tool"], second["--output-type"])
+	}
+	if img := sim.created[1].Spec.Containers[0].Image; img != "example.com/profiler-bpf:latest" {
+		t.Errorf("fallback image = %q; want the bpf variant", img)
+	}
+	if res.ProfileTool != "bpf" || res.FallbackFrom != "pprof" ||
+		res.FallbackReason != "the pprof endpoint on :6060 requires authentication (HTTP 401)" {
+		t.Errorf("result = %+v", res)
+	}
+	if res.Filename != "/tmp/agent-flamegraph-7-1.svg.gz" || res.ContentsBase64 != base64Std.EncodeToString([]byte("<svg/>")) {
+		t.Errorf("file = %s / %s", res.Filename, res.ContentsBase64)
+	}
+	if debuggerPodsLeft(t, cs) != 0 {
+		t.Error("debugger pods were not cleaned up")
+	}
+}
+
+// TestProfile_GoPprofEndpointErrors covers the endpoint failures that are
+// not retried: a heap profile (no eBPF equivalent), a tool the caller named,
+// and a fallback that fails itself. Each must read as an endpoint problem,
+// not as the raw wget text.
+func TestProfile_GoPprofEndpointErrors(t *testing.T) {
+	cases := []struct {
+		name      string
+		req       ProfileRequest
+		bpfLog    string
+		wantRuns  int
+		wantErr   string
+		wantNotIn string
+	}{
+		{
+			name:     "heap profile",
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantRuns: 1,
+			wantErr: "pod_profiler: the pprof endpoint on :6060 requires authentication (HTTP 401); " +
+				"a Go heap profile can only be read from that endpoint",
+			wantNotIn: "wget",
+		},
+		{
+			name:     "caller named pprof",
+			req:      ProfileRequest{ProfileType: ProfileCPU, ProfileTool: ToolPprof, OutputType: OutputPprof},
+			wantRuns: 1,
+			wantErr:  "pod_profiler: the pprof endpoint on :6060 requires authentication (HTTP 401)",
+		},
+		{
+			name:     "fallback fails too",
+			req:      ProfileRequest{ProfileType: ProfileCPU},
+			bpfLog:   errorLine("could not launch profiler: perf_event_open failed"),
+			wantRuns: 2,
+			wantErr: "pod_profiler: the pprof endpoint on :6060 requires authentication (HTTP 401), " +
+				"and the eBPF fallback failed too: profiler reported error: could not launch profiler: perf_event_open failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset(profileTarget()...)
+			sim := &debuggerSim{logs: goPprofLogs(tc.bpfLog)}
+			sim.install(cs)
+			h := newRunHandler(t, cs, "")
+			req := tc.req
+			req.Name, req.Namespace, req.Seconds, req.Lang = "cart-0", "shop", 10, LangGo
+
+			_, err := h.Profile(context.Background(), req)
+			if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v\nwant prefix %s", err, tc.wantErr)
+			}
+			if tc.wantNotIn != "" && err != nil && strings.Contains(err.Error(), tc.wantNotIn) {
+				t.Errorf("err = %q; should not quote %q", err, tc.wantNotIn)
+			}
+			if len(sim.created) != tc.wantRuns {
+				t.Errorf("debugger pods created = %d; want %d", len(sim.created), tc.wantRuns)
+			}
+		})
+	}
+}
+
+// TestProfile_GoPprofOtherErrorNotRetried — only an endpoint failure
+// triggers the fallback; any other profiler error is returned as is.
+func TestProfile_GoPprofOtherErrorNotRetried(t *testing.T) {
+	cs := fake.NewClientset(profileTarget()...)
+	sim := &debuggerSim{logs: func(string) string { return errorLine("no PIDs found for container ID: abc") }}
+	sim.install(cs)
+	h := newRunHandler(t, cs, "")
+
+	_, err := h.Profile(context.Background(), ProfileRequest{
+		Name: "cart-0", Namespace: "shop", Seconds: 10, Lang: LangGo, ProfileType: ProfileCPU,
+	})
+	if err == nil || err.Error() != "pod_profiler: profiler reported error: no PIDs found for container ID: abc" {
+		t.Errorf("err = %v", err)
+	}
+	if len(sim.created) != 1 {
+		t.Errorf("debugger pods created = %d; want 1", len(sim.created))
+	}
+}
+
+// TestFileResult_FallbackFieldsOptional — the fallback fields are omitted
+// on an ordinary run, so existing readers see the shape they always did.
+func TestFileResult_FallbackFieldsOptional(t *testing.T) {
+	plain, _ := json.Marshal(FileResult{Filename: "f", ProfileTool: "pprof"})
+	if strings.Contains(string(plain), "fallback") {
+		t.Errorf("plain result = %s; want no fallback fields", plain)
+	}
+	fell, _ := json.Marshal(FileResult{Filename: "f", ProfileTool: "bpf", FallbackFrom: "pprof", FallbackReason: "r"})
+	if !strings.Contains(string(fell), `"fallback_from":"pprof"`) || !strings.Contains(string(fell), `"fallback_reason":"r"`) {
+		t.Errorf("fallback result = %s", fell)
 	}
 }

@@ -78,6 +78,11 @@ const langDetectWindow = "15m"
 // bounds the handler and rejects durations that cannot fit its budget.
 const profileOverhead = 3 * time.Minute
 
+// fallbackSlack is the time, beyond the profile window, a run must still have
+// left to retry a Go CPU profile with eBPF. Less than profileOverhead because
+// the retry reuses the image the failed attempt already pulled.
+const fallbackSlack = time.Minute
+
 // debuggerImagePullGrace is how long the debugger pod may sit in
 // ErrImagePull / ImagePullBackOff before the run gives up on it. The kubelet
 // retries a failed pull with back-off (10s, 20s, 40s, …), so this rides out a
@@ -157,6 +162,13 @@ type FileResult struct {
 	ProfileTool    string `json:"profile_tool"`
 	ProfileType    string `json:"profile_type"`
 	Duration       int    `json:"profile_duration"`
+	// FallbackFrom is set when the profile was not taken with the tool the
+	// run picked first: it names that tool, ProfileTool names the one that
+	// produced the file, and FallbackReason says why the first one could not
+	// be used. Both are omitted otherwise, so readers that predate them see
+	// the same shape as before.
+	FallbackFrom   string `json:"fallback_from,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
 
 // ProfilerHandler holds the K8s client + rest config the SPDY exec needs
@@ -433,10 +445,50 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 		DurationSeconds:      req.Seconds,
 	}
 	file, err := h.runDebugger(ctx, args)
-	if err != nil {
+	if err == nil {
+		return newFileResult(file, lang, tool, req), nil
+	}
+
+	// go_pprof reads net/http/pprof over HTTP from inside the target's network
+	// namespace, on the first port the process listens on. An endpoint behind
+	// auth, on another port, or not registered at all fails it no matter how
+	// healthy the process is.
+	var perr *profilerError
+	if lang != LangGo || tool != ToolPprof || !errors.As(err, &perr) {
 		return nil, err
 	}
-	return newFileResult(file, lang, tool, req), nil
+	endpoint, ok := classifyPprofFailure(perr.Reason)
+	if !ok {
+		return nil, err
+	}
+	switch {
+	case output == OutputHeapDump:
+		// A heap profile has no eBPF equivalent: Go's allocator state is only
+		// readable through the runtime's own endpoint.
+		return nil, fmt.Errorf("pod_profiler: %s; a Go heap profile can only be read from that endpoint, "+
+			"so serve /debug/pprof without authentication on a port the profiler can reach, or take a cpu profile", endpoint)
+	case output == OutputRaw || req.ProfileTool != "":
+		// raw bundles a heap profile, which eBPF cannot take either; and a
+		// tool the caller named is run as asked, never swapped.
+		return nil, fmt.Errorf("pod_profiler: %s", endpoint)
+	}
+	// Anything else is a CPU profile: pprof, or an output the profiler
+	// turns into one.
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < time.Duration(req.Seconds)*time.Second+fallbackSlack {
+		return nil, fmt.Errorf("pod_profiler: %s, and too little of this action's budget is left to retry with eBPF sampling", endpoint)
+	}
+	// eBPF stack sampling profiles the process from the kernel side, so it
+	// needs no endpoint at all — only a flamegraph instead of a pprof file.
+	args.Tool, args.Output, args.Image = ToolBpf, OutputFlameGraph, h.image(lang, ToolBpf)
+	file, ferr := h.runDebugger(ctx, args)
+	if ferr != nil {
+		return nil, fmt.Errorf("pod_profiler: %s, and the eBPF fallback failed too: %s",
+			endpoint, strings.TrimPrefix(ferr.Error(), "pod_profiler: "))
+	}
+	res := newFileResult(file, lang, ToolBpf, req)
+	res.FallbackFrom = string(ToolPprof)
+	res.FallbackReason = endpoint.String()
+	return res, nil
 }
 
 // profileFile is the result file one debugger run copied back.
@@ -776,6 +828,77 @@ func profilingToolForOutput(lang ProgrammingLanguage, output OutputType) Profili
 		return ToolRbspy
 	}
 	return ToolBpf
+}
+
+// pprofEndpointFailure is a Go profile that failed because the target's
+// /debug/pprof endpoint could not be read, as opposed to the profiler or
+// the process failing.
+type pprofEndpointFailure struct {
+	// Port is the port the profiler tried; empty when its error named none.
+	Port string
+	// Status is the HTTP status the endpoint answered with; 0 when it did
+	// not answer.
+	Status int
+	// Reset is set when the port took the connection and dropped it without
+	// an HTTP answer — what a gRPC or other non-HTTP/1.1 listener does.
+	Reset bool
+}
+
+func (f pprofEndpointFailure) String() string {
+	on := ""
+	if f.Port != "" {
+		on = " on :" + f.Port
+	}
+	switch {
+	case f.Status == 401:
+		return "the pprof endpoint" + on + " requires authentication (HTTP 401)"
+	case f.Status == 403:
+		return "the pprof endpoint" + on + " refused the request (HTTP 403)"
+	case f.Status == 404:
+		return "the target serves no /debug/pprof" + on + " (HTTP 404)"
+	case f.Reset:
+		return "the target reset the connection to its pprof endpoint" + on +
+			" without answering — that port does not serve /debug/pprof over HTTP"
+	default:
+		return "nothing in the target accepted a connection to its pprof endpoint" + on
+	}
+}
+
+var (
+	pprofPortRe   = regexp.MustCompile(`:(\d+)/debug/pprof/`)
+	pprofStatusRe = regexp.MustCompile(`(?:HTTP/\d(?:\.\d)? |ERROR )(401|403|404)\b`)
+	// busybox wget says "can't connect to remote host (…): Connection
+	// refused"; the profiler says "no listening port found" when it cannot
+	// tell which port the process serves on.
+	pprofRefusedRe = regexp.MustCompile(`(?i)connection refused|can't connect to remote host|no listening port found`)
+	// busybox wget says "error getting response: Connection reset by peer"
+	// when the port is not an HTTP/1.1 server. The profiler scrapes the
+	// first port the process listens on, which is often a gRPC one.
+	pprofResetRe = regexp.MustCompile(`(?i)connection reset by peer|error getting response`)
+)
+
+// classifyPprofFailure reads the profiler's error for a Go pprof run and
+// reports whether it failed on the endpoint itself: an HTTP 401/403/404 from
+// /debug/pprof, no listener on the port it tried, or a port that does not
+// speak HTTP.
+func classifyPprofFailure(reason string) (pprofEndpointFailure, bool) {
+	var f pprofEndpointFailure
+	if m := pprofPortRe.FindStringSubmatch(reason); m != nil {
+		f.Port = m[1]
+	}
+	switch {
+	case !strings.Contains(reason, "/debug/pprof") && !strings.Contains(reason, "no listening port found"):
+		// Not the endpoint scrape that failed.
+	case pprofStatusRe.MatchString(reason):
+		f.Status, _ = strconv.Atoi(pprofStatusRe.FindStringSubmatch(reason)[1])
+		return f, true
+	case pprofRefusedRe.MatchString(reason):
+		return f, true
+	case pprofResetRe.MatchString(reason):
+		f.Reset = true
+		return f, true
+	}
+	return pprofEndpointFailure{}, false
 }
 
 // buildDebuggerArgs is the closed bag-of-fields for buildDebuggerPod —
