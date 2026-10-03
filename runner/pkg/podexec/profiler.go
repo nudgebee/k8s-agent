@@ -78,6 +78,20 @@ const langDetectWindow = "15m"
 // bounds the handler and rejects durations that cannot fit its budget.
 const profileOverhead = 3 * time.Minute
 
+// debuggerImagePullGrace is how long the debugger pod may sit in
+// ErrImagePull / ImagePullBackOff before the run gives up on it. The kubelet
+// retries a failed pull with back-off (10s, 20s, 40s, …), so this rides out a
+// registry hiccup but not an image that cannot be pulled at all, which would
+// otherwise hold the run until its readiness timeout.
+const debuggerImagePullGrace = time.Minute
+
+// debuggerLogTailLines / debuggerLogTailTimeout bound the debugger log tail
+// that goes into the error of a run whose debugger pod failed.
+const (
+	debuggerLogTailLines   = 20
+	debuggerLogTailTimeout = 5 * time.Second
+)
+
 // ProfilingTool — `ProfilingTool` enum.
 type ProfilingTool string
 
@@ -164,9 +178,14 @@ type ProfilerHandler struct {
 	// the target's language when the caller didn't pass one. Nil when the
 	// agent has no Prometheus configured — detection is then skipped.
 	prom promQuerier
-	// langRetryDelay is langDetectRetryDelay, held per handler so tests
-	// need not wait it out.
+	// copyFile, when set, replaces copyFileFromPod (SPDY exec) for reading
+	// the result file out of the debugger pod. Tests set it: the fake
+	// clientset serves everything else a run does, but not an exec.
+	copyFile func(ctx context.Context, namespace, pod, container, path string) ([]byte, error)
+	// langRetryDelay and imagePullGrace are langDetectRetryDelay and
+	// debuggerImagePullGrace, held per handler so tests need not wait them out.
 	langRetryDelay time.Duration
+	imagePullGrace time.Duration
 }
 
 // promQuerier is the slice of the Prometheus client this package needs.
@@ -185,6 +204,7 @@ func NewProfilerHandler(cs kubernetes.Interface, restCfg *rest.Config) *Profiler
 		restCfg:        restCfg,
 		image:          defaultProfilerImage,
 		langRetryDelay: langDetectRetryDelay,
+		imagePullGrace: debuggerImagePullGrace,
 	}
 }
 
@@ -399,10 +419,7 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 	if debuggerNamespace == "" {
 		debuggerNamespace = req.Namespace
 	}
-
-	debuggerName := generateDebuggerPodName()
-	debuggerPod := buildDebuggerPod(buildDebuggerArgs{
-		Name:                 debuggerName,
+	args := buildDebuggerArgs{
 		Namespace:            debuggerNamespace,
 		NodeName:             pod.Spec.NodeName,
 		Image:                h.image(lang, tool),
@@ -414,9 +431,37 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 		ContainerRuntime:     runtimeName,
 		ContainerRuntimePath: runtimePath,
 		DurationSeconds:      req.Seconds,
-	})
+	}
+	file, err := h.runDebugger(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return newFileResult(file, lang, tool, req), nil
+}
 
-	created, err := h.cs.CoreV1().Pods(debuggerNamespace).Create(ctx, debuggerPod, metav1.CreateOptions{})
+// profileFile is the result file one debugger run copied back.
+type profileFile struct {
+	Name     string
+	Contents []byte
+}
+
+func newFileResult(f *profileFile, lang ProgrammingLanguage, tool ProfilingTool, req ProfileRequest) *FileResult {
+	return &FileResult{
+		Filename:       f.Name,
+		ContentsBase64: base64Std.EncodeToString(f.Contents),
+		Lang:           string(lang),
+		ProfileTool:    string(tool),
+		ProfileType:    string(req.ProfileType),
+		Duration:       req.Seconds,
+	}
+}
+
+// runDebugger launches one debugger pod for args, waits for its result and
+// copies the file out. The pod is deleted on the way out, after any failure
+// details have been read from it.
+func (h *ProfilerHandler) runDebugger(ctx context.Context, args buildDebuggerArgs) (*profileFile, error) {
+	args.Name = generateDebuggerPodName()
+	created, err := h.cs.CoreV1().Pods(args.Namespace).Create(ctx, buildDebuggerPod(args), metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("pod_profiler: create debugger pod: %w", err)
 	}
@@ -424,30 +469,26 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 		// Best-effort cleanup. The pod has restartPolicy=Never so even
 		// if delete races with the apiserver the pod won't reschedule;
 		// orphaned pods become visible via the managed-by label.
-		_ = h.cs.CoreV1().Pods(debuggerNamespace).Delete(context.Background(), created.Name, metav1.DeleteOptions{})
+		_ = h.cs.CoreV1().Pods(args.Namespace).Delete(context.Background(), created.Name, metav1.DeleteOptions{})
 	}()
 
 	// wait_for_pod_ready first; the underlying ready check is "all
 	// containers ready" — so a pull-image failure surfaces here instead
 	// of as an empty log stream.
-	if err := h.waitForPodReady(ctx, debuggerNamespace, created.Name, time.Duration(req.Seconds*5)*time.Second); err != nil {
-		return nil, fmt.Errorf("pod_profiler: wait debugger ready: %w", err)
+	if err := h.waitForPodReady(ctx, args.Namespace, created.Name, time.Duration(args.DurationSeconds*5)*time.Second); err != nil {
+		return nil, fmt.Errorf("pod_profiler: %w", err)
 	}
 
 	// Stream and parse logs until we hit a `result` event or the pod
 	// reports `error`/`progress.stage=ended`.
-	resultLog, err := h.streamUntilResult(ctx, debuggerNamespace, created.Name)
+	resultLog, err := h.streamUntilResult(ctx, args.Namespace, created.Name)
 	if err != nil {
 		return nil, err
 	}
 
 	// Pull the result file out via `tar cf - <file>` — kubectl cp uses
 	// the same approach under the hood, a thin wrapper over tar-exec.
-	res, err := h.fetchResultFile(ctx, debuggerNamespace, created.Name, resultLog, lang, tool, req)
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
+	return h.fetchResultFile(ctx, args.Namespace, created.Name, resultLog)
 }
 
 // replicaSetPodName matches the name a ReplicaSet gives its pods,
@@ -755,6 +796,10 @@ type buildDebuggerArgs struct {
 	DurationSeconds      int
 }
 
+// debuggerContainer is the name of the profiler container in the debugger
+// pod — the one logs are read from and the result file is copied out of.
+const debuggerContainer = "profiler"
+
 // buildDebuggerPod constructs the privileged profiler pod the action
 // spawns on the target node.
 // — same /app/agent command, same args, same hostPath volumes.
@@ -809,7 +854,7 @@ func buildDebuggerPod(a buildDebuggerArgs) *corev1.Pod {
 			HostPID:       true, // profiler reads /proc/<pid> across containers
 			Volumes:       volumes,
 			Containers: []corev1.Container{{
-				Name:    "profiler",
+				Name:    debuggerContainer,
 				Image:   a.Image,
 				Command: cmd,
 				SecurityContext: &corev1.SecurityContext{
@@ -831,37 +876,241 @@ func generateDebuggerPodName() string {
 	return fmt.Sprintf("nudgebee-profiler-%d", time.Now().UnixNano())
 }
 
+// Waiting reasons that end the wait for the debugger pod. The first set
+// cannot clear on its own; the second is a failed image pull the kubelet keeps
+// retrying, tolerated for imagePullGrace.
+var (
+	unstartableReasons = map[string]bool{
+		"InvalidImageName":           true,
+		"ErrImageNeverPull":          true,
+		"CreateContainerConfigError": true,
+	}
+	imagePullReasons = map[string]bool{
+		"ErrImagePull":     true,
+		"ImagePullBackOff": true,
+	}
+)
+
+var (
+	errDebuggerFailed      = errors.New("debugger pod failed")
+	errDebuggerUnstartable = errors.New("debugger pod cannot start")
+)
+
 // waitForPodReady polls until all containers in the pod are ready or
 // timeout. Treats "all ContainerStatuses ready=true" as the readiness
-// signal, with one extra check for terminated containers so an
-// ImagePullBackOff is surfaced as an error not a timeout.
+// signal. A pod that failed, or that is stuck on an image it cannot pull,
+// ends the wait early, and the error carries what the pod reported — its
+// status, its container's exit, and the tail of its log — read now, before
+// the caller's cleanup deletes the pod and all of it with it.
 func (h *ProfilerHandler) waitForPodReady(ctx context.Context, namespace, name string, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return wait.PollUntilContextCancel(pollCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+	start := time.Now()
+	var last *corev1.Pod
+	var pullFailingSince time.Time
+	err := wait.PollUntilContextCancel(pollCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		p, err := h.cs.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
-		if p.Status.Phase == corev1.PodFailed {
-			return false, fmt.Errorf("pod_profiler: debugger pod entered Failed phase")
+		last = p
+		switch p.Status.Phase {
+		case corev1.PodFailed:
+			return false, errDebuggerFailed
+		case corev1.PodSucceeded:
+			// The profiler already exited 0. Its events are in the log,
+			// which streamUntilResult reads to the end.
+			return true, nil
 		}
 		if len(p.Status.ContainerStatuses) == 0 {
 			return false, nil
 		}
+		ready := true
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
-				return false, fmt.Errorf("pod_profiler: debugger container terminated: %s", cs.State.Terminated.Reason)
+				return false, errDebuggerFailed
+			}
+			if w := cs.State.Waiting; w != nil {
+				if unstartableReasons[w.Reason] {
+					return false, errDebuggerUnstartable
+				}
+				if imagePullReasons[w.Reason] {
+					if pullFailingSince.IsZero() {
+						pullFailingSince = time.Now()
+					}
+					if time.Since(pullFailingSince) >= h.imagePullGrace {
+						return false, errDebuggerUnstartable
+					}
+				}
 			}
 			if !cs.Ready {
-				return false, nil
+				ready = false
 			}
 		}
-		return true, nil
+		return ready, nil
 	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errDebuggerFailed):
+		return fmt.Errorf("%w: %s", errDebuggerFailed,
+			describeDebugger(last, h.debuggerLogTail(ctx, namespace, name)))
+	case errors.Is(err, errDebuggerUnstartable):
+		return fmt.Errorf("%w: %s", errDebuggerUnstartable, describeDebugger(last, nil))
+	case last != nil && pollCtx.Err() != nil:
+		return fmt.Errorf("debugger pod not ready after %s: %s",
+			time.Since(start).Round(time.Second), describeDebugger(last, nil))
+	}
+	return fmt.Errorf("wait for debugger pod: %w", err)
+}
+
+// debuggerLogTail returns the last lines the debugger container wrote, or nil
+// when they cannot be read. The read is detached from ctx so the details of a
+// run that ran out of time can still be collected.
+func (h *ProfilerHandler) debuggerLogTail(ctx context.Context, namespace, name string) []string {
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), debuggerLogTailTimeout)
+	defer cancel()
+	stream, err := h.cs.CoreV1().Pods(namespace).GetLogs(name, &corev1.PodLogOptions{
+		Container: debuggerContainer,
+		TailLines: ptr.To(int64(debuggerLogTailLines)),
+	}).Stream(lctx)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = stream.Close() }()
+	var tail lineTail
+	scanner := bufio.NewScanner(io.LimitReader(stream, 256<<10))
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	for scanner.Scan() {
+		tail.add(scanner.Text())
+	}
+	return tail.lines()
+}
+
+// debuggerSettled re-reads the debugger pod after its log stream ended, giving
+// the kubelet a few seconds to record how the container exited — the stream
+// closes as the process dies, a moment before the pod status says so.
+func (h *ProfilerHandler) debuggerSettled(ctx context.Context, namespace, name string) *corev1.Pod {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), debuggerLogTailTimeout)
+	defer cancel()
+	var last *corev1.Pod
+	_ = wait.PollUntilContextCancel(ctx, 500*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+		p, err := h.cs.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, nil
+		}
+		last = p
+		if p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
+			return true, nil
+		}
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.State.Terminated != nil {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	return last
+}
+
+// describeDebugger renders what the debugger pod reported about itself:
+// phase, pod-level reason (Evicted, OutOfmemory, …), each container's exit or
+// waiting reason, then the log tail. A nil pod leaves just the log tail.
+func describeDebugger(p *corev1.Pod, logTail []string) string {
+	var parts []string
+	if p != nil {
+		phase := string(p.Status.Phase)
+		if phase == "" {
+			phase = string(corev1.PodPending)
+		}
+		s := "phase " + phase
+		if why := joinReason(p.Status.Reason, oneLine(p.Status.Message)); why != "" {
+			s += " (" + why + ")"
+		}
+		parts = append(parts, s)
+		for _, cs := range p.Status.ContainerStatuses {
+			switch {
+			case cs.State.Terminated != nil:
+				t := cs.State.Terminated
+				reason := t.Reason
+				if reason == "" {
+					reason = "terminated"
+				}
+				s := fmt.Sprintf("container %s exited: %s, exit code %d", cs.Name, reason, t.ExitCode)
+				if msg := oneLine(t.Message); msg != "" {
+					s += ": " + msg
+				}
+				parts = append(parts, s)
+			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "":
+				w := cs.State.Waiting
+				parts = append(parts, "container "+cs.Name+" waiting: "+joinReason(w.Reason, oneLine(w.Message)))
+			}
+		}
+	}
+	if len(logTail) > 0 {
+		parts = append(parts, "last log lines:\n  "+strings.Join(logTail, "\n  "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// joinReason joins a reason and its message, either of which may be empty.
+func joinReason(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, ": ")
+}
+
+// maxDetailLen bounds one message or log line quoted into an error.
+const maxDetailLen = 300
+
+// oneLine flattens and bounds a status message or log line for an error.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxDetailLen {
+		s = strings.ToValidUTF8(s[:maxDetailLen], "") + "…"
+	}
+	return s
+}
+
+// lineTail keeps the last debuggerLogTailLines log lines, rendered for an
+// error message.
+type lineTail struct {
+	buf []string
+}
+
+func (t *lineTail) add(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	if len(t.buf) == debuggerLogTailLines {
+		t.buf = t.buf[1:]
+	}
+	t.buf = append(t.buf, compactLogLine(line))
+}
+
+func (t *lineTail) lines() []string { return t.buf }
+
+// compactLogLine renders one profiler log line for an error. The profiler
+// writes JSON events; they are cut down to their payload so the tail reads as
+// text. Anything else (a Go panic, a shell error) is kept as written.
+func compactLogLine(line string) string {
+	var ev resultEvent
+	if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &ev) == nil && ev.Type != "" {
+		for _, k := range []string{"reason", "msg", "stage", "file"} {
+			if v, ok := ev.Data[k].(string); ok && v != "" {
+				return oneLine(ev.Type + ": " + v)
+			}
+		}
+	}
+	return oneLine(line)
 }
 
 // resultEvent is one parsed JSON line from the profiler pod's stdout.
@@ -873,6 +1122,21 @@ type resultEvent struct {
 	Data map[string]interface{} `json:"data"`
 }
 
+// profilerError is an `error` event from the profiler: the debugger pod ran,
+// and the profiler inside it gave up. Reason is the profiler's own message.
+type profilerError struct {
+	Reason string
+}
+
+func (e *profilerError) Error() string {
+	return "pod_profiler: profiler reported error: " + e.Reason
+}
+
+var (
+	errEndedWithoutResult = errors.New("profiler ended without emitting a result event")
+	errStreamClosed       = errors.New("log stream closed before result")
+)
+
 // streamUntilResult tails the profiler pod's logs, parses each line as
 // JSON, and returns the first `result` event's data. Returns an error
 // if the pod reports `error` or terminates without producing a result.
@@ -881,21 +1145,49 @@ type resultEvent struct {
 // reader we can scan line-by-line. We don't use Watch here because the
 // line-streaming path is simpler and matches what kubectl logs -f emits.
 func (h *ProfilerHandler) streamUntilResult(ctx context.Context, namespace, name string) (map[string]interface{}, error) {
-	req := h.cs.CoreV1().Pods(namespace).GetLogs(name, &corev1.PodLogOptions{Follow: true})
+	req := h.cs.CoreV1().Pods(namespace).GetLogs(name, &corev1.PodLogOptions{Container: debuggerContainer, Follow: true})
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("pod_profiler: open log stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
 
-	scanner := bufio.NewScanner(stream)
+	res, tail, err := readProfilerEvents(stream)
+	if err == nil {
+		return res, nil
+	}
+	var perr *profilerError
+	if errors.As(err, &perr) {
+		return nil, err
+	}
+	// No verdict from the profiler. When the stream closed on its own, the
+	// container most likely died (OOMKilled, a crash, an eviction), and only
+	// the pod status says so. When the profiler said "ended", or the run ran
+	// out of time, the pod is still running and the log says how far it got.
+	var p *corev1.Pod
+	if !errors.Is(err, errEndedWithoutResult) && ctx.Err() == nil {
+		p = h.debuggerSettled(ctx, namespace, name)
+	}
+	if p == nil && len(tail) == 0 {
+		return nil, fmt.Errorf("pod_profiler: %w", err)
+	}
+	return nil, fmt.Errorf("pod_profiler: %w: %s", err, describeDebugger(p, tail))
+}
+
+// readProfilerEvents scans the profiler's event stream up to its verdict: the
+// first `result` event's data, or a *profilerError for an `error` event. It
+// also returns the last lines read, for the error when there is no verdict.
+func readProfilerEvents(r io.Reader) (map[string]interface{}, []string, error) {
+	scanner := bufio.NewScanner(r)
 	// Profiler events can be large (chunked-result manifests have
 	// per-chunk metadata). Bump the scanner buffer past the default 64K.
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
 
+	var tail lineTail
 	endedSeen := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		tail.add(line)
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
@@ -905,9 +1197,13 @@ func (h *ProfilerHandler) streamUntilResult(ctx context.Context, namespace, name
 		}
 		switch ev.Type {
 		case "result":
-			return ev.Data, nil
+			return ev.Data, nil, nil
 		case "error":
-			return nil, fmt.Errorf("pod_profiler: profiler reported error: %v", ev.Data)
+			reason, _ := ev.Data["reason"].(string)
+			if reason == "" {
+				reason = fmt.Sprintf("%v", ev.Data)
+			}
+			return nil, nil, &profilerError{Reason: reason}
 		case "progress":
 			if stage, _ := ev.Data["stage"].(string); stage == "ended" {
 				endedSeen = true
@@ -915,25 +1211,30 @@ func (h *ProfilerHandler) streamUntilResult(ctx context.Context, namespace, name
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("pod_profiler: log scan: %w", err)
+		return nil, tail.lines(), fmt.Errorf("log scan: %w", err)
 	}
 	if endedSeen {
-		return nil, errors.New("pod_profiler: profiler ended without emitting a result event")
+		return nil, tail.lines(), errEndedWithoutResult
 	}
-	return nil, errors.New("pod_profiler: log stream closed before result")
+	return nil, tail.lines(), errStreamClosed
 }
 
 // fetchResultFile reads `result.file` (or the first chunk file) out of
-// the profiler pod via tar-exec, validates the MD5 checksum, and
-// returns it as a FileResult ready to wrap in a Finding.
-func (h *ProfilerHandler) fetchResultFile(ctx context.Context, namespace, name string, resultData map[string]interface{}, lang ProgrammingLanguage, tool ProfilingTool, req ProfileRequest) (*FileResult, error) {
+// the profiler pod via tar-exec and validates the MD5 checksum.
+func (h *ProfilerHandler) fetchResultFile(ctx context.Context, namespace, name string, resultData map[string]interface{}) (*profileFile, error) {
 	filename, _ := resultData["file"].(string)
 	wantSum, _ := resultData["checksum"].(string)
 	if filename == "" {
 		return nil, errors.New("pod_profiler: result missing `file`")
 	}
 
-	contents, err := copyFileFromPod(ctx, h.cs, h.restCfg, namespace, name, "profiler", filename)
+	copyFile := h.copyFile
+	if copyFile == nil {
+		copyFile = func(ctx context.Context, namespace, pod, container, path string) ([]byte, error) {
+			return copyFileFromPod(ctx, h.cs, h.restCfg, namespace, pod, container, path)
+		}
+	}
+	contents, err := copyFile(ctx, namespace, name, debuggerContainer, filename)
 	if err != nil {
 		return nil, fmt.Errorf("pod_profiler: copy file: %w", err)
 	}
@@ -943,14 +1244,7 @@ func (h *ProfilerHandler) fetchResultFile(ctx context.Context, namespace, name s
 			return nil, fmt.Errorf("pod_profiler: checksum mismatch (got %s, want %s)", gotSum, wantSum)
 		}
 	}
-	return &FileResult{
-		Filename:       filename,
-		ContentsBase64: base64Std.EncodeToString(contents),
-		Lang:           string(lang),
-		ProfileTool:    string(tool),
-		ProfileType:    string(req.ProfileType),
-		Duration:       req.Seconds,
-	}, nil
+	return &profileFile{Name: filename, Contents: contents}, nil
 }
 
 // copyFileFromPod runs `tar cf - <path>` inside the named container and

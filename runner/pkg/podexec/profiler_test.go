@@ -377,63 +377,13 @@ func TestBuildDebuggerPod_ArgsMatchLegacy(t *testing.T) {
 }
 
 // ---------- streamUntilResult ----------
-// We can't drive client-go's GetLogs Stream directly from a fake
-// clientset (the fake doesn't pipe through arbitrary log content), but
-// we can test the parser shape via a helper that takes an io.Reader.
-// Refactor: extract the scan loop into a tiny function.
+// readProfilerEvents is streamUntilResult's parse loop over any reader, so
+// the JSON-event parsing is covered without a real K8s log stream.
 
-// scanForResult mirrors streamUntilResult's parse loop. Tested in
-// isolation so the JSON-event parsing has full coverage without needing
-// a real K8s log stream.
 func scanForResult(t *testing.T, lines []string) (map[string]any, error) {
 	t.Helper()
-	var b bytes.Buffer
-	for _, l := range lines {
-		b.WriteString(l)
-		b.WriteByte('\n')
-	}
-	// Use the same scanner the real path uses by calling the production
-	// parser via a tiny adapter — this avoids duplicating the buffer
-	// sizing logic.
-	return scanResultFromReader(&b)
-}
-
-// scanResultFromReader is the testable subset of streamUntilResult.
-// We replicate the Scanner setup but read from any io.Reader so tests
-// can feed canned content. The production streamUntilResult function
-// keeps its current signature; this is a parallel helper used only by
-// tests, structured to share the same JSON shape so behaviour drift
-// gets caught.
-func scanResultFromReader(r *bytes.Buffer) (map[string]any, error) {
-	// Inline simplification of streamUntilResult's loop. We don't share
-	// the function because the production version owns the http stream
-	// lifecycle (Close + buffer sizing); the test only needs the parse.
-	lines := strings.Split(r.String(), "\n")
-	endedSeen := false
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var ev resultEvent
-		if json.Unmarshal([]byte(line), &ev) != nil {
-			continue
-		}
-		switch ev.Type {
-		case "result":
-			return ev.Data, nil
-		case "error":
-			return nil, errors.New("profiler reported error")
-		case "progress":
-			if stage, _ := ev.Data["stage"].(string); stage == "ended" {
-				endedSeen = true
-			}
-		}
-	}
-	if endedSeen {
-		return nil, errors.New("profiler ended without emitting a result event")
-	}
-	return nil, errors.New("log stream closed before result")
+	res, _, err := readProfilerEvents(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+	return res, err
 }
 
 func TestScanForResult_HappyPath(t *testing.T) {
@@ -470,6 +420,50 @@ func TestScanForResult_ErrorEvent(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "profiler reported error") {
 		t.Errorf("err = %v; want 'profiler reported error'", err)
+	}
+}
+
+// TestScanForResult_ErrorEventReason — the profiler's reason is kept as
+// text (not a Go map dump) and as a typed error, which is what the Go
+// pprof fallback inspects.
+func TestScanForResult_ErrorEventReason(t *testing.T) {
+	_, err := scanForResult(t, []string{
+		`{"type":"progress","data":{"stage":"started"}}`,
+		`{"type":"error","data":{"reason":"no PIDs found for container ID: abc"}}`,
+	})
+	var perr *profilerError
+	if !errors.As(err, &perr) {
+		t.Fatalf("err = %v (%T); want *profilerError", err, err)
+	}
+	if perr.Reason != "no PIDs found for container ID: abc" {
+		t.Errorf("Reason = %q", perr.Reason)
+	}
+	if want := "pod_profiler: profiler reported error: no PIDs found for container ID: abc"; err.Error() != want {
+		t.Errorf("err = %q; want %q", err, want)
+	}
+}
+
+// TestReadProfilerEvents_TailWithoutVerdict — with no result or error the
+// last lines come back for the error message, JSON events cut down to
+// their payload and anything else kept as written.
+func TestReadProfilerEvents_TailWithoutVerdict(t *testing.T) {
+	lines := []string{`{"type":"progress","data":{"stage":"started"}}`}
+	for i := 0; i < 30; i++ {
+		lines = append(lines, "noise")
+	}
+	lines = append(lines, "panic: runtime error: index out of range")
+	_, tail, err := readProfilerEvents(strings.NewReader(strings.Join(lines, "\n")))
+	if !errors.Is(err, errStreamClosed) {
+		t.Fatalf("err = %v; want errStreamClosed", err)
+	}
+	if len(tail) != debuggerLogTailLines {
+		t.Fatalf("tail has %d lines; want %d", len(tail), debuggerLogTailLines)
+	}
+	if got := tail[len(tail)-1]; got != "panic: runtime error: index out of range" {
+		t.Errorf("last tail line = %q", got)
+	}
+	if compactLogLine(`{"type":"notice","data":{"msg":"Detected more than one PID"}}`) != "notice: Detected more than one PID" {
+		t.Error("JSON events should be rendered as their payload")
 	}
 }
 
