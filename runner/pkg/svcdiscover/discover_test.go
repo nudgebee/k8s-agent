@@ -3,6 +3,7 @@ package svcdiscover
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -107,5 +108,68 @@ func mkService(name, namespace string, port int32, labels map[string]string) *co
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{{Port: port}},
 		},
+	}
+}
+
+// A Prometheus that appears after the agent started must still be found.
+// Boot-time discovery ran exactly once, so an agent that came up before its
+// Prometheus stayed blind to it until the pod was restarted.
+func TestWatchUntilFound_PicksUpAServiceAddedLater(t *testing.T) {
+	cs := fake.NewClientset()
+	found := make(chan string, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go WatchUntilFound(ctx, cs, "cluster.local", PrometheusSelectors, 20*time.Millisecond, func(u string) {
+		found <- u
+	})
+
+	// Nothing to find yet.
+	select {
+	case u := <-found:
+		t.Fatalf("reported %q before any Prometheus existed", u)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if _, err := cs.CoreV1().Services("kps").Create(ctx,
+		mkService("prom-stack", "kps", 9090, map[string]string{"app": "kube-prometheus-stack-prometheus"}),
+		metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	select {
+	case u := <-found:
+		if want := "http://prom-stack.kps.svc.cluster.local:9090"; u != want {
+			t.Errorf("got %q; want %q", u, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a Prometheus added after the watch started was never found")
+	}
+}
+
+// The negative-result cache in FindFirst is an hour wide. The watcher must not
+// inherit it across attempts, or the first miss would freeze the retry for the
+// rest of the process's life — the bug this watcher exists to prevent.
+func TestWatchUntilFound_DoesNotInheritTheNegativeCache(t *testing.T) {
+	cs := fake.NewClientset()
+	// Prime a Discoverer's cache with a miss, the way boot-time discovery does.
+	if u := New(cs, "cluster.local").FindFirst(context.Background(), PrometheusSelectors); u != "" {
+		t.Fatalf("expected no match on an empty cluster; got %q", u)
+	}
+	if _, err := cs.CoreV1().Services("kps").Create(context.Background(),
+		mkService("prom-stack", "kps", 9090, map[string]string{"app": "kube-prometheus-stack-prometheus"}),
+		metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	found := make(chan string, 1)
+	go WatchUntilFound(ctx, cs, "cluster.local", PrometheusSelectors, 20*time.Millisecond, func(u string) { found <- u })
+
+	select {
+	case <-found:
+	case <-time.After(1 * time.Second):
+		t.Fatal("watcher never found a Prometheus that was present the whole time")
 	}
 }

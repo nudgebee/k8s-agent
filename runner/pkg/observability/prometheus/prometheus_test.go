@@ -249,3 +249,59 @@ func TestHandlers_PromotesSingleStringMatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A client built without a URL must stay usable: the agent registers its
+// actions either way and points it at a Prometheus as soon as one is found,
+// so no restart is needed when monitoring is installed after the agent.
+func TestSetURL_MakesAnUnconfiguredClientWork(t *testing.T) {
+	c := New("", &http.Client{Timeout: 5 * time.Second})
+
+	_, err := c.Query(context.Background(), "up", "", "")
+	if err == nil || !strings.Contains(err.Error(), "base URL not configured") {
+		t.Fatalf("err = %v; want a 'base URL not configured' rejection", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	c.SetURL(srv.URL + "/")
+	if got := c.URL(); got != srv.URL {
+		t.Errorf("URL() = %q; want %q (trailing slash trimmed)", got, srv.URL)
+	}
+	raw, err := c.Query(context.Background(), "up", "", "")
+	if err != nil {
+		t.Fatalf("query after SetURL: %v", err)
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || resp.Status != "success" {
+		t.Errorf("response = %s, err = %v; want status success", raw, err)
+	}
+}
+
+// The discovery watcher writes the URL from its own goroutine while request
+// handlers read it. Run under -race.
+func TestSetURL_IsSafeWhileQueriesRun(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer srv.Close()
+
+	c := New("", &http.Client{Timeout: 5 * time.Second})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			c.SetURL(srv.URL)
+			c.SetURL("")
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		// Either outcome is fine; we are asserting the absence of a data race.
+		_, _ = c.Query(context.Background(), "up", "", "")
+	}
+	<-done
+}
