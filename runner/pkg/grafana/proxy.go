@@ -62,7 +62,7 @@ type Proxy struct {
 	PrometheusURL string
 
 	// PrometheusHeaders is the parsed PROMETHEUS_HEADERS env (raw
-	// "Header: value, Header: value" string) — applied to every
+	// "Header: value; Header: value" string) — applied to every
 	// Prometheus proxy request so X-Scope-OrgID / tenant headers reach
 	// the upstream. Same shape ExtraHeaders uses for Grafana.
 	PrometheusHeaders http.Header

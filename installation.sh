@@ -257,6 +257,9 @@ fi
 
 # Check for existing Prometheus (skip if prometheus stack is disabled)
 existingPrometheus=false
+# Set when this script installs kube-prometheus-stack itself, which also brings the
+# static nudgebee-node-agent scrape job from kube-prometheus-stack-values.yaml.
+installed_prometheus_stack=false
 grafana_command=""
 if [ "$disable_prometheus_stack" == "true" ]; then
     echo "Prometheus stack disabled, skipping Prometheus discovery and installation."
@@ -296,6 +299,7 @@ else
                 -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/kube-prometheus-stack-values.yaml \
                 "${prometheus_storage_class_args[@]}"
             prometheus_url="http://nudgebee-prometheus-kube-p-prometheus:9090"
+            installed_prometheus_stack=true
             grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
         else
             echo "Prometheus installation not requested. Exiting."
@@ -307,6 +311,42 @@ else
 fi
 
 echo "Discovered Prometheus URL: $prometheus_url"
+
+# Labels a PrometheusRule/ServiceMonitor/PodMonitor must carry before this cluster's
+# Prometheus will select it. prometheus-operator only evaluates objects matching the
+# Prometheus CR's ruleSelector; kube-prometheus-stack defaults that to
+# `release: <its own release name>`, which is not this chart's release name. Without
+# these labels the agent's alert rules and ServiceMonitors are accepted by the
+# apiserver, report healthy, and are never evaluated.
+#
+# go-template rather than jq: jq is not a dependency of this script.
+prometheus_selector_args=()
+if [ "$disable_prometheus_stack" != "true" ]; then
+  prom_labels=$(kubectl get prometheuses.monitoring.coreos.com -A \
+    -o go-template='{{range .items}}{{range $k,$v := .spec.ruleSelector.matchLabels}}{{$k}}={{$v}}{{"\n"}}{{end}}{{end}}' \
+    2>/dev/null | sort -u)
+  while IFS= read -r kv; do
+    [ -z "$kv" ] && continue
+    k=${kv%%=*}
+    v=${kv#*=}
+    # Helm --set treats '.' as a path separator, so escape dots inside the label key.
+    k_escaped=$(printf '%s\n' "$k" | sed 's/\./\\./g')
+    prometheus_selector_args+=(--set-string "prometheusStack.selectorLabels.$k_escaped=$v")
+  done <<< "$prom_labels"
+  if [ ${#prometheus_selector_args[@]} -gt 0 ]; then
+    echo "Prometheus rule-selector labels detected: $prom_labels"
+  fi
+fi
+
+# When this script installed kube-prometheus-stack, kube-prometheus-stack-values.yaml
+# brought a static `nudgebee-node-agent` scrape job with it. The chart's PodMonitor
+# covers the same pods, so leaving both on scrapes the node agent twice -- and they
+# disagree on labels (the static job sets honor_labels and rewrites `instance` to the
+# node name), so the result is two series per metric rather than double the samples.
+podmonitor_args=()
+if [ "$installed_prometheus_stack" == "true" ]; then
+  podmonitor_args=(--set "nodeAgent.podmonitor.enabled=false")
+fi
 
 echo "Installing nudgebee agent using helm"
 helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
@@ -417,6 +457,20 @@ fi
 disable_prometheus_stack_args=()
 if [ "$disable_prometheus_stack" == "true" ]; then
   disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
+else
+  # enablePrometheusStack=true (the chart default) asserts the Prometheus operator's
+  # CRDs exist, so the chart emits ServiceMonitor/PodMonitor/PrometheusRule objects
+  # unconditionally. A Prometheus found above without the operator (e.g. a plain
+  # prometheus-server) has no such CRDs, and the install fails on them. With false,
+  # each object is rendered only where its CRD is registered. Only a definite
+  # NotFound flips it; if the CRDs can't be read (RBAC), keep the default.
+  for crd in servicemonitors podmonitors prometheusrules; do
+    if kubectl get crd "$crd.monitoring.coreos.com" -o name 2>&1 >/dev/null | grep -q "NotFound"; then
+      echo "Prometheus operator CRD $crd.monitoring.coreos.com not found; the chart will skip monitoring CRs this cluster cannot accept."
+      disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
+      break
+    fi
+  done
 fi
 
 # global.storageClass reaches the ClickHouse PVC, the only one the chart creates
@@ -442,6 +496,8 @@ helm_args+=(
   "${disable_otel_args[@]}"
   "${disable_prometheus_stack_args[@]}"
   "${storage_class_args[@]}"
+  "${prometheus_selector_args[@]}"
+  "${podmonitor_args[@]}"
 )
 
 echo "Running command: helm ${helm_args[*]}"
