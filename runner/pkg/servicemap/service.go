@@ -14,16 +14,19 @@ import (
 type Service struct {
 	Prom        *prometheus.Client
 	ClusterName string // optional; used in __CLUSTER__ filter expansion
-	StepSeconds int    // default 3600 (1h step)
-	MaxParallel int    // default 8 — caps concurrent /api/v1/query_range requests
+	MaxParallel int    // default 8 — caps concurrent /api/v1/query requests
 }
+
+// minWindow is the shortest window the map is computed over. rate() needs at
+// least two samples per series, which a shorter window can miss at common
+// scrape intervals; a shorter request is widened to this.
+const minWindow = 5 * time.Minute
 
 // New returns a service. Pass nil for prom to disable; handlers will reject.
 func New(prom *prometheus.Client, clusterName string) *Service {
 	return &Service{
 		Prom:        prom,
 		ClusterName: clusterName,
-		StepSeconds: 3600,
 		MaxParallel: 8,
 	}
 }
@@ -51,11 +54,6 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		if t, err := time.Parse(time.RFC3339, p.StartTime); err == nil {
 			start = t
 		}
-	}
-
-	step := s.StepSeconds
-	if step <= 0 {
-		step = 3600
 	}
 
 	// Filter expansion. The pod_filter default is `pod=~".*"` per
@@ -90,9 +88,14 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		queryList = ApplicationQueries
 	}
 
-	rangeStep := fmt.Sprintf("%ds", step)
-	stepStr := fmt.Sprintf("%ds", step)
-	startStr := fmt.Sprintf("%d", start.Unix())
+	// Each query is evaluated once, at the end of the window, over the whole
+	// window: rates and counts then cover exactly the range the caller
+	// selected instead of the last hour-aligned step of it.
+	window := end.Sub(start)
+	if window < minWindow {
+		window = minWindow
+	}
+	rangeStr := fmt.Sprintf("%ds", int64(window.Seconds()))
 	endStr := fmt.Sprintf("%d", end.Unix())
 
 	// Parallel fetch with a bounded worker pool.
@@ -110,16 +113,22 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
+			// Don't queue behind running queries once the caller has given up.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				resultsCh <- fetchResult{key: key, err: ctx.Err()}
+				return
+			}
 			defer func() { <-sem }()
 
-			expanded := expandPlaceholders(q, rangeStep, srcFilter, dstFilter, podFilter, nsFilter, clusterFilter)
-			raw, err := s.Prom.QueryRange(ctx, expanded, startStr, endStr, stepStr, "")
+			expanded := expandPlaceholders(q, rangeStr, srcFilter, dstFilter, podFilter, nsFilter, clusterFilter)
+			raw, err := s.Prom.Query(ctx, expanded, endStr, "")
 			if err != nil {
 				resultsCh <- fetchResult{key: key, err: err}
 				return
 			}
-			parsed, err := parsePromRangeResponse(raw)
+			parsed, err := parsePromResponse(raw)
 			resultsCh <- fetchResult{key: key, data: parsed, err: err}
 		}()
 	}

@@ -1,6 +1,8 @@
 package triggers
 
 import (
+	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -22,6 +24,8 @@ type Engine struct {
 	now             func() time.Time      // injectable for tests
 	eventsLister    K8sEventsLister       // optional; threaded into EnrichBlocks
 	serviceBackends ServiceBackendsLister // optional; threaded into PredicateCtx + EnrichBlocks
+	churn           *ChurnSuppressor      // frequency-based suppression for SuppressChurn matchers
+	logger          *slog.Logger          // optional; used to report churn classifications
 }
 
 // NewEngine builds an Engine with the given specs. agentStartTime should
@@ -30,6 +34,7 @@ func NewEngine(specs []MatcherSpec, agentStartTime time.Time) *Engine {
 	return &Engine{
 		specs:       specs,
 		rl:          NewRateLimiter(0),
+		churn:       NewChurnSuppressor(0, 0, 0, 0),
 		startTime:   agentStartTime,
 		graceWindow: DefaultGraceWindow,
 		now:         time.Now,
@@ -53,6 +58,14 @@ func (e *Engine) WithEventsLister(l K8sEventsLister) *Engine {
 // it via EnrichContext; without it they never fire.
 func (e *Engine) WithServiceBackendsLister(l ServiceBackendsLister) *Engine {
 	e.serviceBackends = l
+	return e
+}
+
+// WithLogger returns the engine wired with a logger, used to announce when a
+// resource is classified as churning. Optional: without it the suppression
+// still happens, it just is not announced.
+func (e *Engine) WithLogger(l *slog.Logger) *Engine {
+	e.logger = l
 	return e
 }
 
@@ -111,15 +124,18 @@ func (e *Engine) fetchNamespaceEvents(namespace string) []EvidenceBlock {
 //
 // Filtering order per matcher:
 //
-//  1. Kind filter        (cheap, drops most events fast)
-//  2. Operation filter   (cheap)
-//  3. Predicate          (does the actual K8s field walking)
-//  4. Resync suppression (creationTimestamp older than start+grace)
-//  5. Rate limit         (fingerprint seen recently?)
+//  1. Kind filter         (cheap, drops most events fast)
+//  2. Operation filter    (cheap)
+//  3. Recovery predicate  (healthy again → clear suppression, never fires)
+//  4. Predicate           (does the actual K8s field walking)
+//  5. Resync suppression  (creationTimestamp older than start+grace)
+//  6. Rate limit          (fingerprint seen recently?)
 //
 // Order matters: the rate-limiter shouldn't be touched for events that
 // don't satisfy the predicate, otherwise the LRU fills with garbage
-// keys from non-matching events.
+// keys from non-matching events. The recovery check is the one exception
+// — it touches the limiter for non-matching events by design — but it
+// only ever removes keys, so it can't grow the LRU.
 func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 	if ev.Obj == nil {
 		return nil
@@ -132,6 +148,18 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 			continue
 		}
 		if !operationMatches(spec.Operations, ev.Operation) {
+			continue
+		}
+		// Recovery runs before the failure predicate: the two are
+		// mutually exclusive, and a recovered object is the cheaper,
+		// far more common case on a healthy cluster. Clearing the
+		// limiter record here is what lets a workload that recovers and
+		// breaks again inside the window get a second Finding instead
+		// of being suppressed as a repeat of the first.
+		if spec.RecoveryPredicate != nil && spec.RecoveryPredicate(ev.Obj, ev.OldObj) {
+			if spec.FingerprintFn != nil {
+				e.rl.Forget(spec.Name + ":" + spec.FingerprintFn(ev.Obj))
+			}
 			continue
 		}
 		// PredicateCtx (cluster-read matchers) takes precedence over the
@@ -152,6 +180,22 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		}
 		if !e.rl.Allow(spec.Name+":"+fingerprint, spec.RateLimit) {
 			continue
+		}
+		if spec.SuppressChurn {
+			allowed, classified := e.churn.Allow(spec.Name + ":" + fingerprint)
+			if classified && e.logger != nil {
+				// Announced once per cooldown. A resource that silently stops
+				// producing events looks identical to one that stopped
+				// changing, which is an expensive ambiguity mid-incident.
+				name, namespace, _, _ := SubjectFromObj(ev.Kind, ev.Obj)
+				e.logger.Info("change suppressed: resource rewrites itself continuously",
+					"matcher", spec.Name, "namespace", namespace, "name", name,
+					"threshold", e.churn.threshold, "window", e.churn.window,
+					"cooldown", e.churn.cooldown)
+			}
+			if !allowed {
+				continue
+			}
 		}
 
 		name, namespace, lowerKind, node := SubjectFromObj(ev.Kind, ev.Obj)
@@ -208,11 +252,17 @@ func (e *Engine) suppressedByResync(obj map[string]any) bool {
 	return t.Before(e.startTime.Add(-e.graceWindow))
 }
 
+// kindMatches compares a spec's Kind against the kind kubewatch reported.
+// Case-insensitive: kubewatch's per-resource handlers are not consistent
+// about casing across kinds ("Deployment" but "configmap"), and a spec
+// that silently never fires because of a capital letter is invisible —
+// the events just land in the unmatched counter. No two K8s kinds differ
+// only by case, so folding cannot collide.
 func kindMatches(specKind, eventKind string) bool {
 	if specKind == "" || specKind == "Any" {
 		return true
 	}
-	return specKind == eventKind
+	return strings.EqualFold(specKind, eventKind)
 }
 
 func operationMatches(specOps []string, eventOp string) bool {

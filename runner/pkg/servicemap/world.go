@@ -9,6 +9,9 @@ type world struct {
 	// pod IP → app key (built from kube_pod_info)
 	podIPToApp map[string]string
 
+	// "<namespace>/<pod>" → app key (built from kube_pod_info)
+	podApp map[string]string
+
 	// service ClusterIP → app key (built from kube_service_info; service IPs
 	// also alias to the workload they front)
 	serviceIPToApp map[string]string
@@ -36,19 +39,31 @@ type containerSums struct {
 }
 
 type linkAccum struct {
-	requests    float64
-	failures    float64
-	latency     float64
-	bytesSent   float64
-	bytesRecv   float64
-	protocol    string
-	hasRequests bool
+	connects         float64 // new TCP connections per second
+	requests         float64 // decoded protocol requests per second, all protocols
+	failures         float64
+	latency          float64
+	bytesSent        float64
+	bytesRecv        float64
+	protocol         string  // busiest decoded protocol; "" when none was decoded
+	protocolRequests float64 // request rate of protocol
+}
+
+// requestRate is the edge's request rate: decoded protocol requests when the
+// agent saw any, otherwise new TCP connections, the closest measure it has
+// for traffic it could not decode.
+func (la *linkAccum) requestRate() float64 {
+	if la.protocol != "" {
+		return la.requests
+	}
+	return la.connects
 }
 
 func newWorld() *world {
 	return &world{
 		applications:   map[string]*application{},
 		podIPToApp:     map[string]string{},
+		podApp:         map[string]string{},
 		serviceIPToApp: map[string]string{},
 		containerStats: map[string]*containerSums{},
 		edges:          map[string]map[string]*linkAccum{},
