@@ -8,8 +8,8 @@ on:
 
 # Pushes to GHCR (ghcr.io/nudgebee/nudgebee-agent). Multi-arch (amd64+arm64)
 # since target nodes can be either. The image name is kept from the former
-# nudgebee-agent repo so the chart's update-image-tags workflow picks up new
-# tags unchanged. main is the release branch.
+# nudgebee-agent repo, which is what release.yml / release-rc.yml look up when
+# they pin runner.image.tag for a release. main is the release branch.
 
 permissions:
   contents: read
