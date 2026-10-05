@@ -1,6 +1,9 @@
 package kube
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestResolveKind(t *testing.T) {
 	cases := []struct {
@@ -47,8 +50,9 @@ func TestParseGetParams_KindResolvesToGVR(t *testing.T) {
 	want := GetParams{
 		Group: "apps", Version: "v1", ResourceType: "deployments",
 		Namespace: "nudgebee", Name: "services-server",
+		Namespaces: []string{"nudgebee"}, Names: []string{"services-server"},
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseGetParams kind path\n got:  %+v\n want: %+v", got, want)
 	}
 }

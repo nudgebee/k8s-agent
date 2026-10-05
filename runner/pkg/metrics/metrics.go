@@ -7,6 +7,7 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -116,3 +117,35 @@ func (r *Registry) OnAction(action, status string) {
 func (r *Registry) OnActionDuration(action string, seconds float64) {
 	r.ActionDuration.WithLabelValues(action).Observe(seconds)
 }
+
+// OnDiscoveryPost satisfies discovery.SinkMetrics. full_load separates the
+// periodic snapshot traffic from the per-event incremental traffic, which is
+// the split you need to tell "the agent is re-sending the world" from "the
+// cluster is actually churning".
+func (r *Registry) OnDiscoveryPost(typ string, fullLoad bool) {
+	r.DiscoveryPosts.WithLabelValues(typ, strconv.FormatBool(fullLoad)).Inc()
+}
+
+// OnDiscoveryError satisfies discovery.SinkMetrics.
+func (r *Registry) OnDiscoveryError(typ string) {
+	r.DiscoveryErrors.WithLabelValues(typ).Inc()
+}
+
+// OnAlertForwarded / OnAlertDropped record backend forward outcomes for
+// AlertManager webhooks and kubewatch-derived Findings.
+func (r *Registry) OnAlertForwarded() { r.AlertsForwarded.Inc() }
+func (r *Registry) OnAlertDropped()   { r.AlertsDropped.Inc() }
+
+// OnRelayConnected drives the relay_connected gauge from the WS session
+// lifecycle. Without it the gauge sits at its zero value forever, which reads
+// as "relay down" on a perfectly healthy agent.
+func (r *Registry) OnRelayConnected(connected bool) {
+	if connected {
+		r.RelayConnected.Set(1)
+		return
+	}
+	r.RelayConnected.Set(0)
+}
+
+// OnRelayReconnect counts redial attempts after a session ends.
+func (r *Registry) OnRelayReconnect() { r.RelayReconnects.Inc() }

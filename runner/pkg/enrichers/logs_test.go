@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -133,5 +134,57 @@ func TestLogsEnricher_NilClientErrors(t *testing.T) {
 	resp, _ := l.Handle(context.Background(), map[string]any{"name": "x", "namespace": "y"})
 	if resp.(map[string]any)["success"] != false {
 		t.Error("expected success=false when kube client unavailable")
+	}
+}
+
+// Timestamps is the difference between evidence that can be dated and evidence
+// that cannot: 58% of stored pod-log evidence carried no parseable time on any
+// line (measured 2026-09-23), so nothing downstream could say whether a card held
+// the crash or a startup banner from weeks earlier. since_time has been in the
+// action's documented contract since it was written and was never read.
+func TestPodLogOptions(t *testing.T) {
+	since := metav1.NewTime(time.Unix(1789884065, 0).UTC())
+
+	opts := podLogOptions("web", true, 500, &since)
+
+	if !opts.Timestamps {
+		t.Error("Timestamps = false; lines must carry the kubelet's RFC3339Nano prefix")
+	}
+	if opts.Container != "web" || !opts.Previous {
+		t.Errorf("container/previous = %q/%v; want web/true", opts.Container, opts.Previous)
+	}
+	if opts.TailLines == nil || *opts.TailLines != 500 {
+		t.Errorf("TailLines = %v; want 500", opts.TailLines)
+	}
+	if opts.SinceTime == nil || !opts.SinceTime.Equal(&since) {
+		t.Errorf("SinceTime = %v; want %v", opts.SinceTime, since)
+	}
+}
+
+// No since_time means the whole tail, not a window starting at the epoch.
+func TestPodLogOptions_NoSinceTime(t *testing.T) {
+	if opts := podLogOptions("web", false, 1000, nil); opts.SinceTime != nil {
+		t.Errorf("SinceTime = %v; want nil", opts.SinceTime)
+	}
+}
+
+func TestLogsEnricher_SinceTimeParam(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "shop"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "web"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	l := NewLogsEnricher(fake.NewClientset(pod), "acc-1")
+
+	// The fake clientset discards PodLogOptions, so this only proves the param is
+	// accepted and does not break the response shape; podLogOptions covers the rest.
+	resp, err := l.Handle(context.Background(), map[string]any{
+		"name": "frontend", "namespace": "shop", "since_time": 1789884065,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := resp.(map[string]any); r["success"] != true {
+		t.Fatalf("success = %v: %+v", r["success"], r)
 	}
 }

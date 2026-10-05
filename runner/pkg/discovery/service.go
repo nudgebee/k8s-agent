@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -389,8 +390,16 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 		converter: converter,
 	}
 	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { enqueue(queue, obj) },
-		UpdateFunc: func(_, obj any) { enqueue(queue, obj) },
+		AddFunc: func(obj any) { enqueue(queue, obj) },
+		UpdateFunc: func(oldObj, newObj any) {
+			// Every resync replays the whole cache as no-op updates. The
+			// periodic full snapshot already re-sends everything, so posting
+			// them as well only doubles what the collector has to drain.
+			if sameResourceVersion(oldObj, newObj) {
+				return
+			}
+			enqueue(queue, newObj)
+		},
 		DeleteFunc: func(obj any) {
 			// When tombstones are enabled, capture a deleted:true item NOW —
 			// the DeleteFunc still has the object; once the key is gone from the
@@ -410,6 +419,21 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 		},
 	})
 	s.handlers = append(s.handlers, h)
+}
+
+// sameResourceVersion reports whether an update carries no change: an informer
+// resync delivers the cached object as both old and new. Objects without a
+// ResourceVersion are treated as changed.
+func sameResourceVersion(oldObj, newObj any) bool {
+	o, err := meta.Accessor(oldObj)
+	if err != nil {
+		return false
+	}
+	n, err := meta.Accessor(newObj)
+	if err != nil {
+		return false
+	}
+	return o.GetResourceVersion() != "" && o.GetResourceVersion() == n.GetResourceVersion()
 }
 
 // unwrapDeleted returns the underlying object from a cache.DeletedFinalStateUnknown
@@ -599,8 +623,19 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 	flush := func(last bool) {
 		seq++
 		env := &Envelope{
-			Type:          typ,
-			Data:          append([]any(nil), chunk...),
+			Type: typ,
+			// Must stay non-nil even when chunk is empty: `append([]any(nil))`
+			// returns a nil slice, which marshals to `"data": null`, and the
+			// collector discards a null-data payload outright (it cannot tell
+			// "no resources" from "lost payload", and coercing null to [] on a
+			// last batch would deactivate every resource for the account). A
+			// discarded envelope is silent data loss when it is the is_last
+			// one: the collector never records the terminal sequence, so
+			// claim_reconcile never fires and the snapshot's deletion-reconcile
+			// is skipped entirely. Two ways to get an empty final chunk — a
+			// converted count that is an exact multiple of batchSize, and a
+			// resource type with no items at all.
+			Data:          append(make([]any, 0, len(chunk)), chunk...),
 			FullLoad:      true,
 			BatchID:       batchID,
 			BatchSequence: seq,
