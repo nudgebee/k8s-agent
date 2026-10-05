@@ -39,12 +39,18 @@ jobs:
           echo "nudgebee_app_image: $nudgebee_app_image"
           yq -i ".runner.image.tag=\"$nudgebee_app_image\"" values.yaml
 
-          # node-agent: newest semver tag from GHCR
+          # node-agent: newest release tag from GHCR. Anchored so a release
+          # candidate (0.1.9-rc.1) is never picked: it would be baked into every
+          # PR this workflow touches and ship to main on the next merge.
           nudgebee_node_image=$(gh api -H "Accept: application/vnd.github+json" \
             "/orgs/nudgebee/packages/container/node-agent/versions?per_page=20" \
-            --jq '[.[].metadata.container.tags[]] | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+"))) | .[0]')
+            --jq '[.[].metadata.container.tags[]] | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .[0]')
           echo "nudgebee_node_image: $nudgebee_node_image"
-          yq -i ".nodeAgent.image.tag=\"$nudgebee_node_image\"" values.yaml
+          # The last 20 versions can all be release candidates; keep the current
+          # tag then rather than writing "null".
+          if [[ -n "$nudgebee_node_image" && "$nudgebee_node_image" != "null" ]]; then
+            yq -i ".nodeAgent.image.tag=\"$nudgebee_node_image\"" values.yaml
+          fi
 
           # kubewatch: newest semver tag from GHCR
           nudgebee_kubewatch_image=$(gh api -H "Accept: application/vnd.github+json" \
