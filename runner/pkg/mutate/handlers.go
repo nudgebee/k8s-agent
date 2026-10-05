@@ -32,6 +32,7 @@ func Handlers(m *Mutator) map[string]dispatch.Handler {
 		hs["create_workload"] = wrap(m, handleCreateWorkload)
 		hs["replace_workload"] = wrap(m, handleReplaceWorkload)
 		hs["delete_workload"] = wrap(m, handleDeleteWorkload)
+		hs["revert_workload"] = wrap(m, handleRevertWorkload)
 		// replica_rightsizing scales Deployment/StatefulSet/Rollout via the
 		// dynamic client. Delivered through the agent_task poller (trusted),
 		// so — like rightsizing_resource — it is deliberately NOT a lightAction.
@@ -132,8 +133,15 @@ func getBool(m map[string]any, k string, fallback bool) bool {
 // Keeping both behind one action name avoids a coordinated rollout with the
 // api-server: today's callers send the legacy shape; future callers can opt
 // into the manifest shape without a new wire action.
+//
+// A legacy payload that also names the PrometheusRule (`name`, optional
+// `namespace` / `group`) edits that rule where it is defined — only its expr
+// and `for` — instead of writing into the canonical CR.
 func handleCreateOrReplacePromRule(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
 	if isLegacyAlertRulePayload(p) {
+		if loc, ok := alertRuleLocator(p); ok {
+			return m.PatchAlertRuleInCR(ctx, loc, parseLegacyAlertRuleParams(p))
+		}
 		return m.CreateOrReplaceAlertRule(ctx, parseLegacyAlertRuleParams(p))
 	}
 	rule, ok := p["rule"]
@@ -144,15 +152,39 @@ func handleCreateOrReplacePromRule(ctx context.Context, m *Mutator, p map[string
 	return m.CreateOrReplacePrometheusRule(ctx, rule)
 }
 
-// handleDeletePromRule accepts two payload shapes that mirror
-// handleCreateOrReplacePromRule: full manifest delete (by namespace+name)
-// or the legacy `alert`-only shape (drops a single rule from the canonical
-// CR).
+// handleDeletePromRule removes one rule; removing a whole PrometheusRule needs
+// an explicit `delete_cr: true`.
+//
+//   - `delete_cr: true` + namespace + name: deletes that PrometheusRule.
+//   - `alert` + `name` (+ namespace/group): removes that rule from that CR.
+//   - `alert` alone: removes it from the canonical CR (legacy shape).
+//
+// A request with no `alert` and no `delete_cr` used to delete the CR named by
+// namespace+name, so a caller that lost the rule name wiped every rule in it.
 func handleDeletePromRule(ctx context.Context, m *Mutator, p map[string]any) error {
-	if alert := str(p, "alert"); alert != "" {
-		return m.DeleteAlertRule(ctx, alert)
+	if getBool(p, "delete_cr", false) {
+		return m.DeletePrometheusRule(ctx, str(p, "namespace"), str(p, "name"))
 	}
-	return m.DeletePrometheusRule(ctx, str(p, "namespace"), str(p, "name"))
+	alert := str(p, "alert")
+	if alert == "" {
+		return errors.New("delete_alert_rule: alert is required (set delete_cr to delete a whole PrometheusRule)")
+	}
+	if loc, ok := alertRuleLocator(p); ok {
+		return m.DeleteAlertRuleInCR(ctx, loc)
+	}
+	return m.DeleteAlertRule(ctx, alert)
+}
+
+// alertRuleLocator reads the optional PrometheusRule locator of a legacy
+// alert-rule payload. ok is false when no CR name is given.
+func alertRuleLocator(p map[string]any) (AlertRuleLocator, bool) {
+	loc := AlertRuleLocator{
+		Namespace: str(p, "namespace"),
+		Name:      str(p, "name"),
+		Group:     str(p, "group"),
+		Alert:     str(p, "alert"),
+	}
+	return loc, loc.Name != ""
 }
 
 // isLegacyAlertRulePayload detects the flat Robusta shape: `alert` set and
@@ -208,6 +240,15 @@ func handleReplaceWorkload(ctx context.Context, m *Mutator, p map[string]any) (a
 	if kind == "" {
 		return nil, errors.New("replace_workload: kind required (Deployment|DaemonSet|StatefulSet|ReplicaSet|Rollout|NodePool|EC2NodeClass)")
 	}
+	// An event revert sends `revert_paths` alongside the legacy per-kind
+	// manifest: the manifest is there only for tenants still on the Python
+	// agent, which ignores unknown params. Whenever the paths are present they
+	// win — the manifest is a stale snake_case snapshot this agent must not
+	// replay (see revert.go). A malformed revert_paths is an error, never a
+	// silent fall-through to that snapshot.
+	if _, ok := p["revert_paths"]; ok {
+		return handleRevertWorkload(ctx, m, p)
+	}
 	name := str(p, "name")
 	namespace := str(p, "namespace")
 	body := pickReplaceBody(kind, p)
@@ -227,6 +268,23 @@ func handleReplaceWorkload(ctx context.Context, m *Mutator, p map[string]any) (a
 		"updated": updated,
 		"message": fmt.Sprintf("%s/%s updated", kind, loc),
 	}, nil
+}
+
+// handleRevertWorkload undoes a recorded configuration change by writing the
+// previous value back at each changed field path. Params: kind, name,
+// namespace, and revert_paths — a list of {path, old} taken from the diff
+// evidence's updated_values. See revert.go for why this is not
+// replace_workload fed the pre-change manifest.
+func handleRevertWorkload(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
+	kind := str(p, "kind")
+	if kind == "" {
+		return nil, errors.New("revert_workload: kind required (Deployment|DaemonSet|StatefulSet|ReplicaSet|Rollout|NodePool|EC2NodeClass)")
+	}
+	entries, err := parseRevertEntries(p["revert_paths"])
+	if err != nil {
+		return nil, err
+	}
+	return m.RevertWorkload(ctx, kind, str(p, "namespace"), str(p, "name"), entries)
 }
 
 // handleDeleteWorkload deletes a workload by kind/namespace/name. The delete UI

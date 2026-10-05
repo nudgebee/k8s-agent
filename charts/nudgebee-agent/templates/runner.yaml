@@ -67,16 +67,23 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "nudgebee-agent.fullname" . }}-runner-service-monitor
+  namespace: {{ .Release.Namespace }}
   labels:
-    # release label matches kube-prometheus-stack's default ServiceMonitor selector
-    release: {{ .Release.Name }}
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    component: runner
+    {{- include "nudgebee-agent.prometheusSelectorLabels" . | nindent 4 }}
 spec:
   endpoints:
     - path: /metrics
       port: http
   selector:
     matchLabels:
-      app: {{ include "nudgebee-agent.fullname" . }}-runner
+      # Must match the runner Service's labels above, which come from
+      # nudgebee-agent.labels + component. This previously matched on `app:`, a label
+      # the Service has never carried, so the ServiceMonitor selected nothing and the
+      # runner's own /metrics was never scraped on any cluster.
+      {{- include "nudgebee-agent.selectorLabels" . | nindent 6 }}
+      component: runner
   targetLabels:
     - target
 {{ end }}
@@ -89,7 +96,17 @@ metadata:
 type: Opaque
 stringData:
   NUDGEBEE_ENDPOINT: {{ .Values.runner.nudgebee.endpoint }}
+  {{- $authFrom := .Values.runner.nudgebee.authSecretKeyFrom | default (dict) }}
+  {{- if $authFrom }}
+    {{- if not (and $authFrom.name $authFrom.key) }}
+      {{- fail "\n\n[ERROR] runner.nudgebee.authSecretKeyFrom needs both `name` and `key`.\n\n  runner:\n    nudgebee:\n      authSecretKeyFrom:\n        name: <secret-name>\n        key: <key-in-that-secret>\n" }}
+    {{- end }}
+    {{- if .Values.runner.nudgebee.auth_secret_key }}
+      {{- fail "\n\n[ERROR] Set either runner.nudgebee.auth_secret_key or runner.nudgebee.authSecretKeyFrom, not both.\nTwo sources for one credential means the effective value depends on template ordering. Pick one.\n" }}
+    {{- end }}
+  {{- else }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
+  {{- end }}
   # Tie cost polling/discovery to the OpenCost subchart toggle. When OpenCost is
   # disabled the runner must NOT autodiscover a neighbouring namespace's OpenCost,
   # so the server side detects cost is off and takes over centrally.
@@ -167,6 +184,9 @@ stringData:
   {{- end }}
   {{- if .Values.runner.es.apiKey }}
   ELASTICSEARCH_APIKEY: {{ .Values.runner.es.apiKey }}
+  {{- end }}
+  {{- if .Values.runner.es.headers }}
+  ELASTICSEARCH_HEADERS: {{ .Values.runner.es.headers | quote }}
   {{- end }}
   # Always emit the explicit opt-in so the agent never falls back to a default:
   # ES is the logs provider only when es.enabled is true, matching the prod

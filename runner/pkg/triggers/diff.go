@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"sigs.k8s.io/yaml"
 
@@ -48,6 +49,57 @@ func DefaultSpecDiffOptions() SpecDiffOptions {
 		},
 	}
 }
+
+// ConfigMapDiffOptions returns the diff filter for ConfigMap change
+// tracking. A ConfigMap has no `spec` — its payload lives in `data` /
+// `binaryData` — so the babysitter defaults never produce a diff for one.
+//
+// Nothing under `metadata` is monitored, and that is the whole filter:
+// it drops resourceVersion/managedFields churn AND
+// `kubectl.kubernetes.io/last-applied-configuration`, whose value is a
+// full copy of the object. Monitoring that annotation would report every
+// `kubectl apply` twice — once as the real data change and once as the
+// annotation carrying the same change.
+func ConfigMapDiffOptions() SpecDiffOptions {
+	return SpecDiffOptions{
+		FieldsToMonitor: []string{"data", "binaryData"},
+	}
+}
+
+// IngressDiffOptions returns the diff filter for Ingress changes.
+//
+// An Ingress carries its routing rules in `spec`, but nearly everything
+// about how traffic is actually handled — body-size ceilings, read and
+// send timeouts, buffering, SSL redirect, snippets injected into the
+// nginx config — lives in `metadata.annotations`. Tightening
+// proxy-body-size until uploads start returning 413 leaves the Ingress
+// spec byte-identical, so a spec-only filter reports nothing for the
+// change most likely to have broken traffic.
+//
+// last-applied-configuration is excluded because kubectl stores a full
+// copy of the object there: monitoring it would report every
+// `kubectl apply` twice, once as the real change and once as the
+// annotation carrying the same change.
+func IngressDiffOptions() SpecDiffOptions {
+	return SpecDiffOptions{
+		FieldsToMonitor: []string{"spec", "metadata.annotations"},
+		FieldsToOmit: []string{
+			"status",
+			"metadata.generation",
+			"metadata.resourceVersion",
+			"metadata.managedFields",
+			"metadata.annotations." + lastAppliedAnnotation,
+		},
+	}
+}
+
+// maxConfigMapValueBytes caps a single ConfigMap value in the rendered
+// evidence. A ConfigMap holds up to 1 MiB and routinely carries whole
+// files (an app script, a Prometheus config); the diff block renders the
+// old AND new object, so an uncapped change to one of those ships ~2 MiB
+// of evidence per event. The changed key is what carries the diagnostic
+// signal — the full file body does not.
+const maxConfigMapValueBytes = 2048
 
 // ComputeSpecDiff walks obj + oldObj recursively and returns the filtered
 // path-level diffs. Returns nil when oldObj is nil (no diff possible) or
@@ -234,6 +286,137 @@ func BuildKubernetesDiffBlock(obj, oldObj map[string]any, kind string, diffs []D
 		},
 		"additional_info": nil,
 	}
+}
+
+// BuildConfigMapDiffBlock is BuildKubernetesDiffBlock for ConfigMaps:
+// same block shape, but every `data` / `binaryData` value — in the
+// rendered YAML and in the per-path old/new entries — is capped at
+// maxConfigMapValueBytes. Also strips
+// `kubectl.kubernetes.io/last-applied-configuration`, which duplicates
+// the entire object into the rendered YAML for anything applied with
+// `kubectl apply`.
+func BuildConfigMapDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
+	return BuildKubernetesDiffBlock(
+		truncateConfigMapValues(obj),
+		truncateConfigMapValues(oldObj),
+		"ConfigMap",
+		truncateDiffValues(diffs),
+	)
+}
+
+// BuildIngressDiffBlock is BuildKubernetesDiffBlock for Ingresses: same
+// block, with kubectl's last-applied annotation stripped from the
+// rendered YAML. Ingress annotations are monitored, so without this the
+// annotation carrying a copy of the whole object is rendered alongside
+// the change it duplicates.
+func BuildIngressDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
+	return BuildKubernetesDiffBlock(
+		withoutLastAppliedAnnotation(obj),
+		withoutLastAppliedAnnotation(oldObj),
+		"Ingress",
+		diffs,
+	)
+}
+
+// lastAppliedAnnotation is kubectl's copy of the whole object, kept on
+// the object itself. Rendering it inside a diff of that same object
+// doubles the payload and shows the change twice.
+const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+
+// truncateConfigMapValues returns a shallow-copied obj whose data /
+// binaryData values are capped and whose last-applied annotation is
+// dropped. The input is left untouched — the same map is handed to every
+// matcher the engine evaluates.
+func truncateConfigMapValues(obj map[string]any) map[string]any {
+	out := withoutLastAppliedAnnotation(obj)
+	if out == nil {
+		return nil
+	}
+	for _, field := range []string{"data", "binaryData"} {
+		src, _ := out[field].(map[string]any)
+		if src == nil {
+			continue
+		}
+		capped := make(map[string]any, len(src))
+		for k, v := range src {
+			capped[k] = truncateValue(v)
+		}
+		out[field] = capped
+	}
+	return out
+}
+
+// withoutLastAppliedAnnotation shallow-copies obj with kubectl's
+// last-applied annotation removed from metadata.annotations.
+//
+// The generic omit list can't express this: stripOmittedFields splits an
+// omit path on ".", and annotation keys are themselves dotted
+// ("kubectl.kubernetes.io/..."), so the path never resolves. The input is
+// left untouched — the engine hands the same map to every matcher.
+func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
+	if obj == nil {
+		return nil
+	}
+	out := make(map[string]any, len(obj))
+	for k, v := range obj {
+		out[k] = v
+	}
+	meta, _ := out["metadata"].(map[string]any)
+	if meta == nil {
+		return out
+	}
+	ann, _ := meta["annotations"].(map[string]any)
+	if _, present := ann[lastAppliedAnnotation]; !present {
+		return out
+	}
+	metaCopy := make(map[string]any, len(meta))
+	for k, v := range meta {
+		metaCopy[k] = v
+	}
+	annCopy := make(map[string]any, len(ann))
+	for k, v := range ann {
+		if k == lastAppliedAnnotation {
+			continue
+		}
+		annCopy[k] = v
+	}
+	metaCopy["annotations"] = annCopy
+	out["metadata"] = metaCopy
+	return out
+}
+
+// truncateDiffValues caps the before/after values carried in
+// updated_values. Paths are never truncated — the changed key is the
+// part that has to survive intact.
+func truncateDiffValues(diffs []DiffEntry) []DiffEntry {
+	out := make([]DiffEntry, 0, len(diffs))
+	for _, d := range diffs {
+		d.Before = truncateValue(d.Before)
+		d.After = truncateValue(d.After)
+		out = append(out, d)
+	}
+	return out
+}
+
+// truncateValue caps an over-long string value, annotating what was cut
+// so a reader (or the model) doesn't mistake the truncation for the
+// value. Non-string values pass through: only ConfigMap payloads reach
+// this, and those are always strings.
+//
+// The cut is walked back to a rune boundary. Slicing bytes blindly can
+// split a multi-byte character, and ConfigMaps routinely hold UTF-8 —
+// the half rune then travels through JSON and YAML encoding into the UI.
+func truncateValue(v any) any {
+	s, ok := v.(string)
+	if !ok || len(s) <= maxConfigMapValueBytes {
+		return v
+	}
+	limit := maxConfigMapValueBytes
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return fmt.Sprintf("%s\n... [truncated: %d of %d bytes shown]",
+		s[:limit], limit, len(s))
 }
 
 // objectToYAML returns YAML for a K8s object: omitted fields stripped,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -409,6 +410,23 @@ func TestProbe_TracesConnectionError(t *testing.T) {
 	}
 }
 
+// hasMaterializedColumn selects which of two SQL shapes the backend uses for
+// every trace query, and the backend reads this field back verbatim rather than
+// recomputing it. It was hardcoded false for the whole of the Go rewrite, so
+// installs that did have the columns were forced onto the recompute shape —
+// which on a pre-0.156 table also references a column that isn't there and
+// fails outright. Pin that it reflects the caller's probe in both directions.
+func TestProbe_HasMaterializedColumnReflectsSchema(t *testing.T) {
+	s := &Service{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, want := range []bool{true, false} {
+		ds := Datasources{ClickHouseStatus: true, ClickHouseURL: "ch.svc", HasMaterializedColumns: want}
+		got := s.probe(context.Background(), ds).TraceProviderConfig["hasMaterializedColumn"]
+		if got != want {
+			t.Errorf("hasMaterializedColumn = %v; want %v", got, want)
+		}
+	}
+}
+
 // tracesConnectionError must survive JSON marshalling as an explicit "" rather
 // than vanishing — see the jsonb-merge note on the field.
 func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
@@ -418,5 +436,99 @@ func TestActivityStats_TracesConnectionErrorAlwaysEmitted(t *testing.T) {
 	}
 	if !strings.Contains(string(buf), `"tracesConnectionError":""`) {
 		t.Errorf("marshalled ActivityStats omits an empty tracesConnectionError, so the\ncollector's jsonb merge would keep a stale reason forever: %s", buf)
+	}
+}
+
+// A healthy probe must not consume the response body as data — it drains it so
+// the transport can reuse the keep-alive connection. httpHealth runs every
+// telemetry cycle against every configured datasource, so a probe that stranded
+// an undrained body would open a fresh TCP connection each time.
+func TestHTTPHealth_HealthyProbeReusesConnection(t *testing.T) {
+	var conns int32
+	// Unstarted, because ConnState has to be installed before the accept loop
+	// is running: NewServer starts serving immediately and the server goroutine
+	// reads Config.ConnState, so assigning it afterwards is a data race.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Larger than the 512-byte snippet limit: an undrained body of this
+		// size is what breaks connection reuse.
+		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			atomic.AddInt32(&conns, 1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	c := srv.Client()
+	for i := 0; i < 3; i++ {
+		if ok, reason := httpHealth(context.Background(), c, srv.URL); !ok || reason != "" {
+			t.Fatalf("probe %d: ok=%v reason=%q; want true, empty", i, ok, reason)
+		}
+	}
+	if got := atomic.LoadInt32(&conns); got != 1 {
+		t.Errorf("opened %d connections across 3 probes; want 1 (body must be drained on success)", got)
+	}
+}
+
+// A failing probe must explain itself in one compact line — this is the string
+// the UI renders next to the integration's "Disconnected" pill.
+func TestHTTPHealth_FailureReportsCompactReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		// Multi-line body: the reason must collapse to a single line.
+		_, _ = w.Write([]byte("{\n  \"error\": \"Token is expired\"\n}"))
+	}))
+	defer srv.Close()
+
+	ok, reason := httpHealth(context.Background(), srv.Client(), srv.URL)
+	if ok {
+		t.Fatal("ok = true; want false for a 401")
+	}
+	if !strings.Contains(reason, "HTTP 401") || !strings.Contains(reason, "Token is expired") {
+		t.Errorf("reason = %q; want it to carry the status and the backend's message", reason)
+	}
+	if strings.ContainsAny(reason, "\n\r") {
+		t.Errorf("reason = %q; want a single line", reason)
+	}
+}
+
+// A verbose error body must not blow up the telemetry payload.
+func TestHealthErr_TruncatesLongBodies(t *testing.T) {
+	got := healthErr(500, []byte(strings.Repeat("a", 1000)))
+	if len(got) > 240 {
+		t.Errorf("reason is %d chars; want it truncated", len(got))
+	}
+	if !strings.HasPrefix(got, "HTTP 500: ") {
+		t.Errorf("reason = %q; want it to lead with the status", got)
+	}
+	// An empty body still names the status rather than going silent.
+	if got := healthErr(503, nil); got != "HTTP 503" {
+		t.Errorf("healthErr(503, nil) = %q; want %q", got, "HTTP 503")
+	}
+}
+
+// api-server reads these flags from connection_status before offering a
+// Prometheus rule edit. They are merged with jsonb `||`, so a false must be
+// sent explicitly or a stale true would survive an RBAC downgrade.
+func TestProbe_AlertRuleWriteCapabilities(t *testing.T) {
+	s := &Service{}
+	for _, tc := range []struct {
+		ds   Datasources
+		want string
+	}{
+		{Datasources{}, `"alertRuleLocatorWrites":false`},
+		{Datasources{}, `"prometheusRuleClusterWrite":false`},
+		{Datasources{AlertRuleLocatorWrites: true, PrometheusRuleClusterWrite: true}, `"alertRuleLocatorWrites":true`},
+		{Datasources{AlertRuleLocatorWrites: true, PrometheusRuleClusterWrite: true}, `"prometheusRuleClusterWrite":true`},
+	} {
+		body, err := json.Marshal(s.probe(context.Background(), tc.ds))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), tc.want) {
+			t.Errorf("activity stats %s missing %s", body, tc.want)
+		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,6 +49,17 @@ const (
 	LangRuby          ProgrammingLanguage = "ruby"
 	LangUnknown       ProgrammingLanguage = "unknown"
 )
+
+// langDetectTimeout bounds the container_application_type lookup. It runs
+// before the debugger pod is created and inside the dispatcher's 180s
+// budget, so it has to stay small enough to be noise.
+const langDetectTimeout = 10 * time.Second
+
+// profileOverhead is what a run costs on top of the profile window itself:
+// scheduling the debugger pod, pulling its image, the profiler's staggered
+// fan-out across the target's PIDs, and tarring the result back out. It
+// bounds the handler and rejects durations that cannot fit its budget.
+const profileOverhead = 3 * time.Minute
 
 // ProfilingTool — `ProfilingTool` enum.
 type ProfilingTool string
@@ -131,6 +143,17 @@ type ProfilerHandler struct {
 	// pair. Uses PROFILER_IMAGE env. Pulled out as a func so tests can
 	// substitute without reaching into env.
 	image func(lang ProgrammingLanguage, tool ProfilingTool) string
+	// prom answers the container_application_type query used to resolve
+	// the target's language when the caller didn't pass one. Nil when the
+	// agent has no Prometheus configured — detection is then skipped.
+	prom promQuerier
+}
+
+// promQuerier is the slice of the Prometheus client this package needs.
+// Declared here (consumer side) so podexec doesn't import the client
+// package just for a type.
+type promQuerier interface {
+	Query(ctx context.Context, query, atTime, timeout string) (json.RawMessage, error)
 }
 
 // NewProfilerHandler wires the dispatch path. cs / restCfg can both be
@@ -142,6 +165,83 @@ func NewProfilerHandler(cs kubernetes.Interface, restCfg *rest.Config) *Profiler
 		restCfg: restCfg,
 		image:   defaultProfilerImage,
 	}
+}
+
+// SetLanguageDetector enables language auto-detection for requests that
+// carry no `lang`. Same optional-capability pattern as mutate.SetExec /
+// SetDynamic: without it the handler still works, it just requires the
+// caller to name the language.
+func (h *ProfilerHandler) SetLanguageDetector(p promQuerier) { h.prom = p }
+
+// applicationTypeToLang maps the node-agent's detected application_type
+// label onto the languages we have a profiler for. Types with no entry
+// (nginx, redis, postgres, envoy, …) are native binaries with no
+// language-specific tool, so they stay unresolved rather than being
+// forced into a wrong one.
+var applicationTypeToLang = map[string]ProgrammingLanguage{
+	"golang": LangGo,
+	"java":   LangJava,
+	"python": LangPython,
+	"nodejs": LangNode,
+	"ruby":   LangRuby,
+}
+
+// promMatcherValue prepares a string for use inside a PromQL double-quoted
+// label-matcher value. QuoteMeta escapes regex metacharacters with a
+// backslash, but PromQL string literals process escapes themselves and
+// reject unknown ones — a raw `\.` makes the whole query a parse error, so
+// the backslash has to survive as `\\`.
+func promMatcherValue(s string) string {
+	return strings.ReplaceAll(regexp.QuoteMeta(s), `\`, `\\`)
+}
+
+// detectLang resolves the target pod's language from the node-agent's
+// container_application_type metric — the same signal the pod-details UI
+// uses to preselect the language dropdown. It returns LangUnknown plus the
+// reason, which the caller puts in its error so "no Prometheus configured"
+// and "this pod runs nginx" don't read the same.
+func (h *ProfilerHandler) detectLang(ctx context.Context, namespace, pod string) (ProgrammingLanguage, string) {
+	if h.prom == nil {
+		return LangUnknown, "the agent has no Prometheus configured, so the language could not be looked up"
+	}
+	// container_id is "/k8s/<namespace>/<pod>/<container>"; escape so a dot
+	// in a pod name can't widen the match.
+	query := fmt.Sprintf(`container_application_type{container_id=~"/k8s/%s/%s/.*"}`,
+		promMatcherValue(namespace), promMatcherValue(pod))
+
+	qctx, cancel := context.WithTimeout(ctx, langDetectTimeout)
+	defer cancel()
+	raw, err := h.prom.Query(qctx, query, "", "10s")
+	if err != nil {
+		return LangUnknown, fmt.Sprintf("the container_application_type lookup failed: %v", err)
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return LangUnknown, fmt.Sprintf("the container_application_type response could not be read: %v", err)
+	}
+	if resp.Status != "success" {
+		return LangUnknown, "Prometheus rejected the container_application_type query"
+	}
+	// A pod can report several containers (app + sidecars). Take the first
+	// one that maps to a profilable language — a sidecar the node-agent
+	// labels "envoy" shouldn't shadow the java app next to it.
+	for _, s := range resp.Data.Result {
+		if lang, ok := applicationTypeToLang[strings.ToLower(s.Metric["application_type"])]; ok {
+			return lang, ""
+		}
+	}
+	if len(resp.Data.Result) == 0 {
+		return LangUnknown, "no container_application_type metric reported for it"
+	}
+	return LangUnknown, "it reports no language we have a profiler for"
 }
 
 // defaultProfilerImage picks the image variant by tool first, then
@@ -184,6 +284,24 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 	if req.Seconds <= 0 {
 		req.Seconds = 60
 	}
+	// A profile longer than the budget this action has left can only ever end
+	// in "context deadline exceeded" once the whole budget has burned — say
+	// so now instead.
+	need := time.Duration(req.Seconds)*time.Second + profileOverhead
+	if deadline, ok := ctx.Deadline(); ok {
+		if budget := time.Until(deadline); budget < need {
+			return nil, fmt.Errorf(
+				"pod_profiler: a %ds profile does not fit the %ds this action has left "+
+					"(the debugger pod still has to start and the file be copied back) — ask for a shorter duration",
+				req.Seconds, int(budget.Seconds()))
+		}
+	}
+	// pod_profiler runs as a long action so a 600s profile isn't cut off at
+	// the 180s default, but that ceiling is shared with the rightsize_pvc
+	// data migration and measured in tens of minutes. Hold ourselves to what
+	// this profile can legitimately need.
+	ctx, cancel := context.WithTimeout(ctx, need)
+	defer cancel()
 
 	pod, err := h.cs.CoreV1().Pods(req.Namespace).Get(ctx, req.Name, metav1.GetOptions{})
 	if err != nil {
@@ -203,7 +321,19 @@ func (h *ProfilerHandler) Profile(ctx context.Context, req ProfileRequest) (*Fil
 
 	lang := req.Lang
 	if lang == "" || lang == LangUnknown {
-		lang = LangGo // default when prometheus auto-detect misses
+		detected, why := h.detectLang(ctx, req.Namespace, req.Name)
+		if detected == "" || detected == LangUnknown {
+			// Do NOT fall back to Go. The Go path scrapes
+			// http://127.0.0.1:<port>/debug/pprof inside the target, so on
+			// any non-Go process it fails as a wget 404/connection error
+			// that reads like a network fault instead of "we guessed the
+			// language wrong". Callers with no language (the pod_profiler
+			// playbook action) are better served by being told to name one.
+			return nil, fmt.Errorf(
+				"pod_profiler: could not determine the application language for %s/%s — %s; pass lang explicitly",
+				req.Namespace, req.Name, why)
+		}
+		lang = detected
 	}
 	tool := req.ProfileTool
 	output := req.OutputType

@@ -61,6 +61,46 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+GOMEMLIMIT (in bytes) for the runner, derived from its container memory limit.
+
+The runner is a Go process and the Go runtime is cgroup-unaware: without
+GOMEMLIMIT the GC paces off GOGC alone, so a transient allocation burst can run
+the heap past the container limit and get the pod OOM-killed while the live heap
+is still small. GOMEMLIMIT is a soft limit — as the heap approaches it the GC
+runs progressively harder, trading CPU to stay under the cgroup ceiling.
+
+Derived rather than hardcoded so it cannot drift from resources.limits.memory:
+raising the limit raises the headroom automatically. Emits nothing when no
+memory limit is set (unbounded cgroup — a soft limit would be arbitrary).
+
+Ratio is runner.goMemLimitRatio (default 0.8); the remaining 20% covers non-heap
+RSS (goroutine stacks, runtime metadata, mmap'd binary). Set runner.goMemLimit to
+override with an explicit value and skip the derivation entirely.
+*/}}
+{{- define "nudgebee-agent.goMemLimit" -}}
+{{- if .Values.runner.goMemLimit -}}
+{{- .Values.runner.goMemLimit -}}
+{{- else -}}
+{{- $lim := (dig "resources" "limits" "memory" "" .Values.runner) | toString -}}
+{{- $num := regexFind "^[0-9.]+" $lim -}}
+{{- if $num -}}
+{{- $mult := 1.0 -}}
+{{- if hasSuffix "Ki" $lim -}}{{- $mult = 1024.0 -}}
+{{- else if hasSuffix "Mi" $lim -}}{{- $mult = 1048576.0 -}}
+{{- else if hasSuffix "Gi" $lim -}}{{- $mult = 1073741824.0 -}}
+{{- else if hasSuffix "Ti" $lim -}}{{- $mult = 1099511627776.0 -}}
+{{- else if hasSuffix "k" $lim -}}{{- $mult = 1000.0 -}}
+{{- else if hasSuffix "M" $lim -}}{{- $mult = 1000000.0 -}}
+{{- else if hasSuffix "G" $lim -}}{{- $mult = 1000000000.0 -}}
+{{- else if hasSuffix "T" $lim -}}{{- $mult = 1000000000000.0 -}}
+{{- end -}}
+{{- $ratio := .Values.runner.goMemLimitRatio | default 0.8 -}}
+{{- printf "%d" (int64 (mulf (float64 $num) $mult $ratio)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
@@ -73,12 +113,27 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     privileged: false
     readOnlyRootFilesystem: false
   env:
+    {{- with .Values.runner.nudgebee.authSecretKeyFrom }}
+    # Sourced from an externally-provisioned Secret rather than the runner
+    # Secret. An explicit `env` entry outranks the same name arriving through
+    # `envFrom`, and runner.yaml omits it from the runner Secret in this case,
+    # so there is exactly one source either way.
+    - name: NUDGEBEE_AUTH_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{ .name }}
+          key: {{ .key }}
+    {{- end }}
     - name: INSTALLATION_NAMESPACE
       valueFrom:
         fieldRef:
           fieldPath: metadata.namespace
     - name: RUNNER_VERSION
       value: {{ .Chart.AppVersion }}
+    {{- with include "nudgebee-agent.goMemLimit" . }}
+    - name: GOMEMLIMIT
+      value: {{ . | quote }}
+    {{- end }}
     - name: WEBSOCKET_RELAY_ADDRESS
       value: {{ .Values.runner.relay_address }}
     - name: SCANNERS_ENABLED
@@ -91,10 +146,15 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Release.Namespace }}
     - name: SCANNER_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
-    {{- if .Values.runner.scannerAutoCopyPullSecrets }}
+    # SCANNER_AUTO_COPY_PULL_SECRETS lets an image scan pull a private workload
+    # image by copying that workload's imagePullSecrets into this namespace for
+    # the life of the scan Job. Default on — the node-local image the scan reuses
+    # is often gone by scan time, and an unauthenticated re-pull leaves every
+    # private image unscannable. Forced off under runner.readOnly, which has no
+    # Secrets access at all. The `eq ... false` pattern is intentional: `default
+    # true` would treat an explicit false as unset and re-enable the copy.
     - name: SCANNER_AUTO_COPY_PULL_SECRETS
-      value: "true"
-    {{- end }}
+      value: {{ if or .Values.runner.readOnly (eq .Values.runner.scannerAutoCopyPullSecrets false) }}"false"{{ else }}"true"{{ end }}
     {{- with .Values.runner.scaling }}
     {{- if hasKey . "snapshotBatching" }}
     - name: DISCOVERY_SNAPSHOT_BATCHING
@@ -124,6 +184,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
+    {{- end }}
+    {{- if .Values.runner.triggerRateLimits }}
+    - name: TRIGGER_RATE_LIMITS
+      value: {{ .Values.runner.triggerRateLimits | quote }}
     {{- end }}
     # MUTATE_ENABLED gates the runner's mutate subsystem (delete_pod,
     # cordon, rollout_restart, PrometheusRule CRUD, AlertManager silences,
@@ -164,11 +228,18 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: RELAY_SIGNING_PUBLIC_KEY
       value: {{ .Values.runner.nudgebee.relay_signing_public_key | quote }}
     {{- end }}
-    {{- if or (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") .Values.runner.clickhouse_enabled }}
-    {{- $clickhouseSecret := .Values.runner.clickhouse_secret }}
-    {{- if not $clickhouseSecret }}
-      {{- $clickhouseSecret = include "nudgebee-agent.clickhouse.servicename" . }}
-    {{- end }}
+    {{- /*
+    ClickHouse wiring for the runner. The in-chart ClickHouse subchart is
+    conditioned on `opentelemetry-collector.enabled`, so with the collector off
+    neither the `<release>-clickhouse` Service nor its Secret exists. Point the
+    runner at either of them anyway and kubelet cannot resolve the secretKeyRef:
+    the pod never starts and sits in phase Pending with CreateContainerConfigError.
+    So the in-chart defaults are gated on the collector being enabled, and only
+    the operator-supplied sources (clickhouse_password / clickhouse_secret /
+    a CLICKHOUSE_HOST in additional_env_vars) survive with it off.
+    */}}
+    {{- $otelEnabled := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" }}
+    {{- if or $otelEnabled .Values.runner.clickhouse_enabled }}
     {{- $envVarNames := list }}
     {{- if and .Values.runner.additional_env_vars (kindIs "slice" .Values.runner.additional_env_vars) }}
       {{- range .Values.runner.additional_env_vars }}
@@ -177,15 +248,36 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
         {{- end }}
       {{- end }}
     {{- end }}
-    {{- if not (has "CLICKHOUSE_HOST" $envVarNames) }}
+    {{- /* Only default CLICKHOUSE_HOST to the in-chart Service when it is installed. */}}
+    {{- if and $otelEnabled (not (has "CLICKHOUSE_HOST" $envVarNames)) }}
     - name: CLICKHOUSE_HOST
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
     {{- end }}
+    {{- /*
+    Password source, in precedence order: runner.clickhouse_password (lands in
+    the runner Secret), runner.clickhouse_secret (operator-provisioned), then the
+    subchart Secret — the last only when the subchart is actually installed.
+    No source at all means no env var rather than a reference to a missing Secret.
+    */}}
+    {{- if .Values.runner.clickhouse_password }}
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: {{ if .Values.runner.clickhouse_password }}{{ include "nudgebee-agent.fullname" . }}-runner-secret{{ else }}{{ $clickhouseSecret }}{{ end }}
-          key: {{ if .Values.runner.clickhouse_password }}CLICKHOUSE_PASSWORD{{ else }}admin-password{{ end }}
+          name: {{ include "nudgebee-agent.fullname" . }}-runner-secret
+          key: CLICKHOUSE_PASSWORD
+    {{- else if .Values.runner.clickhouse_secret }}
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ .Values.runner.clickhouse_secret }}
+          key: admin-password
+    {{- else if $otelEnabled }}
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
+          key: admin-password
+    {{- end }}
     {{- end }}
     {{- if kindIs "string" .Values.runner.additional_env_vars }}
     {{- fail "The `additional_env_vars` string value is deprecated. Change the `additional_env_vars` value to an array" -}}
@@ -313,6 +405,35 @@ Selector labels
 {{- define "nudgebee-agent.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "nudgebee-agent.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Labels a PrometheusRule / ServiceMonitor / PodMonitor must carry before the cluster's
+Prometheus will select it.
+
+prometheus-operator only evaluates an object whose labels match the Prometheus CR's
+ruleSelector / serviceMonitorSelector / podMonitorSelector. kube-prometheus-stack defaults
+those to `release: <its own Helm release name>`, which is NOT this chart's release name --
+the two are separate Helm releases in every install we ship. An object without the matching
+labels is accepted by the apiserver and reported healthy; it just never loads.
+
+Empty by default, so this changes nothing until an operator opts in. installation.sh reads
+the labels off the Prometheus CR and passes them automatically; set them by hand for a
+Prometheus this chart did not install:
+
+  prometheusStack:
+    selectorLabels:
+      release: kube-prometheus-stack
+
+See runner/pkg/mutate/promruleselector.go, which does the same discovery at runtime for
+alert rules created from the UI.
+*/}}
+{{- define "nudgebee-agent.prometheusSelectorLabels" -}}
+{{- with .Values.prometheusStack }}
+{{- with .selectorLabels }}
+{{- toYaml . }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/*

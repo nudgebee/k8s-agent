@@ -146,6 +146,10 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 		rule["for"] = p.Duration
 	}
 
+	// Resolve once, outside the retry loop: the selector can't change between
+	// conflict retries, and each lookup is an extra apiserver call.
+	selectorLabels := m.ruleSelectorLabels(ctx)
+
 	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(m.Namespace)
 	// Shared CR + concurrent UI sessions → 409 Conflict whenever two callers
 	// land between Get and Update. RetryOnConflict re-reads + re-applies the
@@ -156,7 +160,7 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing, gerr := ri.Get(ctx, LegacyAlertRuleCRDName, metav1.GetOptions{})
 		if apierrors.IsNotFound(gerr) {
-			u := newLegacyAlertRuleCR(m.Namespace, []any{rule})
+			u := newLegacyAlertRuleCR(m.Namespace, []any{rule}, selectorLabels)
 			created, cerr := ri.Create(ctx, u, metav1.CreateOptions{})
 			if cerr != nil {
 				if apierrors.IsAlreadyExists(cerr) {
@@ -191,6 +195,11 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 		if serr := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); serr != nil {
 			return serr
 		}
+		// Heal a CR created before selector labels were stamped (or after the
+		// Prometheus release was renamed): without this, every rule written
+		// into an already-mislabelled CR stays invisible to prometheus-operator
+		// forever, since labels were only ever set on create.
+		applySelectorLabels(existing, selectorLabels)
 
 		updated, uerr := ri.Update(ctx, existing, metav1.UpdateOptions{})
 		if uerr != nil {
@@ -284,20 +293,49 @@ func replaceLegacyRuleInPlace(groups []any, alert string, rule map[string]any) b
 	return false
 }
 
+// applySelectorLabels adds any missing selector labels to an existing CR.
+// Existing values are left alone: an operator who deliberately retargeted the
+// CR keeps their edit.
+func applySelectorLabels(u *unstructured.Unstructured, selectorLabels map[string]string) {
+	if len(selectorLabels) == 0 {
+		return
+	}
+	labels := u.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	changed := false
+	for k, v := range selectorLabels {
+		if _, ok := labels[k]; !ok {
+			labels[k] = v
+			changed = true
+		}
+	}
+	if changed {
+		u.SetLabels(labels)
+	}
+}
+
 // newLegacyAlertRuleCR builds a fresh canonical PrometheusRule CR with the
 // Robusta-compat labels so a parallel legacy runner can still find it via
-// the same label selector.
-func newLegacyAlertRuleCR(namespace string, rules []any) *unstructured.Unstructured {
+// the same label selector, plus selectorLabels — the Prometheus CR's
+// ruleSelector.matchLabels, without which prometheus-operator never loads
+// the rule (see ruleSelectorLabels).
+func newLegacyAlertRuleCR(namespace string, rules []any, selectorLabels map[string]string) *unstructured.Unstructured {
+	labels := map[string]any{
+		LegacyAlertRuleLabelKey: LegacyAlertRuleLabelValue,
+		"role":                  "alert-rules",
+	}
+	for k, v := range selectorLabels {
+		labels[k] = v
+	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "monitoring.coreos.com/v1",
 		"kind":       "PrometheusRule",
 		"metadata": map[string]any{
 			"name":      LegacyAlertRuleCRDName,
 			"namespace": namespace,
-			"labels": map[string]any{
-				LegacyAlertRuleLabelKey: LegacyAlertRuleLabelValue,
-				"role":                  "alert-rules",
-			},
+			"labels":    labels,
 		},
 		"spec": map[string]any{
 			"groups": []any{
@@ -308,4 +346,169 @@ func newLegacyAlertRuleCR(namespace string, rules []any) *unstructured.Unstructu
 			},
 		},
 	}}
+}
+
+// AlertRuleLocator names one rule inside one PrometheusRule: api-server sends it
+// for rules it synced from any CR (not only the canonical one), so a change lands
+// where the rule is defined instead of creating a copy in the canonical CR.
+type AlertRuleLocator struct {
+	Namespace string // CR namespace; the install namespace when empty
+	Name      string // CR name
+	Group     string // rule group; any group when empty
+	Alert     string // rule name
+}
+
+// ErrAlertRuleNotFound is returned when the locator matches no rule.
+var ErrAlertRuleNotFound = errors.New("mutate: alert rule not found in PrometheusRule")
+
+// ErrAlertRuleAmbiguous is returned when the locator matches more than one rule.
+var ErrAlertRuleAmbiguous = errors.New("mutate: more than one rule matches; give the rule group")
+
+func (m *Mutator) locatedRuleClient(loc AlertRuleLocator) (dynamic.ResourceInterface, error) {
+	if m.dynamic == nil {
+		return nil, errors.New("mutate: dynamic client not configured")
+	}
+	if loc.Name == "" || loc.Alert == "" {
+		return nil, errors.New("mutate: PrometheusRule name and alert are required")
+	}
+	ns := loc.Namespace
+	if ns == "" {
+		ns = m.Namespace
+	}
+	if ns == "" {
+		return nil, errors.New("mutate: PrometheusRule namespace required")
+	}
+	return m.dynamic.Resource(prometheusRuleGVR).Namespace(ns), nil
+}
+
+// ruleMatch is the position of one rule inside spec.groups.
+type ruleMatch struct{ group, rule int }
+
+func findLocatedRules(groups []any, loc AlertRuleLocator) []ruleMatch {
+	var out []ruleMatch
+	for gi, raw := range groups {
+		g, _ := raw.(map[string]any)
+		if g == nil || (loc.Group != "" && str(g, "name") != loc.Group) {
+			continue
+		}
+		rules, _ := g["rules"].([]any)
+		for ri, rr := range rules {
+			if r, _ := rr.(map[string]any); r != nil && str(r, "alert") == loc.Alert {
+				out = append(out, ruleMatch{gi, ri})
+			}
+		}
+	}
+	return out
+}
+
+// PatchAlertRuleInCR changes the expression and `for` of one rule in the named
+// PrometheusRule and leaves its labels, annotations and every other rule alone.
+// When the rule is absent (it was removed by DeleteAlertRuleInCR) the full rule
+// from p is appended to loc.Group, creating the group if needed.
+func (m *Mutator) PatchAlertRuleInCR(ctx context.Context, loc AlertRuleLocator, p LegacyAlertRuleParams) (any, error) {
+	ri, err := m.locatedRuleClient(loc)
+	if err != nil {
+		return nil, err
+	}
+	if p.Expr == "" {
+		return nil, errors.New("mutate: expr required")
+	}
+	var result *unstructured.Unstructured
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, gerr := ri.Get(ctx, loc.Name, metav1.GetOptions{})
+		if gerr != nil {
+			return gerr
+		}
+		groups, _, _ := unstructured.NestedSlice(existing.Object, "spec", "groups")
+		matches := findLocatedRules(groups, loc)
+		switch len(matches) {
+		case 0:
+			if loc.Group == "" {
+				return fmt.Errorf("%w: %s; a rule group is required to add it back", ErrAlertRuleNotFound, loc.Alert)
+			}
+			rule := map[string]any{"alert": loc.Alert, "expr": p.Expr}
+			if p.Duration != "" {
+				rule["for"] = p.Duration
+			}
+			if len(p.Annotations) > 0 {
+				rule["annotations"] = p.Annotations
+			}
+			if len(p.Labels) > 0 {
+				rule["labels"] = p.Labels
+			}
+			groups = appendRuleToGroup(groups, loc.Group, rule)
+		case 1:
+			g := groups[matches[0].group].(map[string]any)
+			rules := g["rules"].([]any)
+			r := rules[matches[0].rule].(map[string]any)
+			r["expr"] = p.Expr
+			if p.Duration != "" {
+				r["for"] = p.Duration
+			}
+		default:
+			return fmt.Errorf("%w: %s", ErrAlertRuleAmbiguous, loc.Alert)
+		}
+		if serr := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); serr != nil {
+			return serr
+		}
+		updated, uerr := ri.Update(ctx, existing, metav1.UpdateOptions{})
+		if uerr != nil {
+			return uerr
+		}
+		result = updated
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.UnstructuredContent(), nil
+}
+
+// DeleteAlertRuleInCR removes one rule from the named PrometheusRule. It never
+// deletes the PrometheusRule itself, even when the rule was its last one.
+func (m *Mutator) DeleteAlertRuleInCR(ctx context.Context, loc AlertRuleLocator) error {
+	ri, err := m.locatedRuleClient(loc)
+	if err != nil {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, gerr := ri.Get(ctx, loc.Name, metav1.GetOptions{})
+		if gerr != nil {
+			return gerr
+		}
+		groups, _, _ := unstructured.NestedSlice(existing.Object, "spec", "groups")
+		matches := findLocatedRules(groups, loc)
+		switch len(matches) {
+		case 0:
+			return fmt.Errorf("%w: %s", ErrAlertRuleNotFound, loc.Alert)
+		case 1:
+		default:
+			return fmt.Errorf("%w: %s", ErrAlertRuleAmbiguous, loc.Alert)
+		}
+		g := groups[matches[0].group].(map[string]any)
+		rules := g["rules"].([]any)
+		g["rules"] = append(rules[:matches[0].rule:matches[0].rule], rules[matches[0].rule+1:]...)
+		groups[matches[0].group] = g
+		if serr := unstructured.SetNestedSlice(existing.Object, groups, "spec", "groups"); serr != nil {
+			return serr
+		}
+		_, uerr := ri.Update(ctx, existing, metav1.UpdateOptions{})
+		return uerr
+	})
+}
+
+// appendRuleToGroup adds rule to the group named name, creating the group at the
+// end when the CR has none by that name.
+func appendRuleToGroup(groups []any, name string, rule map[string]any) []any {
+	for gi, raw := range groups {
+		g, _ := raw.(map[string]any)
+		if g == nil || str(g, "name") != name {
+			continue
+		}
+		rules, _ := g["rules"].([]any)
+		g["rules"] = append(rules, rule)
+		groups[gi] = g
+		return groups
+	}
+	return append(groups, map[string]any{"name": name, "rules": []any{rule}})
 }

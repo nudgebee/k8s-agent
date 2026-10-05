@@ -6,8 +6,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 )
 
@@ -111,13 +114,24 @@ func TestDrain_CordonsAndPartitionsPods(t *testing.T) {
 		podOnNode("orphan", "default", "node-1"),
 	)
 
-	// Make eviction return success immediately, then pretend the pod is gone
-	// for the worker pod. The fake client's default handler errors on
-	// EvictV1; we tolerate that and rely on the not-found check to short-circuit.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_ = cs.CoreV1().Pods("shop").Delete(context.Background(), "worker", metav1.DeleteOptions{})
-	}()
+	// An eviction removes the pod, as the API server does. Deleting it from the
+	// eviction itself (rather than on a timer) keeps the order deterministic:
+	// a timer could fire before Drain lists the node's pods, and then there was
+	// nothing left to evict.
+	cs.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "eviction" {
+			return false, nil, nil
+		}
+		create, ok := action.(k8stesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		evicted, err := meta.Accessor(create.GetObject())
+		if err != nil {
+			return true, nil, err
+		}
+		return true, nil, cs.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), action.GetNamespace(), evicted.GetName())
+	})
 
 	m := New(cs, "", nil)
 	res, err := m.Drain(context.Background(), "node-1", DrainOptions{

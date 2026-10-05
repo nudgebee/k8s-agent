@@ -24,11 +24,18 @@ func discoveryTransform(obj any) (any, error) {
 	switch o := obj.(type) {
 	case *corev1.Pod:
 		trimMeta(&o.ObjectMeta)
-		// Pod converter reads: Status.{Phase,QOSClass,PodIP,Conditions,
-		// ContainerStatuses[].{Name,Ready,RestartCount}}, Spec.NodeName,
+		// Pod converter reads: the WHOLE of Status (it ships as status_dict, which
+		// the collector stores as meta.status_info), plus Spec.NodeName,
 		// Spec.Containers[].{Name,Image}, OwnerReferences, Labels.
-		o.Status.InitContainerStatuses = nil
-		o.Status.EphemeralContainerStatuses = nil
+		//
+		// Status.InitContainerStatuses and Status.EphemeralContainerStatuses used to
+		// be stripped here, back when the converter only read a handful of Status
+		// fields. They are readers now -- the pod-detail panel indexes
+		// status_info.initContainerStatuses -- so stripping them would violate this
+		// function's contract of only deleting what nobody reads. Measured on a
+		// 420-pod cluster, keeping them costs 129 KiB (108 pods) and 1 KiB (1 pod)
+		// in the informer store, against 458 KiB for the container statuses already
+		// retained.
 		o.Spec.InitContainers = nil
 		o.Spec.EphemeralContainers = nil
 		o.Spec.Volumes = nil     // pod converter emits no volumes (only templates do)

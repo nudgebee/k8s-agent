@@ -99,6 +99,10 @@ type Request struct {
 	Namespace string `json:"namespace,omitempty"`
 	Command   string `json:"command,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	// Container selects which container to exec into. Optional: when empty the
+	// agent resolves one the way kubectl does (see resolveContainer). Callers
+	// older than this field simply omit it.
+	Container string `json:"container,omitempty"`
 }
 
 // Response is the inner shape of the agent's reply. The dispatcher
@@ -114,6 +118,12 @@ type Response struct {
 	// Error is set when a request can't be satisfied (missing fields,
 	// unknown session, etc.). Matches handle_*'s {"error": "..."} returns.
 	Error string `json:"error,omitempty"`
+	// Container and Containers are set by start. They tell the client which
+	// container the session actually attached to and what else it could have
+	// picked, so a container switcher needs no extra API call — and no second
+	// agent rollout, which is the slow part for on-prem installs.
+	Container  string   `json:"container,omitempty"`
+	Containers []string `json:"containers,omitempty"`
 }
 
 // Handle dispatches a TerminalRequest. Returns the response + an HTTP
@@ -141,11 +151,17 @@ func (m *Manager) handleStart(ctx context.Context, r *Request) (*Response, int) 
 	if m.cs == nil || m.restCfg == nil {
 		return &Response{Error: "agent has no K8s client; pod_shell unavailable"}, 503
 	}
-	sess, err := m.openSession(ctx, r.Namespace, r.Name)
+	sess, containers, err := m.openSession(ctx, r.Namespace, r.Name, r.Container)
 	if err != nil {
 		return &Response{Error: err.Error()}, 500
 	}
-	return &Response{SessionID: sess.id, Data: "", Exit: false}, 200
+	return &Response{
+		SessionID:  sess.id,
+		Data:       "",
+		Exit:       false,
+		Container:  sess.container,
+		Containers: containers,
+	}, 200
 }
 
 func (m *Manager) handleExec(_ context.Context, r *Request) (*Response, int) {
@@ -198,6 +214,7 @@ type session struct {
 	id        string
 	namespace string
 	name      string
+	container string
 
 	stdinW *io.PipeWriter
 	cancel context.CancelFunc
@@ -210,12 +227,24 @@ type session struct {
 	usedMu   sync.Mutex
 }
 
-func (m *Manager) openSession(ctx context.Context, ns, name string) (*session, error) {
+// openSession attaches to a container in the pod. It returns the session plus
+// the pod's full container list, so the caller can tell the client what else was
+// available to pick.
+func (m *Manager) openSession(ctx context.Context, ns, name, wantContainer string) (*session, []string, error) {
 	// Best-effort wait for the pod to be Running.
 	// retries up to 20s. We do the same with a 10s budget — anything longer
 	// blocks the agent's WS reader.
-	if err := m.waitRunning(ctx, ns, name); err != nil {
-		return nil, err
+	pod, err := m.waitRunning(ctx, ns, name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// The exec subresource requires an explicit container whenever the pod has
+	// more than one; without it the API server refuses the upgrade with
+	// "a container name must be specified for pod X, choose one of: [...]".
+	container, err := resolveContainer(pod, wantContainer)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	stdinR, stdinW := io.Pipe()
@@ -224,6 +253,7 @@ func (m *Manager) openSession(ctx context.Context, ns, name string) (*session, e
 		id:        uuid.NewString(),
 		namespace: ns,
 		name:      name,
+		container: container,
 		stdinW:    stdinW,
 		cancel:    cancel,
 		lastUsed:  time.Now(),
@@ -235,11 +265,12 @@ func (m *Manager) openSession(ctx context.Context, ns, name string) (*session, e
 		Namespace(ns).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Command: []string{"/bin/sh"},
-			Stdin:   true,
-			Stdout:  true,
-			Stderr:  true,
-			TTY:     true,
+			Container: container,
+			Command:   []string{"/bin/sh"},
+			Stdin:     true,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       true,
 		}, scheme.ParameterCodec)
 
 	exec, err := remotecommand.NewSPDYExecutor(m.restCfg, "POST", restReq.URL())
@@ -247,7 +278,7 @@ func (m *Manager) openSession(ctx context.Context, ns, name string) (*session, e
 		_ = stdinR.Close()
 		_ = stdinW.Close()
 		cancel()
-		return nil, fmt.Errorf("build SPDY executor: %w", err)
+		return nil, nil, fmt.Errorf("build SPDY executor: %w", err)
 	}
 
 	// Background streamer: pumps the PTY. Output goes via outWriter into
@@ -273,10 +304,63 @@ func (m *Manager) openSession(ctx context.Context, ns, name string) (*session, e
 	m.mu.Lock()
 	m.sessions[s.id] = s
 	m.mu.Unlock()
-	return s, nil
+	return s, containerNames(pod), nil
 }
 
-func (m *Manager) waitRunning(ctx context.Context, ns, name string) error {
+// defaultContainerAnnotation is the annotation kubectl honours to pick a
+// container when the user does not name one. Respecting it keeps the in-app
+// shell consistent with what `kubectl exec` on the same pod would attach to.
+const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
+
+// containerNames lists the pod's exec-able containers, in spec order.
+func containerNames(pod *corev1.Pod) []string {
+	names := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// resolveContainer decides which container to attach to.
+//
+// A requested name wins, but is validated first: passing an unknown container
+// to the exec subresource fails deep in the stream with a message the user
+// cannot act on, so reject it up front and say what is available. Otherwise
+// mirror kubectl — the default-container annotation, else the first container
+// in spec order. Init containers are deliberately excluded: they have already
+// terminated by the time a pod is Running, and attaching to one only produces
+// a confusing failure.
+func resolveContainer(pod *corev1.Pod, want string) (string, error) {
+	names := containerNames(pod)
+	if len(names) == 0 {
+		return "", fmt.Errorf("pod %s/%s has no containers", pod.Namespace, pod.Name)
+	}
+
+	if want != "" {
+		for _, n := range names {
+			if n == want {
+				return n, nil
+			}
+		}
+		return "", fmt.Errorf("container %q not found in pod %s/%s, choose one of: %s",
+			want, pod.Namespace, pod.Name, strings.Join(names, ", "))
+	}
+
+	if annotated := pod.Annotations[defaultContainerAnnotation]; annotated != "" {
+		for _, n := range names {
+			if n == annotated {
+				return n, nil
+			}
+		}
+		// A stale annotation naming a removed container must not break the
+		// shell — fall through to the first container, as kubectl does.
+	}
+	return names[0], nil
+}
+
+// waitRunning blocks until the pod is Running and returns it, so callers can
+// inspect the spec without a second API round trip.
+func (m *Manager) waitRunning(ctx context.Context, ns, name string) (*corev1.Pod, error) {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	t := time.NewTicker(500 * time.Millisecond)
@@ -284,14 +368,14 @@ func (m *Manager) waitRunning(ctx context.Context, ns, name string) error {
 	for {
 		pod, err := m.cs.CoreV1().Pods(ns).Get(cctx, name, metav1.GetOptions{})
 		if err == nil && pod.Status.Phase == corev1.PodRunning {
-			return nil
+			return pod, nil
 		}
 		select {
 		case <-cctx.Done():
 			if err != nil {
-				return fmt.Errorf("pod %s/%s not reachable: %w", ns, name, err)
+				return nil, fmt.Errorf("pod %s/%s not reachable: %w", ns, name, err)
 			}
-			return fmt.Errorf("pod %s/%s not Running", ns, name)
+			return nil, fmt.Errorf("pod %s/%s not Running", ns, name)
 		case <-t.C:
 		}
 	}

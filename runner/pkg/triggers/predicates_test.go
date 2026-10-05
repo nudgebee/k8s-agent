@@ -2,6 +2,7 @@ package triggers
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,11 +112,12 @@ func TestPodCrashLoop_DropsForOtherWaitingReasons(t *testing.T) {
 	}
 }
 
-func TestPodCrashLoop_FingerprintStableWithinHour(t *testing.T) {
-	// A Pod stuck in CrashLoopBackOff produces ~1 Finding per hour. The
-	// fingerprint pairs with a 1h rate limit and an hour-bucket, so
-	// successive restarts in the same wall-clock hour collapse to one
-	// fingerprint (and the rate limiter suppresses repeats).
+func TestPodCrashLoop_FingerprintIsWorkloadIdentityOnly(t *testing.T) {
+	// The fingerprint must be a pure function of (namespace, owner): no
+	// restart count, no Pod name, and — the reason this test exists — no
+	// wall-clock bucket. The recovery reset has to rebuild the same key
+	// from a healthy Pod, which it can only do if nothing about the
+	// failure or the current time went into it.
 	mk := func(rc int) map[string]any {
 		return asObj(t, `{
 			"metadata":{"name":"web-0","namespace":"prod"},
@@ -127,10 +129,186 @@ func TestPodCrashLoop_FingerprintStableWithinHour(t *testing.T) {
 	}
 	m := podCrashLoopMatcher()
 	if m.FingerprintFn(mk(2)) != m.FingerprintFn(mk(7)) {
-		t.Error("restartCount must not affect fingerprint within an hour")
+		t.Error("restartCount must not affect the fingerprint")
 	}
 	if m.FingerprintFn(mk(2)) != m.FingerprintFn(mk(100)) {
-		t.Error("restartCount must not affect fingerprint within an hour (rc=100 case)")
+		t.Error("restartCount must not affect the fingerprint (rc=100 case)")
+	}
+	if want := fp("report_crash_loop", "prod", "web-0"); m.FingerprintFn(mk(2)) != want {
+		t.Error("fingerprint must be exactly (aggregation key, namespace, owner-or-pod) — " +
+			"an extra dimension here breaks the recovery reset silently")
+	}
+	// A healthy Pod — no waiting state, no restarts — must produce the same
+	// key as the crashing one. This is the invariant the reset depends on.
+	healthy := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":true,"restartCount":0,
+			 "state":{"running":{"startedAt":"2020-01-01T00:00:00Z"}}}
+		]}
+	}`)
+	if m.FingerprintFn(healthy) != m.FingerprintFn(mk(5)) {
+		t.Error("healthy and crashing Pod must fingerprint identically, " +
+			"otherwise the recovery path clears a key nobody set")
+	}
+}
+
+// ---------- pod_crash_loop recovery ----------
+
+// podFixture builds a single-container Pod with the given readiness and a
+// running state that started `runningFor` ago.
+func podFixture(t *testing.T, ready bool, runningFor time.Duration) map[string]any {
+	t.Helper()
+	startedAt := time.Now().Add(-runningFor).UTC().Format(time.RFC3339)
+	return asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":`+strconv.FormatBool(ready)+`,"restartCount":9,
+			 "state":{"running":{"startedAt":"`+startedAt+`"}}}
+		]}
+	}`)
+}
+
+func TestPodCrashLoopRecovered_RequiresSustainedHealth(t *testing.T) {
+	cases := []struct {
+		name       string
+		ready      bool
+		runningFor time.Duration
+		want       bool
+	}{
+		{"ready and up well past the window", true, podCrashLoopStableWindow + 10*time.Minute, true},
+		{"ready and up exactly at the window", true, podCrashLoopStableWindow, true},
+		// The container is running and even ready — which is exactly what a
+		// crashlooping Pod looks like for the few seconds between restarts.
+		// Resetting here would re-fire the matcher every backoff cycle.
+		{"ready but only just started", true, 30 * time.Second, false},
+		{"ready but still inside the window", true, podCrashLoopStableWindow - time.Minute, false},
+		{"running long enough but not ready", false, time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := podCrashLoopRecovered(podFixture(t, tc.ready, tc.runningFor)); got != tc.want {
+				t.Errorf("podCrashLoopRecovered = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPodCrashLoopRecovered_RejectsUnhealthyShapes(t *testing.T) {
+	startedLongAgo := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	cases := map[string]string{
+		"currently crashlooping": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":false,"restartCount":9,
+				 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+			]}
+		}`,
+		"one of two containers still down": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":true,"state":{"running":{"startedAt":"` + startedLongAgo + `"}}},
+				{"name":"sidecar","ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+			]}
+		}`,
+		"no container statuses yet": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"phase":"Pending"}
+		}`,
+		"no status at all": `{"metadata":{"name":"web-0","namespace":"prod"}}`,
+		"terminated, not running": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":false,"state":{"terminated":{"reason":"Completed"}}}
+			]}
+		}`,
+		"running but startedAt unparseable": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","ready":true,"state":{"running":{"startedAt":"not-a-timestamp"}}}
+			]}
+		}`,
+		// Init container stuck: the regular container is waiting on it, so
+		// the Pod fails the check without inspecting initContainerStatuses.
+		"blocked behind a failing init container": `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{
+				"initContainerStatuses":[
+					{"name":"migrate","ready":false,"restartCount":6,
+					 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+				],
+				"containerStatuses":[
+					{"name":"app","ready":false,"state":{"waiting":{"reason":"PodInitializing"}}}
+				]
+			}
+		}`,
+	}
+	for name, fixture := range cases {
+		t.Run(name, func(t *testing.T) {
+			if podCrashLoopRecovered(asObj(t, fixture)) {
+				t.Error("podCrashLoopRecovered = true; want false")
+			}
+		})
+	}
+	if podCrashLoopRecovered(nil) {
+		t.Error("podCrashLoopRecovered(nil) = true; want false")
+	}
+}
+
+func TestPodCrashLoop_RecoveryResetsTheRateLimit(t *testing.T) {
+	// The customer-visible scenario end to end: a workload crashloops,
+	// recovers, and crashes again inside the 1h window. Before the reset
+	// the second crash was silently dropped.
+	crashing := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":false,"restartCount":5,
+			 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+		]}
+	}`)
+	recovered := podFixture(t, true, podCrashLoopStableWindow+time.Minute)
+
+	eng := NewEngine(Builtins(), time.Now().Add(-time.Hour))
+	crash := IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: crashing, OldObj: crashing}
+
+	if !contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Fatal("first crash must fire")
+	}
+	if contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Fatal("repeat crash inside the window must stay suppressed")
+	}
+
+	healthy := IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: recovered, OldObj: recovered}
+	if names := matchNames(eng.Match(healthy)); contains(names, "pod_crash_loop") {
+		t.Fatal("recovery must clear the limiter without emitting a Finding of its own")
+	}
+	if !contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Error("crash after a genuine recovery must fire again, not wait out the hour")
+	}
+}
+
+func TestPodCrashLoop_BackoffCycleDoesNotResetTheRateLimit(t *testing.T) {
+	// The regression this guards: a crashlooping container is briefly
+	// running and ready on every restart. If that counted as recovery the
+	// limiter would be cleared every cycle and the matcher would fire
+	// continuously — noisier than the bug it was meant to fix.
+	crashing := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","ready":false,"restartCount":5,
+			 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}
+		]}
+	}`)
+	justRestarted := podFixture(t, true, 20*time.Second)
+
+	eng := NewEngine(Builtins(), time.Now().Add(-time.Hour))
+	crash := IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: crashing, OldObj: crashing}
+	if !contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Fatal("first crash must fire")
+	}
+	eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: justRestarted, OldObj: justRestarted})
+	if contains(matchNames(eng.Match(crash)), "pod_crash_loop") {
+		t.Error("a mid-backoff-cycle running container must not clear the rate limit")
 	}
 }
 
@@ -318,6 +496,60 @@ func TestPodOOMKilled_DropsForOtherTerminationReasons(t *testing.T) {
 	}`)
 	if podOOMKilledMatcher().Predicate(newPod, oldPod) {
 		t.Error("Completed exit must not fire OOM matcher")
+	}
+}
+
+func TestPodOOMKilled_DropsStaleLastStateOOMUnderNonOOMTermination(t *testing.T) {
+	// The workflow-server shape: the container OOMed once, ran for ~21h,
+	// then died with exitCode 2. In the window between the crash and the
+	// restart, state.terminated says Error while lastState still says
+	// OOMKilled. The most recent termination is the crash, so the OOM
+	// matcher must stay silent — firing here labelled a crash an OOM.
+	pod := asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","restartCount":1,
+			 "state":{"terminated":{"reason":"Error","exitCode":2,"finishedAt":"2026-05-08T07:39:13Z"}},
+			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-07T10:53:50Z"}}}
+		]}
+	}`)
+	if podOOMKilledMatcher().Predicate(pod, nil) {
+		t.Error("non-OOM state.terminated supersedes the OOM in lastState; must not fire")
+	}
+	if got := oomKilledEnrichBlocks(pod, nil, EnrichContext{}); got != nil {
+		t.Errorf("oomKilledEnrichBlocks = %v; want nil when the current termination is not an OOM", got)
+	}
+}
+
+func TestPodOOMKilled_FingerprintIsStableForTheSameOOM(t *testing.T) {
+	// The bucket must come from the OOM's finishedAt, not the wall
+	// clock: the same kill observed in two different hours has to keep
+	// one fingerprint, or the 1h rate limit never suppresses it and a
+	// single OOM mints a Finding every hour the container stays up.
+	podAt := func(finishedAt string) map[string]any {
+		return asObj(t, `{
+			"metadata":{"name":"web-0","namespace":"prod"},
+			"status":{"containerStatuses":[
+				{"name":"app","restartCount":1,
+				 "state":{"running":{"startedAt":"2026-05-07T10:53:53Z"}},
+				 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"`+finishedAt+`"}}}
+			]}
+		}`)
+	}
+	fpFn := podOOMKilledMatcher().FingerprintFn
+	same := podAt("2026-05-07T10:53:50Z")
+	if a, b := fpFn(same), fpFn(podAt("2026-05-07T10:58:00Z")); a != b {
+		t.Errorf("same OOM hour must share a fingerprint; got %s vs %s", a, b)
+	}
+	if a, b := fpFn(same), fpFn(podAt("2026-05-07T11:00:01Z")); a == b {
+		t.Error("an OOM in a later hour must get a fresh fingerprint")
+	}
+	// metav1.Time marshals at second precision, so the API server never
+	// emits a fractional finishedAt — but time.RFC3339 parses one anyway
+	// (Go accepts an optional fractional second on that layout), so the
+	// bucket must not silently fall back to the wall clock if one shows up.
+	if a, b := fpFn(same), fpFn(podAt("2026-05-07T10:53:50.123456789Z")); a != b {
+		t.Errorf("a fractional-second finishedAt must bucket like its whole-second form; got %s vs %s", a, b)
 	}
 }
 
@@ -709,6 +941,89 @@ func TestJobFailure_DoesNotRefireWhilePersistentlyFailed(t *testing.T) {
 	}
 }
 
+func TestJobFailure_RunsOfTheSameJobShareAFingerprint(t *testing.T) {
+	// Every run of a directly-created Job gets a fresh name and UID. Keying
+	// on the UID made each run its own problem, so the server's occurrence
+	// chain never formed and a job failing all day looked like N unrelated
+	// failures (#36647).
+	mk := func(name, uid string) map[string]any {
+		return asObj(t, `{
+			"metadata":{"name":"`+name+`","namespace":"scan","uid":"`+uid+`"},
+			"status":{"conditions":[{"type":"Failed","status":"True"}]}
+		}`)
+	}
+	m := jobFailureMatcher()
+	first := m.FingerprintFn(mk("trivy-image-scan-24e032a5", "u-1"))
+	second := m.FingerprintFn(mk("trivy-image-scan-ce3efcc1", "u-2"))
+	if first != second {
+		t.Error("two runs of the same job family must share a fingerprint")
+	}
+	if other := m.FingerprintFn(mk("kube-bench-scan-177dde3a", "u-3")); other == first {
+		t.Error("a different job family must not share the fingerprint")
+	}
+}
+
+func TestJobFailure_PrefersCronJobOwnerOverName(t *testing.T) {
+	// A CronJob-created Job carries the CronJob in ownerReferences, and the
+	// generated name suffix is a unix-minute stamp. Both routes must land on
+	// the same identity: the CronJob.
+	mk := func(name string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+name+`","namespace":"ns","uid":"u-`+name+`",
+				"ownerReferences":[{"kind":"CronJob","name":"healthchecks","controller":true}]
+			},
+			"status":{"conditions":[{"type":"Failed","status":"True"}]}
+		}`)
+	}
+	m := jobFailureMatcher()
+	if m.FingerprintFn(mk("healthchecks-29764215")) != m.FingerprintFn(mk("healthchecks-29764220")) {
+		t.Error("consecutive runs of one CronJob must share a fingerprint")
+	}
+}
+
+func TestImagePullBackoff_JobOwnedPodsCollapseToJobFamily(t *testing.T) {
+	// One-Job-per-image scanners produced a new fingerprint for every scan
+	// because the Pod's owner is the per-run Job (#36647).
+	mk := func(job string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+job+`-p9x2","namespace":"scan",
+				"ownerReferences":[{"kind":"Job","name":"`+job+`","controller":true}]
+			},
+			"status":{"containerStatuses":[
+				{"name":"scan","image":"registry/trivy:v1",
+				 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+			]}
+		}`)
+	}
+	m := imagePullBackoffMatcher()
+	if m.FingerprintFn(mk("trivy-image-scan-24e032a5")) != m.FingerprintFn(mk("trivy-image-scan-ce3efcc1")) {
+		t.Error("pods from two runs of the same job family must share a fingerprint")
+	}
+}
+
+func TestImagePullBackoff_DeploymentReplicasStillCollapse(t *testing.T) {
+	// Guards the behaviour that already worked, so the job-family change
+	// above cannot regress it.
+	mk := func(pod string) map[string]any {
+		return asObj(t, `{
+			"metadata":{
+				"name":"`+pod+`","namespace":"prod",
+				"ownerReferences":[{"kind":"ReplicaSet","name":"api-7f9d8c5b6d","controller":true}]
+			},
+			"status":{"containerStatuses":[
+				{"name":"app","image":"registry/api:bad",
+				 "state":{"waiting":{"reason":"ImagePullBackOff"}}}
+			]}
+		}`)
+	}
+	m := imagePullBackoffMatcher()
+	if m.FingerprintFn(mk("api-7f9d8c5b6d-aaaaa")) != m.FingerprintFn(mk("api-7f9d8c5b6d-bbbbb")) {
+		t.Error("replicas of one deployment must share a fingerprint")
+	}
+}
+
 // ---------- node_not_ready ----------
 
 // notReadyNode builds a Node fixture whose Ready condition has been False
@@ -843,6 +1158,97 @@ func TestNodePressure_DoesNotFireWhenNoPressure(t *testing.T) {
 	}`)
 	if nodePressureMatcher().Predicate(node, nil) {
 		t.Error("predicate must not fire when no pressure condition is True")
+	}
+}
+
+// pressuredNode builds a Node whose `cond` pressure condition is True and
+// transitioned at `transitioned` — the value that used to drive the fingerprint.
+func pressuredNode(t *testing.T, name, cond, transitioned string) map[string]any {
+	t.Helper()
+	return asObj(t, `{
+		"metadata":{"name":"`+name+`"},
+		"status":{"conditions":[
+			{"type":"Ready","status":"True"},
+			{"type":"`+cond+`","status":"True","lastTransitionTime":"`+transitioned+`"}
+		]}
+	}`)
+}
+
+// A flapping condition must NOT mint a new fingerprint. kubelet fills the disk,
+// garbage-collects images and fills it again, so DiskPressure flips True →
+// False → True every few minutes and lastTransitionTime moves with it. Because
+// the rate limiter is keyed on the fingerprint, the old key defeated the 6h
+// RateLimit entirely: one production node produced 7 findings in 53 minutes.
+func TestNodePressure_FlappingConditionKeepsOneFingerprint(t *testing.T) {
+	m := nodePressureMatcher()
+	first := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	// Same node, same condition, transitioned again 8 minutes later.
+	second := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:35:04Z"))
+	if first != second {
+		t.Errorf("flap produced a second fingerprint, so the rate limit is bypassed:\n  %s\n  %s", first, second)
+	}
+}
+
+// The counterpart to the flap test: once the window rolls, continuing pressure
+// is a new finding. Without this, a fingerprint that simply ignored the
+// timestamp would pass the flap test too.
+func TestNodePressure_LaterWindowIsANewFingerprint(t *testing.T) {
+	m := nodePressureMatcher()
+	inWindow := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	nextWindow := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T18:05:00Z"))
+	if inWindow == nextWindow {
+		t.Error("pressure continuing into a later window must report again")
+	}
+}
+
+// Two flips either side of a window boundary are deliberately two findings:
+// the bucket is the unit of reporting, so this pins where the seam falls.
+func TestNodePressure_BucketBoundaryIsRespected(t *testing.T) {
+	m := nodePressureMatcher()
+	before := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T11:59:59Z"))
+	after := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T12:00:01Z"))
+	if before == after {
+		t.Error("flips either side of a 6h boundary belong to different windows")
+	}
+}
+
+// A Node whose condition carries no parseable lastTransitionTime must still
+// produce a usable fingerprint rather than an empty bucket shared by every node.
+func TestNodePressure_UnparseableTransitionStillDiffersPerNode(t *testing.T) {
+	m := nodePressureMatcher()
+	a := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "not-a-timestamp"))
+	b := m.FingerprintFn(pressuredNode(t, "n2", "DiskPressure", "not-a-timestamp"))
+	if a == b {
+		t.Error("fallback bucket must still separate nodes")
+	}
+}
+
+func TestNodePressure_DifferentNodesDiffer(t *testing.T) {
+	m := nodePressureMatcher()
+	a := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	b := m.FingerprintFn(pressuredNode(t, "n2", "DiskPressure", "2026-05-08T10:27:24Z"))
+	if a == b {
+		t.Error("two different nodes must not share a fingerprint")
+	}
+}
+
+// A node already reporting DiskPressure that ALSO runs out of memory is a new
+// problem and must not be suppressed for the rest of the window.
+func TestNodePressure_DifferentConditionsDiffer(t *testing.T) {
+	m := nodePressureMatcher()
+	disk := m.FingerprintFn(pressuredNode(t, "n1", "DiskPressure", "2026-05-08T10:27:24Z"))
+	mem := m.FingerprintFn(pressuredNode(t, "n1", "MemoryPressure", "2026-05-08T10:27:24Z"))
+	if disk == mem {
+		t.Error("different pressure conditions on one node must not share a fingerprint")
+	}
+}
+
+// The bucket and the rate-limit window have to stay equal. A bucket shorter
+// than the window mints a new limiter key before the limit expires and
+// re-opens the defect this matcher was fixed for.
+func TestNodePressure_BucketMatchesRateLimit(t *testing.T) {
+	if got := nodePressureMatcher().RateLimit; got != nodePressureWindow {
+		t.Errorf("RateLimit %v must equal nodePressureWindow %v", got, nodePressureWindow)
 	}
 }
 
@@ -994,6 +1400,28 @@ func TestEngine_ReturnsEmptyForNoMatch(t *testing.T) {
 }
 
 // ---------- owner-walk ----------
+
+func TestJobFamily(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// Generated per-run suffixes we actually see in the field.
+		{"trivy-image-scan-24e032a5", "trivy-image-scan"},             // 8-hex, our scanner
+		{"kube-bench-scan-177dde3a", "kube-bench-scan"},               // 8-hex
+		{"blinq-api-healthchecks-29764215", "blinq-api-healthchecks"}, // CronJob unix-minute stamp
+		{"grade-astropy--astropy-13398", "grade-astropy--astropy"},    // indexed batch creator
+		// Full UUID tail must strip whole, not just its last hex group.
+		{"nb-llm-ct-7e4998e5-2e91-4579-989e-16926b6158e1", "nb-llm-ct"},
+		// Names that must survive untouched.
+		{"nightly-backup", "nightly-backup"},
+		{"postgres-15", "postgres-15"}, // short numeric tail is meaningful
+		{"migrate-v2", "migrate-v2"},
+		{"12345678", "12345678"}, // never strip to empty
+		{"", ""},
+	} {
+		if got := JobFamily(tc.in); got != tc.want {
+			t.Errorf("JobFamily(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 
 func TestResolveOwner_ReplicaSetStripsHash(t *testing.T) {
 	pod := asObj(t, `{

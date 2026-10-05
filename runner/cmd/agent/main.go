@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -375,6 +377,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	ec.Username = cfg.ElasticsearchUser
 	ec.Password = cfg.ElasticsearchPassword
 	ec.APIKey = cfg.ElasticsearchAPIKey
+	// Custom auth headers (e.g. Logz.io's X-API-TOKEN). Applied on top of
+	// APIKey/basic auth, which the client sets first.
+	ec.ExtraHeaders = config.ParseHeaders(cfg.ElasticsearchHeaders)
 	registerProxy("elasticsearch", esEnabled, elasticsearch.Handlers(ec))
 	if esEnabled {
 		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL)
@@ -545,6 +550,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		var profiler *podexec.ProfilerHandler
 		if kubeRestCfg != nil {
 			profiler = podexec.NewProfilerHandler(typedKube, kubeRestCfg)
+			// Lets a request that carries no language resolve one from the
+			// node-agent's container_application_type metric — the signal
+			// the pod-details UI already uses. The pod_profiler playbook
+			// action has no language field at all, so without this every
+			// playbook run has to be told what it is profiling.
+			if promClient != nil {
+				profiler.SetLanguageDetector(promClient)
+			}
 		}
 		ph := podexec.HandlersWithProfiler(execer, profiler)
 		maps.Copy(handlers, ph)
@@ -715,7 +728,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// migration (copies volume data via a mover pod). The ceiling stays under
 	// the server's 60-min PROCESSING→TIMEOUT reap so a task isn't force-failed
 	// mid-flight. Override with LONG_TASK_TIMEOUT_SECONDS.
-	longActions := map[string]struct{}{"rightsize_pvc": {}}
+	// pod_profiler is here because the caller picks the duration (the UI
+	// allows up to 600s) and the profiler fans out over every PID in the
+	// target's process tree, staggered — a postgres pod with 11 backends
+	// blew the 180s default on a 20s profile. The handler bounds itself to
+	// the requested duration plus a fixed slack, so this ceiling is only the
+	// outer guard rail.
+	longActions := map[string]struct{}{"rightsize_pvc": {}, "pod_profiler": {}}
 	longTaskTimeout := 50 * time.Minute
 	if v := os.Getenv("LONG_TASK_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -785,6 +804,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		Logger:          logger,
 		HandlerPoolSize: cfg.RelayHandlerPoolSize,
 		OnShed:          func() { mreg.ForwardShed.WithLabelValues("relay").Inc() },
+		OnConnect:       func() { mreg.OnRelayConnected(true) },
+		OnDisconnect:    func() { mreg.OnRelayConnected(false) },
+		OnReconnect:     mreg.OnRelayReconnect,
 	}, disp.Handle)
 
 	logger.Info("starting relay client",
@@ -825,7 +847,16 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		// Lets the forwarder report a node-exporter alert against the node it
+		// describes rather than the exporter pod that emitted it. Opportunistic:
+		// without a typed client the correction falls back to the alert's own
+		// labels, and the backend corrects what reaches it either way.
+		if typedKube != nil {
+			fwd.SetNodeLocator(newNodeLocator(typedKube))
+		}
 		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
+		fwd.OnForward = mreg.OnAlertForwarded
+		fwd.OnDrop = func(string) { mreg.OnAlertDropped() }
 		// Wire the trigger engine. Without this, every kubewatch event is
 		// dropped (safe default — see plan stage 2.1). With it, only
 		// events matching a registered predicate produce a Finding.
@@ -833,7 +864,36 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// so the engine appends a "Recent <Kind> events" table to every
 		// matched Finding (kubelet BackOff / Killing / OOMKilling /
 		// FailedScheduling / image-pull errors etc.) for free.
-		eng := triggers.NewEngine(triggers.Builtins(), time.Now())
+		// A cluster that keeps its platform config in kube-system needs the
+		// default namespace exclusions off; one with more system namespaces
+		// than we listed needs them extended. Either way it is their call.
+		if raw := os.Getenv("CONFIGMAP_CHANGE_EXCLUDED_NAMESPACES"); raw != "" {
+			var namespaces []string
+			for _, ns := range strings.Split(raw, ",") {
+				if ns = strings.TrimSpace(ns); ns != "" {
+					namespaces = append(namespaces, ns)
+				}
+			}
+			triggers.ConfigMapExcludedNamespaces = namespaces
+			logger.Info("configmap change namespace exclusions overridden",
+				"namespaces", triggers.ConfigMapExcludedNamespaces)
+		}
+		specs := triggers.Builtins()
+		// TRIGGER_RATE_LIMITS lets an operator shorten a matcher's suppression
+		// window without a new image. Applied before NewEngine so the engine
+		// never sees the compiled-in default for an overridden matcher.
+		if applied, unknown := triggers.ApplyRateLimits(specs, cfg.TriggerRateLimits); len(applied)+len(unknown) > 0 {
+			if len(applied) > 0 {
+				logger.Info("trigger rate-limit overrides applied", "matchers", applied)
+			}
+			// Loud on purpose: a typo here changes nothing, and without this
+			// the agent starts clean and the operator believes it took.
+			if len(unknown) > 0 {
+				logger.Warn("trigger rate-limit override ignored: no such matcher",
+					"names", unknown, "known_matchers", triggers.MatcherNames(specs))
+			}
+		}
+		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
 			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
 			// Service-backends lister lets service_no_endpoints resolve a
@@ -843,7 +903,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(typedKube, dynamicKube))
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
-		logger.Info("trigger engine enabled", "matcher_count", len(triggers.Builtins()))
+		logger.Info("trigger engine enabled", "matcher_count", len(specs))
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
@@ -973,6 +1033,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			}
 		}
 
+		// Alert-rule write capabilities for api-server: the locator-aware
+		// PrometheusRule writes exist only when the mutate handlers do, and
+		// cluster-wide write depends on the install's RBAC (checked once — an
+		// RBAC change comes with a helm upgrade, which restarts the pod).
+		alertRuleLocatorWrites := cfg.MutateEnabled && dynamicKube != nil
+		promRuleClusterWrite := false
+		if alertRuleLocatorWrites {
+			rbacCtx, rbacCancel := context.WithTimeout(gctx, 10*time.Second)
+			promRuleClusterWrite = telemetry.CanUpdatePrometheusRulesClusterWide(rbacCtx, typedKube, logger)
+			rbacCancel()
+			logger.Info("prometheusrule write capability", "cluster_wide", promRuleClusterWrite)
+		}
+
 		ts := &telemetry.Service{
 			Endpoint:     cfg.BackendEndpoint,
 			AuthSecret:   cfg.AuthSecretKey,
@@ -991,9 +1064,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				probeCtx, probeCancel := context.WithTimeout(gctx, 30*time.Second)
 				defer probeCancel()
 				probeClient := &http.Client{Timeout: 5 * time.Second}
-				logsProvider, logsURL, logsOK, logCfg := probeLogsProvider(probeCtx, cfg)
+				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              cfg.PrometheusURL,
 					AlertManagerURL:            cfg.AlertManagerURL,
@@ -1002,8 +1076,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogsProvider:               logsProvider,
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
+					LogsProviderError:          logsErr,
 					LogProviderConfig:          logCfg,
-					PrometheusConnected:        prometheusConnected(probeCtx, promClient, logger),
+					PrometheusConnected:        promConnected,
+					PrometheusConnectedError:   promErr,
 					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
@@ -1016,12 +1092,15 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseStatus:           clickhouseStatus,
 					ClickHouseURL:              clickhouseHost,
 					ClickHouseError:            clickhouseErr,
+					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
 					AutoScalerEnabled:          as.Enabled,
 					AutoScalerType:             as.Type,
 					AutoScalerVersion:          as.Version,
 					AutoScalerNamespace:        as.Namespace,
+					AlertRuleLocatorWrites:     alertRuleLocatorWrites,
+					PrometheusRuleClusterWrite: promRuleClusterWrite,
 				}
 			},
 			LightActions: func() []string {
@@ -1064,6 +1143,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// Discovery: K8s informer-driven resource sync. Reuses typedKube built above.
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
+		discoverySink.Metrics = mreg
 		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
@@ -1118,14 +1198,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 type shellTerminalAdapter struct{ m *podshell.Manager }
 
 func (a *shellTerminalAdapter) Handle(ctx context.Context, r *dispatch.TerminalRequest) (any, int) {
-	return a.m.Handle(ctx, &podshell.Request{
+	return a.m.Handle(ctx, toPodshellRequest(r))
+}
+
+// toPodshellRequest copies the dispatch wire struct across to podshell's.
+//
+// Extracted from the adapter so it can be tested directly: a field-by-field
+// copy between two structs that duplicate the same wire shape silently drops
+// anything the author forgets to list, and no compiler or linter flags it.
+// That is how `container` was lost after #581 — the picker looked functional
+// while every session attached to the default container.
+func toPodshellRequest(r *dispatch.TerminalRequest) *podshell.Request {
+	return &podshell.Request{
 		Action:    r.Action,
 		SessionID: r.SessionID,
 		Name:      r.Name,
 		Namespace: r.Namespace,
 		Command:   r.Command,
 		RequestID: r.RequestID,
-	})
+		Container: r.Container,
+	}
 }
 
 // grafanaAdapter bridges pkg/dispatch's GrafanaHandler interface to
@@ -1169,24 +1261,27 @@ func (a *grafanaAdapter) HandlePrometheus(ctx context.Context, r *dispatch.Grafa
 // auth — Chronosphere, Thanos Query, Grafana Mimir, Amazon Managed Prometheus —
 // are reported Connected when metric queries work. Returns false on any error
 // so a broken backend shows Disconnected rather than panicking the tick.
-func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) bool {
+func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) (ok bool, reason string) {
 	if c == nil || c.BaseURL == "" {
-		return false
+		return false, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := c.Query(cctx, "vector(1)", "", "")
 	if err != nil {
 		logger.Debug("prometheus health query failed", "err", err)
-		return false
+		return false, err.Error()
 	}
 	var resp struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return false
+		return false, err.Error()
 	}
-	return resp.Status == "success"
+	if resp.Status == "success" {
+		return true, ""
+	}
+	return false, fmt.Sprintf("prometheus query returned status %q", resp.Status)
 }
 
 // queryNodeAgentCount
@@ -1249,44 +1344,53 @@ func selectedLogsProvider(cfg *config.Config) (provider, url string) {
 // configured provider's own client at action-handler time. Fail-closed: any
 // non-2xx → status=false, URL stays in payload so the UI can show "URL
 // configured but unhealthy".
-func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url string, ok bool, providerCfg map[string]any) {
+func probeLogsProvider(ctx context.Context, cfg *config.Config) (provider, url string, ok bool, reason string, providerCfg map[string]any) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 	switch {
 	case cfg.PinotURL != "":
-		ok = httpProbe(ctx, httpClient, cfg.PinotURL+"/health")
-		return "pinot", cfg.PinotURL, ok, map[string]any{}
+		err := httpProbeErr(ctx, httpClient, cfg.PinotURL+"/health")
+		return "pinot", cfg.PinotURL, err == nil, errString(err), map[string]any{}
 	case cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != "":
 		// ES exposes a `_cluster/health` endpoint; we treat 200 as healthy.
 		// Probe with the configured credentials so the badge reflects whether
 		// queries will actually succeed — a secured OpenSearch/ES otherwise 401s
 		// on an unauthenticated probe even when the configured creds work fine.
-		ok = httpProbe(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
+		err := httpProbeErr(ctx, httpClient, cfg.ElasticsearchURL+"/_cluster/health", esAuthHeader(cfg))
 		providerCfg = map[string]any{}
 		if v := os.Getenv("ELASTICSEARCH_LOG_INDEX"); v != "" {
 			providerCfg["default_index"] = v
 		}
-		return "ES", cfg.ElasticsearchURL, ok, providerCfg
+		return "ES", cfg.ElasticsearchURL, err == nil, errString(err), providerCfg
 	case cfg.SignozURL != "":
 		// Signoz health endpoint: /api/v1/health.
-		ok = httpProbe(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
+		err := httpProbeErr(ctx, httpClient, cfg.SignozURL+"/api/v1/health")
 		providerCfg = map[string]any{}
 		// Report the Signoz server version so the backend/UI can surface it
 		// and gate version-specific behaviour. /api/v1/version is unauthed.
 		if v := fetchSignozVersion(ctx, httpClient, cfg.SignozURL); v != "" {
 			providerCfg["version"] = v
 		}
-		return "signoz", cfg.SignozURL, ok, providerCfg
+		return "signoz", cfg.SignozURL, err == nil, errString(err), providerCfg
 	case cfg.LokiURL != "":
 		// LOKI_URL points at the loki gateway, whose nginx only proxies the
 		// `/loki/...` API paths — the backend `/ready` is not exposed there and
 		// 404s. Probe a gateway-served API endpoint instead so the badge
 		// reflects query reachability.
-		ok = httpProbe(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
+		err := httpProbeErr(ctx, httpClient, cfg.LokiURL+"/loki/api/v1/status/buildinfo")
 		providerCfg = map[string]any{"url": cfg.LokiURL}
-		return "loki", cfg.LokiURL, ok, providerCfg
+		return "loki", cfg.LokiURL, err == nil, errString(err), providerCfg
 	default:
-		return "", "", false, map[string]any{}
+		return "", "", false, "", map[string]any{}
 	}
+}
+
+// errString renders a probe failure for the health UI: empty when healthy so
+// the wire field clears, the error text otherwise.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // probeClickhouse mirrors the legacy _check_clickhouse → db.health() probe.
@@ -1314,6 +1418,48 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
 	}
 	return true, ""
+}
+
+// traceColumnsReady latches the materialized-column check. The columns are
+// created once and never removed, so after a confirmed pass there is nothing
+// left to decide — re-issuing the system.columns read on every heartbeat would
+// be pure noise. While it is false we keep retrying, which is what makes the
+// setup self-healing: the exporter creates otel_traces lazily on its first span
+// batch, so the agent usually starts before the table exists.
+var traceColumnsReady atomic.Bool
+
+// traceColumnsWarned suppresses repeats of the same failure reason. The check
+// runs every heartbeat until it confirms, so a ClickHouse that stays down would
+// otherwise repeat one warning forever and bury the rest of the tick's output.
+var traceColumnsWarned atomic.Bool
+
+// ensureTraceColumns reports whether otel_traces carries the materialized
+// columns, creating them when it doesn't.
+//
+// Deliberately not gated on the clickhouseStatus probe. That probe pings
+// http://host:port/ping with the scheme hardcoded and no handling for a scheme
+// already in CLICKHOUSE_HOST, whereas this client honours CLICKHOUSE_SSL_ENABLED
+// and a URL-form host. Skipping the check whenever the probe says "down" would
+// therefore leave every SSL or external ClickHouse without its materialized
+// columns permanently, silently, while queries against it work fine —
+// and TRACES_ENABLED=false forces that probe false regardless of reachability.
+func ensureTraceColumns(ctx context.Context, ch *chclient.Client, logger *slog.Logger) bool {
+	if ch == nil {
+		return false
+	}
+	if traceColumnsReady.Load() {
+		return true
+	}
+	l := logger
+	if traceColumnsWarned.Load() {
+		l = slog.New(slog.DiscardHandler)
+	}
+	if chclient.EnsureMaterializedColumns(ctx, ch, l) {
+		traceColumnsReady.Store(true)
+		return true
+	}
+	traceColumnsWarned.Store(true)
+	return false
 }
 
 // probeCause unwraps the *url.Error net/http wraps around transport failures.
@@ -1394,8 +1540,21 @@ func httpProbeErr(ctx context.Context, c *http.Client, url string, headers ...ma
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		// Include a compact body snippet (whitespace collapsed, truncated) —
+		// backends put the useful detail ("token is expired", CORS/auth pages)
+		// in the body, and the UI renders this string verbatim.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		msg := strings.Join(strings.Fields(string(body)), " ")
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		if msg == "" {
+			return fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
 	}
+	// Drain the body so the transport can reuse the keep-alive connection.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 

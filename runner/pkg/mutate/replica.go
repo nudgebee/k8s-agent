@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -53,17 +54,51 @@ func (m *Mutator) ScaleWorkload(ctx context.Context, kind, namespace, name strin
 		return nil, fmt.Errorf("replica_rightsizing: unsupported kind %q (Deployment|StatefulSet|Rollout)", kind)
 	}
 
+	// Read the count we are about to overwrite, so an undo has something to restore. The patch is
+	// blind by nature — a merge-patch reports the new state, never the old — so without this the
+	// scale is a one-way door.
+	//
+	// Best-effort, and captured before the patch: failing to record how to undo a scale must not turn
+	// a successful scale into a failed one. An unreadable object simply reports no previous count, and
+	// the UI then offers no Undo rather than one that would restore a guess.
+	previousReplicas, hadPrevious := m.currentReplicas(ctx, gvr, namespace, name)
+
 	patch := fmt.Appendf(nil, `{"spec":{"replicas":%d}}`, replicas)
 	updated, err := m.dynamic.Resource(gvr).Namespace(namespace).
 		Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("mutate: scale %s/%s/%s to %d: %w", kind, namespace, name, replicas, err)
 	}
-	return map[string]any{
+	out := map[string]any{
 		"success": true,
 		"message": fmt.Sprintf("%s/%s/%s scaled to %d replicas", kind, namespace, name, replicas),
 		"updated": updated.UnstructuredContent(),
-	}, nil
+	}
+	if hadPrevious {
+		out["previous_replicas"] = previousReplicas
+	}
+	return out, nil
+}
+
+// currentReplicas reads spec.replicas before a scale. Reports false when the object cannot be read,
+// so the caller records nothing rather than a guess.
+//
+// An absent spec.replicas is reported as 1: that is the value the apiserver defaults it to for every
+// kind here, so restoring 1 restores the state that was actually running. Treating absent as 0 would
+// undo a scale-up by scaling the workload to nothing.
+func (m *Mutator) currentReplicas(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) (int64, bool) {
+	obj, err := m.dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return 0, false
+	}
+	replicas, found, err := unstructured.NestedInt64(obj.UnstructuredContent(), "spec", "replicas")
+	if err != nil {
+		return 0, false
+	}
+	if !found {
+		return 1, true
+	}
+	return replicas, true
 }
 
 // toInt64 coerces a JSON-decoded value that may be a float64 (number) or a

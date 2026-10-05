@@ -36,6 +36,7 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	// Every Job the agent creates MUST have:
 	//   - TTLSecondsAfterFinished = 600
 	//   - BackoffLimit = 0
+	//   - ActiveDeadlineSeconds >= 1800
 	//   - managed-by + orchestrator labels
 	//   - per-Job UUID label
 	// regardless of what the JobSpec asked for.
@@ -52,6 +53,9 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	if got := *job.Spec.BackoffLimit; got != jobBackoffLimit {
 		t.Errorf("BackoffLimit = %d; want hard-clamped %d", got, jobBackoffLimit)
 	}
+	if got := *job.Spec.ActiveDeadlineSeconds; got != minJobActiveDeadlineSeconds {
+		t.Errorf("ActiveDeadlineSeconds = %d; want floor %d", got, minJobActiveDeadlineSeconds)
+	}
 	if job.Labels[managedByLabel] != managedByValue {
 		t.Errorf("missing managed-by label: %v", job.Labels)
 	}
@@ -66,6 +70,32 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	}
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("RestartPolicy = %v; want Never", job.Spec.Template.Spec.RestartPolicy)
+	}
+}
+
+// A scanner that declares a budget longer than the hygiene floor keeps it — the
+// deadline is a backstop against wedged Jobs, not a scan timeout. nova's
+// helm-chart-upgrade is the real case (3000s).
+func TestBuildJob_ActiveDeadlineHonorsLongerTimeoutHint(t *testing.T) {
+	r := NewRunner(fake.NewClientset(), "ns", "agent-sa")
+
+	long := r.BuildJob(JobSpec{
+		NamePrefix:         "helm-chart-upgrade",
+		Image:              "nova:latest",
+		TimeoutHintSeconds: 3000,
+	}, "helm-chart-upgrade-abcd1234", "uuid-2")
+	if got := *long.Spec.ActiveDeadlineSeconds; got != 3000 {
+		t.Errorf("ActiveDeadlineSeconds = %d; want the spec's 3000s hint", got)
+	}
+
+	// A hint below the floor must not shorten the backstop.
+	short := r.BuildJob(JobSpec{
+		NamePrefix:         "trivy-image-scan",
+		Image:              "target:latest",
+		TimeoutHintSeconds: 60,
+	}, "trivy-image-scan-abcd1234", "uuid-3")
+	if got := *short.Spec.ActiveDeadlineSeconds; got != minJobActiveDeadlineSeconds {
+		t.Errorf("ActiveDeadlineSeconds = %d; want floor %d", got, minJobActiveDeadlineSeconds)
 	}
 }
 

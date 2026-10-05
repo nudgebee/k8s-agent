@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -389,8 +390,16 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 		converter: converter,
 	}
 	_, _ = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { enqueue(queue, obj) },
-		UpdateFunc: func(_, obj any) { enqueue(queue, obj) },
+		AddFunc: func(obj any) { enqueue(queue, obj) },
+		UpdateFunc: func(oldObj, newObj any) {
+			// Every resync replays the whole cache as no-op updates. The
+			// periodic full snapshot already re-sends everything, so posting
+			// them as well only doubles what the collector has to drain.
+			if sameResourceVersion(oldObj, newObj) {
+				return
+			}
+			enqueue(queue, newObj)
+		},
 		DeleteFunc: func(obj any) {
 			// When tombstones are enabled, capture a deleted:true item NOW —
 			// the DeleteFunc still has the object; once the key is gone from the
@@ -410,6 +419,21 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 		},
 	})
 	s.handlers = append(s.handlers, h)
+}
+
+// sameResourceVersion reports whether an update carries no change: an informer
+// resync delivers the cached object as both old and new. Objects without a
+// ResourceVersion are treated as changed.
+func sameResourceVersion(oldObj, newObj any) bool {
+	o, err := meta.Accessor(oldObj)
+	if err != nil {
+		return false
+	}
+	n, err := meta.Accessor(newObj)
+	if err != nil {
+		return false
+	}
+	return o.GetResourceVersion() != "" && o.GetResourceVersion() == n.GetResourceVersion()
 }
 
 // unwrapDeleted returns the underlying object from a cache.DeletedFinalStateUnknown
@@ -599,8 +623,19 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 	flush := func(last bool) {
 		seq++
 		env := &Envelope{
-			Type:          typ,
-			Data:          append([]any(nil), chunk...),
+			Type: typ,
+			// Must stay non-nil even when chunk is empty: `append([]any(nil))`
+			// returns a nil slice, which marshals to `"data": null`, and the
+			// collector discards a null-data payload outright (it cannot tell
+			// "no resources" from "lost payload", and coercing null to [] on a
+			// last batch would deactivate every resource for the account). A
+			// discarded envelope is silent data loss when it is the is_last
+			// one: the collector never records the terminal sequence, so
+			// claim_reconcile never fires and the snapshot's deletion-reconcile
+			// is skipped entirely. Two ways to get an empty final chunk — a
+			// converted count that is an exact multiple of batchSize, and a
+			// resource type with no items at all.
+			Data:          append(make([]any, 0, len(chunk)), chunk...),
 			FullLoad:      true,
 			BatchID:       batchID,
 			BatchSequence: seq,
@@ -814,7 +849,23 @@ func newPodConverter(rsLookup replicaSetLookupFn) func(any) (any, bool) {
 			"node_name":        p.Spec.NodeName,
 			"status":           string(p.Status.Phase),
 			"restart_count":    podRestartCounts(p),
-			"status_dict":      nil,
+			// The pod's status subresource, verbatim. `status` above is only the
+			// PHASE, which is "Running" for a pod stuck in CrashLoopBackOff — the
+			// waiting reason that kubectl prints lives in ContainerStatuses and
+			// never left the agent while this was nil, so the collector stored
+			// meta.status_info = null and every reader coded against it went dark:
+			// the pod-detail panels (conditions, container statuses, IPs, QoS),
+			// the knowledge graph's host_ip, and cost-server's cluster cache.
+			//
+			// Sent whole rather than trimmed. Marshalling corev1.PodStatus yields
+			// the Kubernetes API's own camelCase shape (containerStatuses, hostIP,
+			// podIPs, qosClass), which is what those readers already expect.
+			// Dropping imageID/containerID/image saves only 19% of it (measured on
+			// a 419-pod cluster: 958 KiB -> 781 KiB) and would leave a shape that
+			// looks like PodStatus but silently isn't. Cost as sent: ~2.3 KiB/pod
+			// raw, ~200 B/pod after the sink's gzip, so ~0.8 MiB per snapshot on a
+			// 4000-pod cluster against a 100 MiB message threshold.
+			"status_dict": p.Status,
 			"config": map[string]any{
 				"labels":     nonNilLabels(p.Labels),
 				"containers": containers,

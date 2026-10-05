@@ -35,6 +35,10 @@ func Builtins() []MatcherSpec {
 	for _, kind := range []string{"Deployment", "DaemonSet", "StatefulSet", "Ingress", "Rollout"} {
 		out = append(out, babysitterChangeMatcher(kind))
 	}
+	// ConfigMaps get their own spec: the payload lives in data /
+	// binaryData, so the babysitter kinds' "spec"-rooted diff filter
+	// never produces a diff for one.
+	out = append(out, configMapChangeMatcher())
 	return out
 }
 
@@ -54,11 +58,29 @@ func Builtins() []MatcherSpec {
 // Pod has obj.restartCount == oldObj.restartCount, so the transition gate
 // suppressed every real event.
 //
-// Rate limit: 1h per (owner, hour-bucket). A Pod stuck in CrashLoopBackOff
-// fires ~1 Finding per hour. Earlier the matcher bucketed by
-// restartCount/5 with a 10m rate limit — a fast-crashing Pod (5 restarts
-// every ~10m) advanced the bucket every window and produced 20+ findings
-// in 6h. Hour-bucket pattern mirrors podOOMKilledMatcher.
+// Rate limit: 1h per owner, cleared early when the workload recovers
+// (RecoveryPredicate below). A Pod stuck in CrashLoopBackOff fires ~1
+// Finding per hour; a Pod that recovers and breaks again fires as soon
+// as it breaks again.
+//
+// Two earlier shapes, and why neither worked:
+//
+//   - restartCount/5 bucket + 10m rate limit: a fast-crashing Pod (5
+//     restarts every ~10m) advanced the bucket every window and produced
+//     20+ findings in 6h.
+//   - wall-clock hour bucket in the fingerprint (mirroring
+//     podOOMKilledMatcher): pinned re-fire to the clock rather than to
+//     the failure. Two crashes straddling :00 produced two Findings
+//     minutes apart, while a genuine recover-then-crash-again in the
+//     middle of an hour produced none at all. Observed live: findings at
+//     09:41 and 10:01 for one Deployment, then nothing for the rest of
+//     the hour.
+//
+// The bucket is gone, so the fingerprint is (namespace, owner) and can
+// be reconstructed from a healthy Pod — which is what makes the recovery
+// reset possible. Nothing downstream depended on the bucket: the
+// collector normalizes this aggregation key's fingerprint to owner level
+// on ingest anyway.
 func podCrashLoopMatcher() MatcherSpec {
 	const minRestarts = 2
 	return MatcherSpec{
@@ -86,21 +108,84 @@ func podCrashLoopMatcher() MatcherSpec {
 			}
 			return false
 		},
-		FingerprintFn: func(obj map[string]any) string {
-			ns, name := metaNS(obj), metaName(obj)
-			owner := ResolveOwner(obj)
-			if owner.Name != "" {
-				name = owner.Name
-			}
-			// Hour bucket pairs with the 1h rate limit. After the
-			// limit expires, the bucket has rolled too — so the next
-			// CrashLoopBackOff produces a fresh fingerprint and a
-			// fresh Finding. Mirrors podOOMKilledMatcher.
-			hourBucket := time.Now().UTC().Truncate(time.Hour).Unix()
-			return fp("report_crash_loop", ns, name, fmt.Sprintf("h%d", hourBucket))
+		RecoveryPredicate: func(obj, _ map[string]any) bool {
+			return podCrashLoopRecovered(obj)
 		},
-		EnrichBlocks: crashLoopEnrichBlocks,
+		FingerprintFn: podCrashLoopFingerprint,
+		EnrichBlocks:  crashLoopEnrichBlocks,
 	}
+}
+
+// podCrashLoopFingerprint identifies the workload, not the episode and
+// not the Pod: every replica of a Deployment crashing on the same bad
+// image is one problem, and the Pod name changes on every recreate.
+// Shared by the fire path and the recovery path — both must derive the
+// same key from the same Pod or the reset can't find the record to
+// clear, so it reads nothing that only a crashing Pod carries.
+func podCrashLoopFingerprint(obj map[string]any) string {
+	ns, name := metaNS(obj), metaName(obj)
+	if owner := ResolveOwner(obj); owner.Name != "" {
+		name = owner.Name
+	}
+	return fp("report_crash_loop", ns, name)
+}
+
+// podCrashLoopStableWindow is how long every container has to have been
+// running before we call a Pod recovered and drop the rate-limit record.
+//
+// It exists because CrashLoopBackOff is intermittent by construction:
+// the kubelet restarts the container, it runs (and briefly reports
+// ready) until it crashes, then goes back to waiting. So "not in
+// CrashLoopBackOff right now" is true for part of every backoff cycle,
+// and resetting on that would re-fire the matcher every few minutes —
+// worse than the bug this fixes. The container must survive longer than
+// the crash cycle for the reset to mean anything.
+//
+// 10m is comfortably past the kubelet's 5m backoff ceiling, so a Pod
+// that is still only cycling can't clear it.
+const podCrashLoopStableWindow = 10 * time.Minute
+
+// podCrashLoopRecovered reports whether the Pod has been healthy long
+// enough that a later CrashLoopBackOff is a new problem rather than a
+// continuation of the one we already reported.
+//
+// Every regular container must be ready and running, with a
+// state.running.startedAt at least podCrashLoopStableWindow old. The
+// startedAt check doubles as a restart check without needing the
+// previous object: the kubelet stamps a fresh startedAt on every
+// container start, so a Pod that restarted a minute ago cannot pass it.
+//
+// Init containers are deliberately not inspected — they terminate
+// successfully in a healthy Pod, so requiring them to be running would
+// never pass. An init container stuck crashlooping still fails this
+// check, because the regular containers behind it are waiting on
+// PodInitializing rather than running.
+func podCrashLoopRecovered(obj map[string]any) bool {
+	if obj == nil {
+		return false
+	}
+	statuses := podRegularContainerStatuses(obj)
+	if len(statuses) == 0 {
+		// No container statuses at all: a Pod that hasn't been scheduled
+		// or admitted yet. Unknown, not healthy — leave suppression as is.
+		return false
+	}
+	for _, cs := range statuses {
+		if ready, _ := cs["ready"].(bool); !ready {
+			return false
+		}
+		st, _ := cs["state"].(map[string]any)
+		running, _ := st["running"].(map[string]any)
+		if running == nil {
+			return false
+		}
+		startedAt, _ := running["startedAt"].(string)
+		since, ok := durationSinceRFC3339(startedAt)
+		if !ok || since < podCrashLoopStableWindow {
+			return false
+		}
+	}
+	return true
 }
 
 // crashLoopEnrichBlocks builds the markdown blocks report_crash_loop
@@ -173,9 +258,11 @@ func markdownBlock(text string) EvidenceBlock {
 
 // ------- Pod OOMKilled -------
 
-// podOOMKilledMatcher implements PodOomKilledTrigger: fires when any
-// container's lastState.terminated.reason == "OOMKilled". Fires whenever
-// any container's lastState.terminated.reason == OOMKilled.
+// podOOMKilledMatcher implements PodOomKilledTrigger: fires when a
+// container's *most recent* termination was OOMKilled — state.terminated
+// when the container is still down, lastState.terminated once it has
+// restarted. An OOM in lastState that a later non-OOM termination has
+// superseded does not fire (see containerOOMTermination).
 // Same kubewatch oldObj/obj pointer-aliasing problem as pod_crash_loop —
 // the previous transition gate (`prev[name] != obj[name]`) never tripped
 // because oldObj is the same snapshot as obj. We rely on the 1h rate
@@ -195,9 +282,9 @@ func podOOMKilledMatcher() MatcherSpec {
 			// (lastState.terminated) OOMKilled. A restartPolicy:Never pod or
 			// a Job OOMs once and records it in state.terminated with an empty
 			// lastState — checking only lastState missed those entirely.
-			// mostRecentOOMKilledContainerStatus already prefers state over
-			// lastState (the same logic the enricher uses), so this keeps the
-			// fire predicate and the enrichment consistent.
+			// mostRecentOOMKilledContainerStatus applies the same
+			// most-recent-termination rule the enricher uses, so the fire
+			// predicate and the enrichment stay consistent.
 			return mostRecentOOMKilledContainerStatus(obj) != nil
 		},
 		FingerprintFn: func(obj map[string]any) string {
@@ -206,11 +293,16 @@ func podOOMKilledMatcher() MatcherSpec {
 			if owner.Name != "" {
 				name = owner.Name
 			}
-			// Hour bucket pairs with the 1h rate limit. After the limit
-			// expires, the bucket has rolled too — so the next OOM
-			// produces a fresh fingerprint and a fresh Finding.
-			hourBucket := time.Now().UTC().Truncate(time.Hour).Unix()
-			return fp("pod_oom_killer_enricher", ns, name, fmt.Sprintf("h%d", hourBucket))
+			// Hour bucket pairs with the 1h rate limit, and comes from
+			// the OOM's own finishedAt rather than the wall clock: one
+			// kill always lands in one bucket, so re-observing the same
+			// unchanged status can only ever produce the same
+			// fingerprint. A wall-clock bucket rolled every hour, which
+			// let a single OOM mint an unbounded number of Findings for
+			// as long as the container kept running. A genuinely new OOM
+			// carries a later finishedAt, so a Pod stuck OOMing still
+			// produces ~1 fire/hour.
+			return fp("pod_oom_killer_enricher", ns, name, fmt.Sprintf("h%d", oomHourBucket(obj)))
 		},
 		EnrichBlocks: oomKilledEnrichBlocks,
 	}
@@ -309,10 +401,20 @@ func imagePullBackoffMatcher() MatcherSpec {
 			owner := ResolveOwner(obj)
 			if owner.Name != "" {
 				name = owner.Name
+				// A Pod owned by a Job resolves to that Job, whose name
+				// carries a per-run suffix — so a creator that runs one Job
+				// per unit of work (our image scanner: one Job per image)
+				// produced a brand-new fingerprint every run and never
+				// chained. Collapse to the job family (#36647).
+				if owner.Kind == "job" {
+					name = JobFamily(name)
+				}
 			}
 			// Include the bad image — different bad images on the same
 			// workload should be distinct Findings (operator just typo'd
-			// one container, the rest are fine).
+			// one container, the rest are fine). This also keeps per-image
+			// resolution after the job-family collapse above: one scan Job
+			// family with two bad images is still two Findings.
 			image := firstFailingImage(obj)
 			return fp("image_pull_backoff_reporter", ns, name, image)
 		},
@@ -391,14 +493,34 @@ func jobFailureMatcher() MatcherSpec {
 		AggregationKey: "job_failure",
 		Priority:       "MEDIUM",
 		FindingType:    "issue",
-		RateLimit:      0, // terminal — fingerprint by UID is enough
+		// Was 0 ("terminal — fingerprint by UID is enough"). That reasoning
+		// depended on the UID making every run unique; now that runs of the
+		// same job share a fingerprint, leaving this unlimited would re-emit
+		// for as long as the failed Job lingers. The transition gate cannot be
+		// relied on to prevent that either — same kubewatch pointer-aliasing
+		// caveat as pod_crash_loop, and prod shows single failed Jobs emitting
+		// ~68 times. The occurrence chain still counts every repeat; this only
+		// bounds emission rate.
+		RateLimit: 10 * time.Minute,
 		Predicate: func(obj, oldObj map[string]any) bool {
 			return jobHasFailedCondition(obj) && !jobHasFailedCondition(oldObj)
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			ns := metaNS(obj)
-			uid := metaUID(obj)
-			return fp("job_failure", ns, uid)
+			// Prefer the CronJob parent — the watched object here is the Job
+			// itself, so its ownerReferences carry the CronJob when there is
+			// one. A directly-created Job has no owner to walk, and its own
+			// name is unique per run, so fall back to the job family.
+			// Keying on metadata.uid (the previous behaviour) made every run
+			// a distinct problem and stopped the occurrence chain from ever
+			// forming (#36647).
+			name := metaName(obj)
+			if owner := ResolveOwner(obj); owner.Name != "" {
+				name = owner.Name
+			} else {
+				name = JobFamily(name)
+			}
+			return fp("job_failure", ns, name)
 		},
 	}
 }
@@ -497,11 +619,40 @@ func nodeUnschedulableMatcher() MatcherSpec {
 	}
 }
 
+// nodePressureWindow is both the rate-limit window and the fingerprint bucket
+// for node_pressure. They MUST stay equal: the limiter is keyed on the
+// fingerprint, so a bucket shorter than the window would mint a new key before
+// the limit expired and defeat it again.
+const nodePressureWindow = 6 * time.Hour
+
 // nodePressureMatcher fires when a Node reports Disk/Memory/PID pressure
 // (kubelet is reclaiming or evicting). The condition is read straight off the
 // watched Node object (KSM-derived, not node-exporter), so it survives a
 // degraded Prometheus rule engine — the failure mode that lets the upstream
 // KubeNodePressure rule miss it under load.
+//
+// Fingerprinted by TIME BUCKET, not by the condition's lastTransitionTime.
+// Pressure is a RECURRING condition, not an episode: kubelet fills the disk,
+// garbage-collects images, and fills it again, so DiskPressure flips True →
+// False → True continuously. lastTransitionTime moves on every flip, which
+// minted a new fingerprint each time — and since the rate limiter is keyed on
+// spec.Name+":"+fingerprint (engine.go), the RateLimit below never engaged.
+// Measured on production: one node produced 7 findings in 53 minutes against
+// a 6h limit, and across 30 days node_pressure averaged 7.7 findings per node
+// over 42 nodes.
+//
+// This is why it does NOT get the dwell guard its neighbours use
+// (nodeNotReadyMinDuration and friends). A 15-minute minimum would silence a
+// node flapping every 8 minutes — exactly the node most worth alerting on,
+// since the pressure there is real and continuous. The condition belongs with
+// report_crash_loop and pod_oom_killed, which are also "keeps happening"
+// signals bucketed by time, rather than with node_not_ready / cordon, which
+// are genuine single episodes.
+//
+// The bucket matches RateLimit so the two agree: at most one finding per node
+// per condition per window, whether the condition flaps or holds. `cond` stays
+// in the key so a node that develops a SECOND kind of pressure still reports
+// promptly instead of being suppressed for the rest of the window.
 func nodePressureMatcher() MatcherSpec {
 	return MatcherSpec{
 		Name:           "node_pressure",
@@ -510,13 +661,28 @@ func nodePressureMatcher() MatcherSpec {
 		AggregationKey: "node_pressure",
 		Priority:       "HIGH",
 		FindingType:    "issue",
-		RateLimit:      6 * time.Hour,
+		RateLimit:      nodePressureWindow,
 		Predicate: func(obj, _ map[string]any) bool {
 			return activeNodePressure(obj) != ""
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			cond := activeNodePressure(obj)
-			return fp("node_pressure", metaName(obj), cond, nodeConditionLastTransition(obj, cond))
+			// Bucket the condition's OWN transition time, truncated to the
+			// window -- not wall-clock now. A fingerprint has to be a function
+			// of the object observed: bucketing on now() would collapse a
+			// backlog replayed after a restart into whichever window the
+			// catch-up happened to run in, and would make this untestable
+			// (two calls in one test always share the same now()).
+			//
+			// Flaps inside a window truncate to the same bucket, so they stay
+			// one finding. A condition that simply HOLDS keeps one stable
+			// fingerprint, so the RateLimit expires and re-fires it against
+			// the same key -- the re-fire behaviour node_not_ready documents.
+			bucket := time.Now().UTC().Truncate(nodePressureWindow).Unix()
+			if t, err := time.Parse(time.RFC3339, nodeConditionLastTransition(obj, cond)); err == nil {
+				bucket = t.UTC().Truncate(nodePressureWindow).Unix()
+			}
+			return fp("node_pressure", metaName(obj), cond, fmt.Sprintf("b%d", bucket))
 		},
 	}
 }
@@ -579,6 +745,18 @@ func podUnschedulableMatcher() MatcherSpec {
 // server-side enricher needed.
 func babysitterChangeMatcher(kind string) MatcherSpec {
 	diffOpt := DefaultSpecDiffOptions()
+	buildBlock := BuildKubernetesDiffBlock
+	if strings.EqualFold(kind, "Ingress") {
+		// An Ingress keeps its routing rules in spec, but how traffic is
+		// actually handled — body-size ceilings, timeouts, buffering,
+		// SSL redirect, injected nginx snippets — lives in annotations.
+		// The spec-only filter reports nothing for the change most
+		// likely to have broken traffic.
+		diffOpt = IngressDiffOptions()
+		buildBlock = func(obj, oldObj map[string]any, _ string, diffs []DiffEntry) EvidenceBlock {
+			return BuildIngressDiffBlock(obj, oldObj, diffs)
+		}
+	}
 	return MatcherSpec{
 		Name:           "babysitter_" + strings.ToLower(kind),
 		Kind:           kind,
@@ -586,10 +764,11 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 		AggregationKey: "ConfigurationChange/KubernetesResource/Change",
 		Priority:       "INFO",
 		FindingType:    "configuration_change",
-		// Each spec change has its own resourceVersion → its own
-		// fingerprint → no rate-limit needed for dedup. We do set a
-		// short rate-limit to absorb the rare spurious double-fire
-		// (kubewatch occasionally re-delivers the same event).
+		// Short rate-limit absorbs the rare spurious double-fire
+		// (kubewatch occasionally re-delivers the same event). A real
+		// second edit within the window is not lost to it in practice:
+		// the predicate requires an actual spec diff, and the status-only
+		// updates that dominate a rollout are excluded by diffOpt.
 		RateLimit: 30 * time.Second,
 		Predicate: func(obj, oldObj map[string]any) bool {
 			if oldObj == nil {
@@ -601,13 +780,17 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 		FingerprintFn: func(obj map[string]any) string {
 			ns := metaNS(obj)
 			name := metaName(obj)
-			// Include resourceVersion so each distinct spec change gets
-			// its own Finding (Plan agent: "include obj.metadata.
-			// resourceVersion so each spec change is a distinct
-			// finding").
-			meta, _ := obj["metadata"].(map[string]any)
-			rv, _ := meta["resourceVersion"].(string)
-			return fp("ConfigurationChange/KubernetesResource/Change", ns, name, rv)
+			// Identity is the resource that changed, NOT the individual
+			// change. This previously mixed in metadata.resourceVersion so
+			// "each spec change is a distinct finding" — but resourceVersion
+			// advances on every write, so no two changes to the same resource
+			// ever shared a fingerprint and the occurrence chain never formed:
+			// all 8824 of these in 30d of prod had occurrence_number = 1
+			// (#36647). Each change is still its own event row carrying its
+			// own diff evidence; they now chain into one recurring entry with
+			// a repeat count. Kind is included so a Deployment and a Service
+			// of the same name in one namespace stay distinct.
+			return fp("ConfigurationChange/KubernetesResource/Change", ns, strings.ToLower(kind), name)
 		},
 		EnrichBlocks: func(obj, oldObj map[string]any, _ EnrichContext) []EvidenceBlock {
 			diffs := ComputeSpecDiff(obj, oldObj, diffOpt)
@@ -620,10 +803,147 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 			// CodeMirrorDiffViewer; any other block ("markdown", etc.) shows
 			// "No diff available."
 			return []EvidenceBlock{
-				BuildKubernetesDiffBlock(obj, oldObj, kind, diffs),
+				buildBlock(obj, oldObj, kind, diffs),
 			}
 		},
 	}
+}
+
+// ------- ConfigMap data change -------
+
+// configMapChangeMatcher fires when a ConfigMap's data or binaryData
+// changes. It shares the babysitter aggregation key — a config change is
+// a config change as far as the UI's change history and the "what
+// changed before this alert" correlation are concerned — but filters on
+// the fields a ConfigMap actually stores its payload in.
+//
+// The gap this closes: a value consumed with `envFrom` (or mounted as a
+// file) appears nowhere in the consuming pod template, so editing it
+// leaves the Deployment spec byte-identical. `kubectl rollout history`
+// has no revision to diff, ConfigMap edits emit no Kubernetes events at
+// all, and `metadata.managedFields` records a timestamp but never the
+// previous value. This event is the only place the old value survives.
+func configMapChangeMatcher() MatcherSpec {
+	diffOpt := ConfigMapDiffOptions()
+	return MatcherSpec{
+		Name:           "babysitter_configmap",
+		Kind:           "ConfigMap",
+		Operations:     []string{"update"},
+		SuppressChurn:  true,
+		AggregationKey: "ConfigurationChange/KubernetesResource/Change",
+		Priority:       "INFO",
+		FindingType:    "configuration_change",
+		RateLimit:      30 * time.Second,
+		Predicate: func(obj, oldObj map[string]any) bool {
+			if oldObj == nil || isNoisyConfigMap(obj) {
+				return false
+			}
+			return len(ComputeSpecDiff(obj, oldObj, diffOpt)) > 0
+		},
+		FingerprintFn: func(obj map[string]any) string {
+			// Same identity rule as the babysitter kinds: the resource
+			// that changed, not the individual change, so repeat edits
+			// to one ConfigMap chain into a recurring entry.
+			return fp("ConfigurationChange/KubernetesResource/Change",
+				metaNS(obj), "configmap", metaName(obj))
+		},
+		EnrichBlocks: func(obj, oldObj map[string]any, _ EnrichContext) []EvidenceBlock {
+			diffs := ComputeSpecDiff(obj, oldObj, diffOpt)
+			if len(diffs) == 0 {
+				return nil
+			}
+			return []EvidenceBlock{BuildConfigMapDiffBlock(obj, oldObj, diffs)}
+		},
+	}
+}
+
+// isNoisyConfigMap drops ConfigMaps that rewrite themselves as part of
+// normal cluster operation. Without this the change feed fills with
+// coordination traffic that no operator wants to read, and the signal —
+// somebody edited a value an application depends on — drowns in it.
+func isNoisyConfigMap(obj map[string]any) bool {
+	// Written into every namespace by the root-CA controller.
+	if metaName(obj) == "kube-root-ca.crt" {
+		return true
+	}
+	if inExcludedNamespace(metaNS(obj)) && !isTrackedSystemConfigMap(metaName(obj)) {
+		return true
+	}
+	meta, _ := obj["metadata"].(map[string]any)
+	if meta == nil {
+		return false
+	}
+	// Pre-Lease leader election stores the current holder in this
+	// annotation and rewrites it every few seconds, indefinitely.
+	annotations, _ := meta["annotations"].(map[string]any)
+	if _, held := annotations["control-plane.alpha.kubernetes.io/leader"]; held {
+		return true
+	}
+	// Helm/Tiller release bookkeeping. Modern Helm keeps release state in
+	// Secrets, but charts and operators carrying the legacy label still
+	// exist, and that state is not user-facing configuration.
+	labels, _ := meta["labels"].(map[string]any)
+	switch owner, _ := labels["OWNER"].(string); owner {
+	case "TILLER", "HELM":
+		return true
+	}
+	return false
+}
+
+// ConfigMapExcludedNamespaces are the namespaces whose ConfigMap changes are
+// dropped by default. These hold the platform's own moving parts — an
+// autoscaler's status, a webhook heartbeat — which are state stored in a
+// ConfigMap rather than configuration anyone edits.
+//
+// Overridable at boot from CONFIGMAP_CHANGE_EXCLUDED_NAMESPACES, because
+// "system namespace" is a cluster-by-cluster judgement: an operator who runs
+// their platform config out of kube-system needs to turn this off.
+var ConfigMapExcludedNamespaces = []string{
+	"kube-system",
+	"kube-public",
+	"kube-node-lease",
+	"gke-managed-system",
+	"gke-managed-cim",
+	"gmp-system",
+	"gke-gmp-system",
+}
+
+// trackedSystemConfigMaps are reported even inside an excluded namespace.
+//
+// Excluding kube-system wholesale would drop some of the highest-consequence
+// configuration in the cluster along with the noise. Editing coredns' Corefile
+// breaks name resolution cluster-wide; aws-auth governs who can reach the API
+// at all; kube-proxy's config decides how traffic is forwarded. Those are
+// exactly the changes worth waking someone for, and they are edited by hand,
+// rarely — the opposite profile to the churn this filter exists to remove.
+var trackedSystemConfigMaps = map[string]bool{
+	"coredns":                              true,
+	"kube-dns":                             true,
+	"aws-auth":                             true,
+	"kube-proxy":                           true,
+	"kubelet-config":                       true,
+	"cluster-autoscaler-priority-expander": true,
+}
+
+func inExcludedNamespace(namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+	for _, ns := range ConfigMapExcludedNamespaces {
+		if ns == namespace {
+			return true
+		}
+		// OpenShift spreads its platform across dozens of openshift-* names;
+		// matching the prefix avoids enumerating them.
+		if strings.HasSuffix(ns, "*") && strings.HasPrefix(namespace, strings.TrimSuffix(ns, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTrackedSystemConfigMap(name string) bool {
+	return trackedSystemConfigMaps[name]
 }
 
 // -------- helpers --------
@@ -644,6 +964,25 @@ func podContainerStatuses(obj map[string]any) []map[string]any {
 		}
 	}
 	return all
+}
+
+// podRegularContainerStatuses returns status.containerStatuses only —
+// no init or ephemeral containers. Callers that reason about whether the
+// Pod's actual workload is running want this; callers looking for a
+// failure anywhere in the Pod want podContainerStatuses.
+func podRegularContainerStatuses(obj map[string]any) []map[string]any {
+	st, _ := obj["status"].(map[string]any)
+	if st == nil {
+		return nil
+	}
+	raw, _ := st["containerStatuses"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if cs, _ := item.(map[string]any); cs != nil {
+			out = append(out, cs)
+		}
+	}
+	return out
 }
 
 func firstFailingImage(obj map[string]any) string {
@@ -825,12 +1164,6 @@ func metaNS(obj map[string]any) string {
 	return n
 }
 
-func metaUID(obj map[string]any) string {
-	m, _ := obj["metadata"].(map[string]any)
-	u, _ := m["uid"].(string)
-	return u
-}
-
 // fp produces a stable sha256 hex of joined fields. Used by FingerprintFn
 // so all matchers produce same-shape fingerprints (inspectable, hex-safe).
 func fp(parts ...string) string {
@@ -860,34 +1193,60 @@ func mostRecentOOMKilledContainerStatus(obj map[string]any) map[string]any {
 }
 
 // containerOOMTermination returns (terminated_state, finishedAt) when the
-// container's most recent termination was OOMKilled. state wins over
-// lastState (current OOM is fresher than recovered OOM). Returns (nil, "")
-// when neither side has an OOMKilled terminated state.
+// container's most recent termination was OOMKilled. state.terminated is
+// the most recent termination when present, so a non-OOM one there ends
+// the search: the OOM still sitting in lastState belongs to an earlier
+// incarnation and re-reporting it labels the current crash an OOM.
+// (Seen on workflow-server: a container OOMed once, ran for 21h, then
+// died with exitCode 2 — the moment state.terminated said Error while
+// lastState still said OOMKilled produced a bogus "was OOMKilled"
+// Finding.) Returns (nil, "") when the most recent termination was not
+// an OOM, or when the container never terminated.
 func containerOOMTermination(cs map[string]any) (map[string]any, string) {
-	if t := terminatedIfOOM(cs["state"]); t != nil {
-		ts, _ := t["finishedAt"].(string)
-		return t, ts
+	if st := terminatedState(cs["state"]); st != nil {
+		if !isOOM(st) {
+			return nil, ""
+		}
+		ts, _ := st["finishedAt"].(string)
+		return st, ts
 	}
-	if t := terminatedIfOOM(cs["lastState"]); t != nil {
-		ts, _ := t["finishedAt"].(string)
-		return t, ts
+	if st := terminatedState(cs["lastState"]); st != nil && isOOM(st) {
+		ts, _ := st["finishedAt"].(string)
+		return st, ts
 	}
 	return nil, ""
 }
 
-func terminatedIfOOM(v any) map[string]any {
+// terminatedState unwraps a ContainerState's `terminated` sub-object,
+// or nil when the container is not in a terminated state.
+func terminatedState(v any) map[string]any {
 	st, _ := v.(map[string]any)
 	if st == nil {
 		return nil
 	}
 	t, _ := st["terminated"].(map[string]any)
-	if t == nil {
-		return nil
-	}
-	if reason, _ := t["reason"].(string); reason != "OOMKilled" {
-		return nil
-	}
 	return t
+}
+
+func isOOM(terminated map[string]any) bool {
+	reason, _ := terminated["reason"].(string)
+	return reason == "OOMKilled"
+}
+
+// oomHourBucket returns the UTC hour bucket of the most recent OOM
+// termination's finishedAt, for use as the fingerprint's dedup bucket.
+// Falls back to the current hour when no OOM is present or its
+// timestamp is missing/unparseable — that keeps the fingerprint stable
+// within the rate-limit window even on malformed status.
+func oomHourBucket(obj map[string]any) int64 {
+	if cs := mostRecentOOMKilledContainerStatus(obj); cs != nil {
+		if _, ts := containerOOMTermination(cs); ts != "" {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				return t.UTC().Truncate(time.Hour).Unix()
+			}
+		}
+	}
+	return time.Now().UTC().Truncate(time.Hour).Unix()
 }
 
 // podNodeName returns spec.nodeName, or "" when unset (pod not yet scheduled).
