@@ -457,6 +457,20 @@ fi
 disable_prometheus_stack_args=()
 if [ "$disable_prometheus_stack" == "true" ]; then
   disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
+else
+  # enablePrometheusStack=true (the chart default) asserts the Prometheus operator's
+  # CRDs exist, so the chart emits ServiceMonitor/PodMonitor/PrometheusRule objects
+  # unconditionally. A Prometheus found above without the operator (e.g. a plain
+  # prometheus-server) has no such CRDs, and the install fails on them. With false,
+  # each object is rendered only where its CRD is registered. Only a definite
+  # NotFound flips it; if the CRDs can't be read (RBAC), keep the default.
+  for crd in servicemonitors podmonitors prometheusrules; do
+    if kubectl get crd "$crd.monitoring.coreos.com" -o name 2>&1 >/dev/null | grep -q "NotFound"; then
+      echo "Prometheus operator CRD $crd.monitoring.coreos.com not found; the chart will skip monitoring CRs this cluster cannot accept."
+      disable_prometheus_stack_args=(--set "enablePrometheusStack=false")
+      break
+    fi
+  done
 fi
 
 # global.storageClass reaches the ClickHouse PVC, the only one the chart creates

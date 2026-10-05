@@ -84,11 +84,11 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-09-24T10-58-00_cc47138c4b3bd1d5a1822440c3fbe1dab8b7b245
+    tag: 2026-10-02T19-52-51_a218fe2ad2061ec8f3c74af5518026d63936cdb6
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
-  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:2ca753a"
+  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:e8fe8d4"
   imagePullPolicy: IfNotPresent
   # Expose net/http/pprof on the runner HTTP listener (surfaces as
   # PPROF_ENABLED). Off by default — the endpoints are unauthenticated;
@@ -370,7 +370,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.7
+    tag: 0.1.8
   resources:
     requests:
       cpu: "100m"
@@ -556,20 +556,23 @@ clickhouse:
       memory: 2000Mi
     limits:
       memory: 2000Mi
-  # NOTE: these render monitoring.coreos.com CRs from the Bitnami subchart, which
-  # this chart cannot gate on `.Capabilities` the way its own templates do — a
-  # parent cannot add a condition to a subchart's template, only flip a value. On
-  # a cluster with no Prometheus operator the CRDs are unregistered and the
-  # install fails on them, so installing there means setting BOTH:
-  #   --set enablePrometheusStack=false \
-  #   --set clickhouse.metrics.serviceMonitor.enabled=false
-  # Left enabled by default so installs that do have the operator (the case the
-  # quick-install script produces, since it installs kube-prometheus-stack) keep
-  # their ClickHouse scrape target.
+  # The ClickHouse ServiceMonitor is rendered by this chart
+  # (templates/clickhouse-servicemonitor.yaml), not by the Bitnami subchart: a
+  # parent cannot add a condition to a subchart's template, and the subchart's
+  # copy failed installs on clusters with no Prometheus operator. This chart's
+  # copy is gated like its other monitoring CRs, so on such a cluster the one
+  # setting needed is `--set enablePrometheusStack=false` (installation.sh sets
+  # it when the operator's CRDs are absent). Set nudgebeeServiceMonitor.enabled
+  # to false to drop the scrape target entirely.
+  nudgebeeServiceMonitor:
+    enabled: true
   metrics:
+    # Also opens the http-metrics port the ServiceMonitor scrapes; keep it on.
     enabled: true
     serviceMonitor:
-      enabled: true
+      # The subchart's own copy, ungated. Leave false; interval and
+      # scrapeTimeout below are still read by this chart's copy.
+      enabled: false
       interval: 30s
       scrapeTimeout: 10s
     prometheusRule:
@@ -584,7 +587,9 @@ clickhouse:
             summary: "ClickHouse instance is down"
             description: "ClickHouse node is not responding for more than 2 minutes."
         - alert: ClickHouseHighLatency
-          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / rate(clickhouse_query_duration_seconds_count[5m]) > 1
+          # Divide only where queries ran: with none, rate(_count) is 0 and a
+          # float wobble in _sum turns the ratio into +Inf, firing falsely.
+          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / (rate(clickhouse_query_duration_seconds_count[5m]) > 0) > 1
           for: 5m
           labels:
             severity: warning
