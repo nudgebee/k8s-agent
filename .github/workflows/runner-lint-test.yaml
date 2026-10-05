@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
     paths: ['runner/**']
+  # merge_group takes no path filter, so this runs for every queue entry: the
+  # Go suite is tested against the merged result, not just the PR's base.
+  merge_group:
   push:
     branches: [main]
     paths: ['runner/**']

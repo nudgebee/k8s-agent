@@ -90,11 +90,10 @@ jobs:
           # for main commits touching runner/** (runner-image.yaml). Pin the chart
           # to the NEWEST such image whose commit is an ancestor of the release
           # commit, so a released chart can never ship a runner image that
-          # predates — or isn't part of — its own code. This replaces relying on
-          # the PR-time "newest published image" (update-image-tags.yml), which
-          # records the previous build because a PR's own image isn't built yet
-          # when that job runs — the off-by-one that shipped rc-5 with a pre-#453
-          # runner.
+          # predates — or isn't part of — its own code. A PR-time "newest
+          # published image" would record the previous build, because a PR's own
+          # image isn't built until it merges — the off-by-one that shipped rc-5
+          # with a pre-#453 runner.
           picked=""
           while IFS= read -r tag; do
             sha="${tag##*_}"
