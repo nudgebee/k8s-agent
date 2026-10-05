@@ -85,6 +85,42 @@ func TestRender_ReverseDownstreamPointers(t *testing.T) {
 	}
 }
 
+// The UI's "Incoming" table and latency filter read the stats off
+// Downstreams, so they must carry the same edge's numbers as the caller's
+// UpstreamLink rather than zeros.
+func TestRender_DownstreamLinkValues(t *testing.T) {
+	w := newWorld()
+	a := ApplicationID{Name: "A", Kind: "Deployment", Namespace: "n"}
+	b := ApplicationID{Name: "B", Kind: "Deployment", Namespace: "n"}
+	w.upsertApp(a)
+	w.upsertApp(b)
+	la := w.addEdge(appKey(a), appKey(b))
+	la.requests = 100
+	la.failures = 5
+	la.latency = 0.25
+	la.bytesSent = 1024
+	la.bytesRecv = 2048
+	la.protocol = "HTTP"
+
+	var downB *Application
+	apps := render(w)
+	for i := range apps {
+		if apps[i].ID.Name == "B" {
+			downB = &apps[i]
+		}
+	}
+	if downB == nil || len(downB.Downstreams) != 1 {
+		t.Fatalf("B should have 1 downstream; apps=%+v", apps)
+	}
+	link := downB.Downstreams[0]
+	if link.RequestCount != 100 || link.Weight != 100 || link.FailureCount != 5 || link.Latency != 0.25 {
+		t.Errorf("downstream metrics: %+v", link)
+	}
+	if link.Protocol != "HTTP" || link.BytesSent != 1024 || link.BytesReceived != 2048 {
+		t.Errorf("downstream transport: %+v", link)
+	}
+}
+
 func TestRender_HealthFromContainerStats(t *testing.T) {
 	w := newWorld()
 	a := ApplicationID{Name: "A", Kind: "Deployment", Namespace: "n"}
@@ -128,4 +164,27 @@ func TestSaneFloat(t *testing.T) {
 func nonZeroNonZero() float64 {
 	x := 0.0
 	return x
+}
+
+// Throttling is shown on the node but does not make it unhealthy.
+func TestRender_ThrottlingDoesNotMarkUnhealthy(t *testing.T) {
+	w := newWorld()
+	a := ApplicationID{Name: "A", Kind: "Deployment", Namespace: "n"}
+	b := ApplicationID{Name: "B", Kind: "Deployment", Namespace: "n"}
+	w.upsertApp(a)
+	w.upsertApp(b)
+	w.addEdge(appKey(a), appKey(b)).requests = 1
+	w.containerStatsFor(appKey(a)).cpuThrottlingTime = 0.4
+
+	for _, app := range render(w) {
+		if app.ID.Name != "A" {
+			continue
+		}
+		if app.CPUThrottlingTime != 0.4 {
+			t.Errorf("CPUThrottlingTime = %v; want 0.4", app.CPUThrottlingTime)
+		}
+		if !app.IsHealthy || app.HealthReason != "" {
+			t.Errorf("throttling alone should not mark A unhealthy: healthy=%v reason=%q", app.IsHealthy, app.HealthReason)
+		}
+	}
 }

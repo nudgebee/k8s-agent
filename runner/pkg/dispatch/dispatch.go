@@ -224,15 +224,23 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 	// Probe shape with a single permissive parse — we look for the
 	// discriminating fields without committing to a struct.
 	var probe struct {
-		Body   *json.RawMessage `json:"body,omitempty"`
-		Action string           `json:"action,omitempty"`
-		Method string           `json:"method,omitempty"`
-		URL    string           `json:"url,omitempty"`
+		Body      *json.RawMessage `json:"body,omitempty"`
+		Action    string           `json:"action,omitempty"`
+		Method    string           `json:"method,omitempty"`
+		URL       string           `json:"url,omitempty"`
+		RequestID string           `json:"request_id,omitempty"`
 	}
 	_ = json.Unmarshal(msg, &probe) // tolerant; downstream paths will reject bad JSON
 
 	switch {
-	case probe.Body != nil:
+	// Only an action envelope carries a body *object*. A proxy request carries
+	// `body` too — the base64-encoded request body, a JSON string — so testing
+	// `probe.Body != nil` alone captured every POST-with-body proxy call and
+	// sent it to the action parser, which rejected the string body and returned
+	// without replying. The relay then waited out its full timeout with no
+	// error. GET and empty-body POSTs were unaffected because `body` is
+	// `omitempty`, so the key is absent and the switch fell through correctly.
+	case isJSONObject(probe.Body):
 		// regular action flow — fall through to body parser below.
 	case probe.Method != "" && probe.URL != "":
 		d.handleGrafana(ctx, msg, send)
@@ -256,7 +264,11 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 		RelayKeyID     string         `json:"relay_key_id,omitempty"`
 	}
 	if err := json.Unmarshal(msg, &raw); err != nil {
-		d.cfg.Logger.Error("dispatch: failed to parse envelope", "err", err)
+		// Answer rather than returning silently: the caller is blocked on this
+		// correlation ID and a bare return leaves it to time out, turning a
+		// malformed envelope into a multi-minute hang with no diagnostic.
+		d.cfg.Logger.Error("dispatch: failed to parse envelope", "err", err, "request_id", probe.RequestID)
+		d.sendErr(send, probe.RequestID, 400, "malformed request envelope")
 		return
 	}
 
@@ -457,6 +469,46 @@ func (d *Dispatcher) respondString(send relay.SendFunc, requestID string, status
 		OutputType: outputType,
 	}); err != nil {
 		d.cfg.Logger.Error("dispatch: send stringified response failed", "err", err)
+	}
+}
+
+// isJSONObject reports whether raw holds a JSON object, which is what
+// distinguishes an action envelope's `body` from a proxy request's `body` —
+// the latter is a JSON string holding the base64-encoded HTTP request body.
+// It scans the bytes directly rather than converting to a string: this runs on
+// every dispatched message, and a proxy body can be megabytes, so converting
+// would copy the whole payload just to look at its first byte.
+func isJSONObject(raw *json.RawMessage) bool {
+	if raw == nil {
+		return false
+	}
+	for _, b := range *raw {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// sendErr replies with an error status so a caller blocked on this correlation
+// ID fails fast instead of waiting out the relay's timeout. A message with no
+// request_id is fire-and-forget: there is nobody to answer.
+func (d *Dispatcher) sendErr(send relay.SendFunc, requestID string, status int, msg string) {
+	if requestID == "" {
+		return
+	}
+	if err := send(&relay.Response{
+		Action:     "response",
+		RequestID:  requestID,
+		StatusCode: status,
+		Data:       msg,
+	}); err != nil {
+		d.cfg.Logger.Error("dispatch: send error response failed", "err", err, "request_id", requestID)
 	}
 }
 

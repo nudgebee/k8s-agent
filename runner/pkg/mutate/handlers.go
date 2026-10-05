@@ -133,8 +133,15 @@ func getBool(m map[string]any, k string, fallback bool) bool {
 // Keeping both behind one action name avoids a coordinated rollout with the
 // api-server: today's callers send the legacy shape; future callers can opt
 // into the manifest shape without a new wire action.
+//
+// A legacy payload that also names the PrometheusRule (`name`, optional
+// `namespace` / `group`) edits that rule where it is defined — only its expr
+// and `for` — instead of writing into the canonical CR.
 func handleCreateOrReplacePromRule(ctx context.Context, m *Mutator, p map[string]any) (any, error) {
 	if isLegacyAlertRulePayload(p) {
+		if loc, ok := alertRuleLocator(p); ok {
+			return m.PatchAlertRuleInCR(ctx, loc, parseLegacyAlertRuleParams(p))
+		}
 		return m.CreateOrReplaceAlertRule(ctx, parseLegacyAlertRuleParams(p))
 	}
 	rule, ok := p["rule"]
@@ -145,15 +152,39 @@ func handleCreateOrReplacePromRule(ctx context.Context, m *Mutator, p map[string
 	return m.CreateOrReplacePrometheusRule(ctx, rule)
 }
 
-// handleDeletePromRule accepts two payload shapes that mirror
-// handleCreateOrReplacePromRule: full manifest delete (by namespace+name)
-// or the legacy `alert`-only shape (drops a single rule from the canonical
-// CR).
+// handleDeletePromRule removes one rule; removing a whole PrometheusRule needs
+// an explicit `delete_cr: true`.
+//
+//   - `delete_cr: true` + namespace + name: deletes that PrometheusRule.
+//   - `alert` + `name` (+ namespace/group): removes that rule from that CR.
+//   - `alert` alone: removes it from the canonical CR (legacy shape).
+//
+// A request with no `alert` and no `delete_cr` used to delete the CR named by
+// namespace+name, so a caller that lost the rule name wiped every rule in it.
 func handleDeletePromRule(ctx context.Context, m *Mutator, p map[string]any) error {
-	if alert := str(p, "alert"); alert != "" {
-		return m.DeleteAlertRule(ctx, alert)
+	if getBool(p, "delete_cr", false) {
+		return m.DeletePrometheusRule(ctx, str(p, "namespace"), str(p, "name"))
 	}
-	return m.DeletePrometheusRule(ctx, str(p, "namespace"), str(p, "name"))
+	alert := str(p, "alert")
+	if alert == "" {
+		return errors.New("delete_alert_rule: alert is required (set delete_cr to delete a whole PrometheusRule)")
+	}
+	if loc, ok := alertRuleLocator(p); ok {
+		return m.DeleteAlertRuleInCR(ctx, loc)
+	}
+	return m.DeleteAlertRule(ctx, alert)
+}
+
+// alertRuleLocator reads the optional PrometheusRule locator of a legacy
+// alert-rule payload. ok is false when no CR name is given.
+func alertRuleLocator(p map[string]any) (AlertRuleLocator, bool) {
+	loc := AlertRuleLocator{
+		Namespace: str(p, "namespace"),
+		Name:      str(p, "name"),
+		Group:     str(p, "group"),
+		Alert:     str(p, "alert"),
+	}
+	return loc, loc.Name != ""
 }
 
 // isLegacyAlertRulePayload detects the flat Robusta shape: `alert` set and
