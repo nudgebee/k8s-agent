@@ -2,7 +2,9 @@ package enrichers
 
 import (
 	"context"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,11 +103,48 @@ func TestFmtSLOQuery_Defaults(t *testing.T) {
 	}
 }
 
+// The le matcher must be a valid PromQL/MetricsQL string literal: those use Go
+// escape rules, so a lone `\.` fails to parse and the SLO gets no value (#39800).
 func TestFmtSLOQuery_LeRegex(t *testing.T) {
 	q := fmtSLOQuery(`http_buckets{job="x"}`, 60, []string{"increase"}, map[string]string{"le": "0.5"})
-	if !contains(q, `le=~"^0.5(\.0+)?$"`) {
-		t.Errorf("le regex missing: %s", q)
+	want := `increase(http_buckets{job="x", le=~"^0\\.5(\\.0+)?$"}[60s])`
+	if q != want {
+		t.Fatalf("got  %s\nwant %s", q, want)
 	}
+
+	for le, cases := range map[string]struct{ match, noMatch []string }{
+		"0.5": {match: []string{"0.5"}, noMatch: []string{"0x5", "0.55", "10.5"}},
+		"1":   {match: []string{"1", "1.0", "1.00"}, noMatch: []string{"10", "1.5", "11"}},
+	} {
+		re := leMatcher(t, fmtSLOQuery(`b{job="x"}`, 60, nil, map[string]string{"le": le}))
+		for _, v := range cases.match {
+			if !re.MatchString(v) {
+				t.Errorf("bucket %s: %q should match %q", le, v, re)
+			}
+		}
+		for _, v := range cases.noMatch {
+			if re.MatchString(v) {
+				t.Errorf("bucket %s: %q should not match %q", le, v, re)
+			}
+		}
+	}
+}
+
+// leMatcher reads the le=~"..." literal back the way a PromQL parser does (Go
+// string-literal rules) and compiles it.
+func leMatcher(t *testing.T, q string) *regexp.Regexp {
+	t.Helper()
+	start := strings.Index(q, `le=~`) + len(`le=~`)
+	end := strings.Index(q[start:], `"}`) + start + 1
+	pattern, err := strconv.Unquote(q[start:end])
+	if err != nil {
+		t.Fatalf("le matcher %s is not a valid string literal: %v", q[start:end], err)
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("le matcher %q is not a valid regex: %v", pattern, err)
+	}
+	return re
 }
 
 func TestBuildSLOQueries_DistributionCutRequiresExpression(t *testing.T) {
