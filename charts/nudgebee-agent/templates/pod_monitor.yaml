@@ -14,6 +14,7 @@ metadata:
   labels:
     {{- include "nudgebee-agent.labels" . | nindent 4 }}
     component: node-agent
+    {{- include "nudgebee-agent.prometheusSelectorLabels" . | nindent 4 }}
     {{- with .Values.nodeAgent.podmonitor.additionalLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

@@ -551,6 +551,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		var profiler *podexec.ProfilerHandler
 		if kubeRestCfg != nil {
 			profiler = podexec.NewProfilerHandler(typedKube, kubeRestCfg)
+			// Lets a request that carries no language resolve one from the
+			// node-agent's container_application_type metric — the signal
+			// the pod-details UI already uses. The pod_profiler playbook
+			// action has no language field at all, so without this every
+			// playbook run has to be told what it is profiling.
+			if promClient != nil {
+				profiler.SetLanguageDetector(promClient)
+			}
 		}
 		ph := podexec.HandlersWithProfiler(execer, profiler)
 		maps.Copy(handlers, ph)
@@ -721,7 +729,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// migration (copies volume data via a mover pod). The ceiling stays under
 	// the server's 60-min PROCESSING→TIMEOUT reap so a task isn't force-failed
 	// mid-flight. Override with LONG_TASK_TIMEOUT_SECONDS.
-	longActions := map[string]struct{}{"rightsize_pvc": {}}
+	// pod_profiler is here because the caller picks the duration (the UI
+	// allows up to 600s) and the profiler fans out over every PID in the
+	// target's process tree, staggered — a postgres pod with 11 backends
+	// blew the 180s default on a 20s profile. The handler bounds itself to
+	// the requested duration plus a fixed slack, so this ceiling is only the
+	// outer guard rail.
+	longActions := map[string]struct{}{"rightsize_pvc": {}, "pod_profiler": {}}
 	longTaskTimeout := 50 * time.Minute
 	if v := os.Getenv("LONG_TASK_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -792,6 +806,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		Logger:          logger,
 		HandlerPoolSize: cfg.RelayHandlerPoolSize,
 		OnShed:          func() { mreg.ForwardShed.WithLabelValues("relay").Inc() },
+		OnConnect:       func() { mreg.OnRelayConnected(true) },
+		OnDisconnect:    func() { mreg.OnRelayConnected(false) },
+		OnReconnect:     mreg.OnRelayReconnect,
 	}, disp.Handle)
 
 	logger.Info("starting relay client",
@@ -832,7 +849,16 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		// Lets the forwarder report a node-exporter alert against the node it
+		// describes rather than the exporter pod that emitted it. Opportunistic:
+		// without a typed client the correction falls back to the alert's own
+		// labels, and the backend corrects what reaches it either way.
+		if typedKube != nil {
+			fwd.SetNodeLocator(newNodeLocator(typedKube))
+		}
 		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
+		fwd.OnForward = mreg.OnAlertForwarded
+		fwd.OnDrop = func(string) { mreg.OnAlertDropped() }
 		// Wire the trigger engine. Without this, every kubewatch event is
 		// dropped (safe default — see plan stage 2.1). With it, only
 		// events matching a registered predicate produce a Finding.
@@ -840,7 +866,36 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// so the engine appends a "Recent <Kind> events" table to every
 		// matched Finding (kubelet BackOff / Killing / OOMKilling /
 		// FailedScheduling / image-pull errors etc.) for free.
-		eng := triggers.NewEngine(triggers.Builtins(), time.Now())
+		// A cluster that keeps its platform config in kube-system needs the
+		// default namespace exclusions off; one with more system namespaces
+		// than we listed needs them extended. Either way it is their call.
+		if raw := os.Getenv("CONFIGMAP_CHANGE_EXCLUDED_NAMESPACES"); raw != "" {
+			var namespaces []string
+			for _, ns := range strings.Split(raw, ",") {
+				if ns = strings.TrimSpace(ns); ns != "" {
+					namespaces = append(namespaces, ns)
+				}
+			}
+			triggers.ConfigMapExcludedNamespaces = namespaces
+			logger.Info("configmap change namespace exclusions overridden",
+				"namespaces", triggers.ConfigMapExcludedNamespaces)
+		}
+		specs := triggers.Builtins()
+		// TRIGGER_RATE_LIMITS lets an operator shorten a matcher's suppression
+		// window without a new image. Applied before NewEngine so the engine
+		// never sees the compiled-in default for an overridden matcher.
+		if applied, unknown := triggers.ApplyRateLimits(specs, cfg.TriggerRateLimits); len(applied)+len(unknown) > 0 {
+			if len(applied) > 0 {
+				logger.Info("trigger rate-limit overrides applied", "matchers", applied)
+			}
+			// Loud on purpose: a typo here changes nothing, and without this
+			// the agent starts clean and the operator believes it took.
+			if len(unknown) > 0 {
+				logger.Warn("trigger rate-limit override ignored: no such matcher",
+					"names", unknown, "known_matchers", triggers.MatcherNames(specs))
+			}
+		}
+		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
 			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
 			// Service-backends lister lets service_no_endpoints resolve a
@@ -850,7 +905,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(typedKube, dynamicKube))
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
-		logger.Info("trigger engine enabled", "matcher_count", len(triggers.Builtins()))
+		logger.Info("trigger engine enabled", "matcher_count", len(specs))
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
@@ -980,6 +1035,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			}
 		}
 
+		// Alert-rule write capabilities for api-server: the locator-aware
+		// PrometheusRule writes exist only when the mutate handlers do, and
+		// cluster-wide write depends on the install's RBAC (checked once — an
+		// RBAC change comes with a helm upgrade, which restarts the pod).
+		alertRuleLocatorWrites := cfg.MutateEnabled && dynamicKube != nil
+		promRuleClusterWrite := false
+		if alertRuleLocatorWrites {
+			rbacCtx, rbacCancel := context.WithTimeout(gctx, 10*time.Second)
+			promRuleClusterWrite = telemetry.CanUpdatePrometheusRulesClusterWide(rbacCtx, typedKube, logger)
+			rbacCancel()
+			logger.Info("prometheusrule write capability", "cluster_wide", promRuleClusterWrite)
+		}
+
 		ts := &telemetry.Service{
 			Endpoint:     cfg.BackendEndpoint,
 			AuthSecret:   cfg.AuthSecretKey,
@@ -1033,6 +1101,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					AutoScalerType:             as.Type,
 					AutoScalerVersion:          as.Version,
 					AutoScalerNamespace:        as.Namespace,
+					AlertRuleLocatorWrites:     alertRuleLocatorWrites,
+					PrometheusRuleClusterWrite: promRuleClusterWrite,
 				}
 			},
 			LightActions: func() []string {
@@ -1075,6 +1145,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// Discovery: K8s informer-driven resource sync. Reuses typedKube built above.
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
+		discoverySink.Metrics = mreg
 		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,

@@ -67,7 +67,7 @@ type Config struct {
 	ElasticsearchUser     string
 	ElasticsearchPassword string
 	ElasticsearchAPIKey   string
-	// ELASTICSEARCH_HEADERS; comma-separated "Key: Value" pairs, same form as
+	// ELASTICSEARCH_HEADERS; ";"-separated "Key: Value" pairs, same form as
 	// PROMETHEUS_HEADERS / LOKI_EXTRA_HEADER. Needed by OpenSearch-compatible
 	// services that authenticate on a custom header rather than ApiKey or
 	// basic auth — Logz.io wants X-API-TOKEN, for instance.
@@ -157,6 +157,16 @@ type Config struct {
 	// pkg/relay as a soft outer guard against goroutine pile-up. Default 32.
 	RelayHandlerPoolSize int
 
+	// TriggerRateLimits overrides the per-matcher suppression window of the
+	// trigger engine, keyed by MatcherSpec.Name ("pod_crash_loop",
+	// "pod_oom_killed", ...). Empty (the default) leaves every matcher on the
+	// window compiled into pkg/triggers.
+	//
+	// From TRIGGER_RATE_LIMITS, a "name=duration,name=duration" string.
+	// Durations are Go's form: "5m", "30s", "2h". See
+	// ParseTriggerRateLimits for what is rejected and why.
+	TriggerRateLimits map[string]time.Duration
+
 	// Kube primitives (group B): enabled when KubeEnabled=true. Independent
 	// of discovery so an operator can run primitives-only without paying
 	// for the full informer cache.
@@ -176,10 +186,12 @@ type Config struct {
 	ScannerServiceAccount string
 
 	// ScannerAutoCopyPullSecrets lets image scans pull private images by copying
-	// the scanned workload's imagePullSecrets into the scanner namespace. Off by
-	// default (least privilege): when off, the agent never reads/copies registry
-	// credentials and private-image scans rely on the scanner SA's own pull
-	// secrets. Paired with the chart's conditional secret-write RBAC.
+	// the scanned workload's imagePullSecrets into the scanner namespace. On by
+	// default: the node-local image copy a scan reuses is routinely gone by scan
+	// time, and an unauthenticated re-pull leaves private images unscannable.
+	// When off, the agent never reads/copies registry credentials and
+	// private-image scans rely on the scanner SA's own pull secrets. Paired with
+	// the chart's conditional secret-write RBAC; read-only installs force it off.
 	ScannerAutoCopyPullSecrets bool
 
 	// PodExecEnabled (group D): pod_bash_enricher / pod_script_run_enricher.
@@ -302,14 +314,23 @@ func FromEnv() (*Config, error) {
 		EmitTombstones:            envBool("DISCOVERY_EMIT_TOMBSTONES", false),
 		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
 		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
+		TriggerRateLimits:         ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
 		KubeEnabled:               envBool("KUBE_ENABLED", true),
 		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
-		ScannersEnabled:            envBool("SCANNERS_ENABLED", false),
-		ScannerNamespace:           cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
-		ScannerServiceAccount:      os.Getenv("SCANNER_SERVICE_ACCOUNT"),
-		ScannerAutoCopyPullSecrets: envBool("SCANNER_AUTO_COPY_PULL_SECRETS", false),
+		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
+		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
+		ScannerServiceAccount: os.Getenv("SCANNER_SERVICE_ACCOUNT"),
+		// On by default: an image scan runs the target image as its own container,
+		// and the node-local copy it relies on is routinely gone by scan time
+		// (containerd GCs the image record, the workload rolled, a spot node was
+		// replaced). Without the workload's own pull credentials the re-pull is
+		// unauthenticated and every private image is permanently unscannable. The
+		// copies are namespaced to the scanner namespace and owned by the scan Job,
+		// so they are GC'd with it. Set to false to keep the agent from reading any
+		// registry credential; readOnly installs force it off via the chart.
+		ScannerAutoCopyPullSecrets: envBool("SCANNER_AUTO_COPY_PULL_SECRETS", true),
 		MutateEnabled:              envBool("MUTATE_ENABLED", false),
 		AlertManagerURL:            os.Getenv("ALERTMANAGER_URL"),
 		RSAPrivateKeyPath:          os.Getenv("RSA_PRIVATE_KEY_PATH"),
@@ -383,6 +404,44 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 	return d
 }
 
+// ParseTriggerRateLimits parses a "name=duration,name=duration" string into
+// per-matcher suppression windows. Used for the TRIGGER_RATE_LIMITS env var.
+//
+// Malformed pairs are skipped rather than fatal: this knob is reached for while
+// something is already going wrong (an alert is too quiet, or too loud), and a
+// typo in one entry should not take the agent down or silently discard the
+// entries around it.
+//
+// Only positive durations are accepted. Zero means "no rate limit" inside the
+// engine, and the conditions these matchers watch re-emit constantly — a Pod in
+// CrashLoopBackOff produces a kubewatch UPDATE on every backoff cycle, plus
+// resyncs — so a zero here is not "more alerts", it is a Finding every few
+// seconds for every affected Pod. Lowering the window is supported; removing it
+// is not.
+func ParseTriggerRateLimits(s string) map[string]time.Duration {
+	out := map[string]time.Duration{}
+	if s == "" {
+		return out
+	}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		i := strings.IndexByte(pair, '=')
+		if i <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(pair[:i])
+		d, err := time.ParseDuration(strings.TrimSpace(pair[i+1:]))
+		if err != nil || d <= 0 || name == "" {
+			continue
+		}
+		out[name] = d
+	}
+	return out
+}
+
 // ParseTargets parses a "name=url;name=url" string into a map. Used for
 // HTTP_PROXY_TARGETS env var.
 func ParseTargets(s string) map[string]string {
@@ -408,16 +467,31 @@ func ParseTargets(s string) map[string]string {
 	return out
 }
 
-// ParseHeaders splits a comma-separated "Header: value" string into an
-// http.Header. Returns an empty Header for empty input. Same shape used
-// by the GRAFANA_EXTRA_HEADER / LOKI_EXTRA_HEADER pattern (a single
-// "Header: value" or comma-separated list).
+// ParseHeaders splits a "Header: value" list into an http.Header. Returns an
+// empty Header for empty input. Same shape used by the GRAFANA_EXTRA_HEADER /
+// LOKI_EXTRA_HEADER / PROMETHEUS_HEADERS / ELASTICSEARCH_HEADER pattern.
+//
+// ";" is the canonical separator: the legacy Python agent splits every one of
+// these vars on ";" (prometheus/utils.go, loki_client, grafana_client,
+// es_client, silence_utils), so a header *value* may itself contain a comma
+// (e.g. a multi-value Accept header) without being truncated.
+//
+// "," is still accepted as a fallback when the input contains no ";", because
+// this runner shipped comma-splitting from its first release and live
+// deployments were configured against that. Such configs keep working; they
+// just cannot express a comma inside a value. New config should use ";".
+// HeadersUseLegacyCommaSplit reports whether a given value took that path, so
+// callers can log a deprecation notice.
 func ParseHeaders(s string) http.Header {
 	h := http.Header{}
 	if s == "" {
 		return h
 	}
-	for _, part := range strings.Split(s, ",") {
+	sep := ";"
+	if HeadersUseLegacyCommaSplit(s) {
+		sep = ","
+	}
+	for _, part := range strings.Split(s, sep) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -433,4 +507,30 @@ func ParseHeaders(s string) http.Header {
 		}
 	}
 	return h
+}
+
+// HeadersUseLegacyCommaSplit reports whether s must be split on "," rather
+// than the canonical ";" — i.e. it carries no ";" and *every* comma-separated
+// piece independently looks like a "Header: value" pair.
+//
+// That last condition is what keeps a comma inside a single header's value
+// safe: "Accept: text/html, application/json" splits into a piece with no
+// colon, so it is treated as one header whose value contains a comma (the
+// legacy behavior) instead of being truncated at the comma. Meanwhile a
+// genuine multi-header config written the old way, "X-A: 1, X-B: 2", still
+// parses as two headers.
+func HeadersUseLegacyCommaSplit(s string) bool {
+	if strings.Contains(s, ";") || !strings.Contains(s, ",") {
+		return false
+	}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if i := strings.IndexByte(part, ':'); i <= 0 {
+			return false
+		}
+	}
+	return true
 }
