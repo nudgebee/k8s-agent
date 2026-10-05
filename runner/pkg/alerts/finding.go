@@ -19,6 +19,7 @@ package alerts
 //	SubjectType:    "pod", "deployment", "node", "job", "daemonset", "statefulset", ...
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -81,6 +82,10 @@ type FindingEnvelope struct {
 type Builder struct {
 	AccountID string // `account_id` — pinned to the agent's NUDGEBEE account UUID
 	Cluster   string // `cluster_id` — same as the agent's CLUSTER_NAME env
+	// Nodes resolves the node behind a per-node exporter's series. Optional:
+	// nil when the agent booted without a typed k8s client, in which case a
+	// node-scoped alert can only be corrected from its own labels.
+	Nodes NodeLocator
 }
 
 // FromMatchedTrigger wraps a kubewatch K8s-event payload into a Finding
@@ -194,9 +199,47 @@ func (m MatchedTrigger) Title() string {
 		return fmt.Sprintf("Job %s/%s failed", m.SubjectNamespace, m.SubjectName)
 	case "node_not_ready":
 		return fmt.Sprintf("Node %s is NotReady", m.SubjectName)
+	case "ConfigurationChange/KubernetesResource/Change":
+		// The raw aggregation key used to be the title here, which read as
+		// machine output in the change history and gave an investigating
+		// model nothing to work with. Name the object instead — with more
+		// than one changed kind in play (a Deployment and the ConfigMap it
+		// mounts) the kind is the part that distinguishes them.
+		return fmt.Sprintf("%s %s was changed", kindDisplay(m.SubjectKind), m.subjectPath())
 	default:
 		return fmt.Sprintf("%s on %s/%s", m.AggregationKey, m.SubjectNamespace, m.SubjectName)
 	}
+}
+
+// kindDisplayNames maps the engine's lowercased subject kind back to its
+// Kubernetes spelling for user-facing text. An unlisted kind falls back
+// to the lowercase form — wrong-looking beats mangled.
+var kindDisplayNames = map[string]string{
+	"configmap":   "ConfigMap",
+	"deployment":  "Deployment",
+	"daemonset":   "DaemonSet",
+	"statefulset": "StatefulSet",
+	"ingress":     "Ingress",
+	"rollout":     "Rollout",
+}
+
+func kindDisplay(kind string) string {
+	if display, ok := kindDisplayNames[strings.ToLower(kind)]; ok {
+		return display
+	}
+	if kind == "" {
+		return "Resource"
+	}
+	return kind
+}
+
+// subjectPath renders "namespace/name", collapsing to just the name for
+// cluster-scoped subjects so titles don't carry a leading slash.
+func (m MatchedTrigger) subjectPath() string {
+	if m.SubjectNamespace == "" {
+		return m.SubjectName
+	}
+	return m.SubjectNamespace + "/" + m.SubjectName
 }
 
 // Description is a 1-line context blurb per aggregation key. It is stored on
@@ -207,6 +250,14 @@ func (m MatchedTrigger) Title() string {
 func (m MatchedTrigger) Description() string {
 	switch m.AggregationKey {
 	case "ConfigurationChange/KubernetesResource/Change":
+		if strings.EqualFold(m.SubjectKind, "configmap") {
+			// The last sentence is the operationally important part: an
+			// envFrom value or a mounted file is only re-read when the
+			// consuming pods restart, so the symptom can surface hours
+			// after this event and look unrelated to it.
+			return "The ConfigMap's data was changed; the key-level diff is attached in evidence. " +
+				"Workloads consuming these values via envFrom or a mounted file only pick them up when their pods restart."
+		}
 		kind := m.SubjectKind
 		if kind == "" {
 			kind = "resource"
@@ -368,7 +419,17 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 			subjectName = "UnnamedAlert"
 		}
 	}
-	subjectNode := pickLabel(a.Labels, "node", "instance")
+	// A node-scoped alert (node-exporter series) arrives wearing the exporter's
+	// own pod/namespace/daemonset labels, so everything above resolved to the
+	// collector rather than to the node the metric describes. Repoint it.
+	subjectNode := nodeNameFromLabels(a.Labels)
+	if node := resolveNodeSubject(context.Background(), a.Labels, b.Nodes); node != "" {
+		subjectName = node
+		subjectType = "node"
+		// The namespace described the exporter pod; a node is cluster-scoped.
+		subjectNamespace = ""
+		subjectNode = node
+	}
 	alertname := pickLabel(a.Labels, "alertname")
 	if alertname == "" {
 		alertname = "UnnamedAlert"
@@ -483,7 +544,7 @@ func alertSubject(labels map[string]string) (string, string) {
 // walking the lower-confidence labels the backend webhook mapper
 // (resolveSubjectFromLabels) also understands, so an alert delivered through
 // Alertmanager resolves the same subject it would via PagerDuty/Zenduty:
-// mesh-style workload labels (ApplicationAPIFailures carries
+// mesh-style workload labels (ApplicationServerErrors carries
 // destination_workload_name), the /k8s/{namespace}/{pod}/{container} path in
 // container_id, and application `service` labels (NBLLMLatencyP95High).
 // Returns (name, kind, namespace); kind stays empty when the label doesn't
@@ -569,7 +630,7 @@ func newJSONEvidence(findingID, accountID string, raw json.RawMessage, extras []
 	blocks := make([]map[string]any, 0, 1+len(extras))
 	blocks = append(blocks, map[string]any{
 		"type":            "json",
-		"data":            string(raw),
+		"data":            cappedRawPayload(raw),
 		"additional_info": map[string]any{},
 	})
 	for _, extra := range extras {
@@ -585,6 +646,33 @@ func newJSONEvidence(findingID, accountID string, raw json.RawMessage, extras []
 		Data:      string(encoded),
 		AccountID: accountID,
 	}
+}
+
+// maxRawPayloadBytes caps the verbatim kubewatch payload carried in the
+// `json` evidence block. That block holds the full obj AND oldObj, so a
+// change to a 1 MiB ConfigMap ships ~2 MiB per event on top of the diff
+// block that already summarises it. Every kind watched before ConfigMaps
+// stayed comfortably under this, so the cap is inert for them.
+const maxRawPayloadBytes = 256 << 10
+
+// cappedRawPayload replaces an over-sized payload with a JSON object
+// stating what happened. It stays valid JSON because the collector
+// json-decodes this block; a truncated prefix would be a parse error and
+// the whole evidence array would be dropped rather than shortened.
+func cappedRawPayload(raw json.RawMessage) string {
+	if len(raw) <= maxRawPayloadBytes {
+		return string(raw)
+	}
+	replacement, err := json.Marshal(map[string]any{
+		"truncated":   true,
+		"bytes":       len(raw),
+		"limit_bytes": maxRawPayloadBytes,
+		"note":        "raw watch payload omitted; see the diff evidence block for the change itself",
+	})
+	if err != nil {
+		return "{}"
+	}
+	return string(replacement)
 }
 
 // fingerprint stable-hashes the (aggregation_key, service_key, starts_at)

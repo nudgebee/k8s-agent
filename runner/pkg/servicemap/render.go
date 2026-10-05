@@ -63,9 +63,9 @@ func render(w *world) []Application {
 					ID:            idToText(dst.id),
 					Status:        StatusUnknown,
 					Stats:         []string{},
-					Weight:        saneFloat(la.requests),
+					Weight:        saneFloat(la.requestRate()),
 					Latency:       saneFloat(la.latency),
-					RequestCount:  saneFloat(la.requests),
+					RequestCount:  saneFloat(la.requestRate()),
 					FailureCount:  saneFloat(la.failures),
 					Protocol:      protocolOrDefault(la.protocol),
 					BytesSent:     saneFloat(la.bytesSent),
@@ -76,29 +76,35 @@ func render(w *world) []Application {
 				used[dstK] = true
 			}
 		}
-		// Downstream pointers (reverse edges). Id stays an object here.
+		// Downstream pointers (reverse edges). Id stays an object here; the
+		// stats are the same edge's, read from the caller's side.
 		if srcs, ok := downstreams[k]; ok {
 			for srcK := range srcs {
 				src, ok := w.applications[srcK]
 				if !ok {
 					continue
 				}
+				la := w.edges[srcK][k]
 				app.Downstreams = append(app.Downstreams, DownstreamLink{
-					ID:       src.id,
-					Status:   StatusUnknown,
-					Stats:    []string{},
-					Protocol: "Unknown",
+					ID:            src.id,
+					Status:        StatusUnknown,
+					Stats:         []string{},
+					Weight:        saneFloat(la.requestRate()),
+					Latency:       saneFloat(la.latency),
+					RequestCount:  saneFloat(la.requestRate()),
+					FailureCount:  saneFloat(la.failures),
+					Protocol:      protocolOrDefault(la.protocol),
+					BytesSent:     saneFloat(la.bytesSent),
+					BytesReceived: saneFloat(la.bytesRecv),
 				})
 				used[k] = true
 				used[srcK] = true
 			}
 		}
 
-		// Health computation.
-		if app.CPUThrottlingTime > 0 {
-			app.IsHealthy = false
-			app.HealthReason = "CPUThrottling"
-		}
+		// Health computation. CPU throttling is reported in CPUThrottlingTime
+		// but does not make an app unhealthy: brief throttling is common and
+		// is not a fault on its own.
 		if app.OOMKills > 0 {
 			app.IsHealthy = false
 			app.HealthReason = "OOMKills"
