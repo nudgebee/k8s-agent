@@ -4,7 +4,7 @@
 
 # golang 1.26.5: fixes the stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
 # traversal) / CVE-2026-42505 (crypto/tls ECH) present in 1.26.4 builds.
-FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
 WORKDIR /src
 
 ARG VERSION=dev
