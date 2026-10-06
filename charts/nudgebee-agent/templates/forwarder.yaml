@@ -51,7 +51,9 @@ spec:
           capabilities: {}
           privileged: false
           readOnlyRootFilesystem: false
-          runAsUser: 1000    
+          {{- if and (not (kindIs "invalid" .Values.kubewatch.runAsUser)) (not (include "nudgebee-agent.isOpenShift" .)) }}
+          runAsUser: {{ .Values.kubewatch.runAsUser }}
+          {{- end }}
         resources:
           requests:
             cpu: {{ .Values.kubewatch.resources.requests.cpu }}
