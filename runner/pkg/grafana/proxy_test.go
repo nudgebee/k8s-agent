@@ -174,6 +174,37 @@ func TestProxy_HandlePrometheus_ForwardsToPrometheusURL(t *testing.T) {
 	}
 }
 
+// TestProxy_HandlePrometheus_QueryStringAndAuth verifies
+// PROMETHEUS_URL_QUERY_STRING is appended and a PROMETHEUS_AUTH-derived
+// Authorization header (carried in PrometheusHeaders) reaches upstream.
+func TestProxy_HandlePrometheus_QueryStringAndAuth(t *testing.T) {
+	var gotQuery, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer upstream.Close()
+
+	p := New("", "", "", nil, upstream.URL,
+		http.Header{"Authorization": {"Bearer tok-1"}}, nil)
+	p.PrometheusQueryString = "extra_label=foo"
+
+	resp := p.HandlePrometheus(context.Background(), &Request{
+		Method: "GET",
+		URL:    "/api/v1/query?query=up",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d; want 200", resp.StatusCode)
+	}
+	if !strings.Contains(gotQuery, "query=up") || !strings.Contains(gotQuery, "extra_label=foo") {
+		t.Errorf("upstream query = %q; want both query=up and extra_label=foo", gotQuery)
+	}
+	if gotAuth != "Bearer tok-1" {
+		t.Errorf("Authorization = %q; want Bearer tok-1", gotAuth)
+	}
+}
+
 // TestProxy_HandlePrometheus_UnconfiguredReturns503 — without
 // PROMETHEUS_URL the proxy must not panic. Same posture as
 // TestProxy_UnconfiguredGrafana for the Grafana path.
