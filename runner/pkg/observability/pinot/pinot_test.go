@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestQuery_PostsSQL(t *testing.T) {
+func TestQuery_PostsToBrokerPath(t *testing.T) {
 	var path, body string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.Path
@@ -25,11 +25,36 @@ func TestQuery_PostsSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "/sql" {
-		t.Errorf("path = %q; want /sql", path)
+	if path != "/query/sql" {
+		t.Errorf("path = %q; want /query/sql (broker)", path)
 	}
 	if !strings.Contains(body, "SELECT * FROM logs") {
 		t.Errorf("body = %s", body)
+	}
+}
+
+// TestQuery_FallsBackToControllerOn404: when PINOT_URL points at the
+// controller (which 404s on /query/sql), the client retries /sql.
+func TestQuery_FallsBackToControllerOn404(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/query/sql" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`not found`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"resultTable":{}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &http.Client{Timeout: 5 * time.Second})
+	if _, err := c.Query(context.Background(), "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/query/sql", "/sql"}
+	if len(paths) != 2 || paths[0] != want[0] || paths[1] != want[1] {
+		t.Errorf("request paths = %v; want %v", paths, want)
 	}
 }
 
