@@ -47,13 +47,7 @@ func handleOperations(ctx context.Context, c *Client, p map[string]any) (json.Ra
 }
 
 func handleMetrics(ctx context.Context, c *Client, p map[string]any) (json.RawMessage, error) {
-	metricType, _ := p["metric_type"].(string)
-	rest := map[string]any{}
-	for k, v := range p {
-		if k == "metric_type" {
-			continue
-		}
-		rest[k] = v
-	}
-	return c.Metrics(ctx, metricType, rest)
+	// The backend composer sends services/spanKinds (plural) and no
+	// metric_type; Metrics does the remap + four-endpoint fan-out.
+	return c.Metrics(ctx, p)
 }
