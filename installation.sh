@@ -383,6 +383,9 @@ if [ -n "$openshift_enable" ]; then
   openshift_enable_args=(
     --set "openshift.enabled=true"
     --set "openshift.createScc=true"
+    --set "openshift.createPrivilegedScc=true"
+    --set "clickhouse.podSecurityContext.enabled=false"
+    --set "clickhouse.containerSecurityContext.enabled=false"
   )
 fi
 
