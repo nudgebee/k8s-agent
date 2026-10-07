@@ -177,8 +177,11 @@ runner:
   tolerations: []
   annotations: {}
   nodeSelector: ~
-  # Enable write permissions for the runner service account.
-  # Adds permissions for: node delete/drain, service management, secret updates,
+  # Enable write permissions for the runner service account. Without it the
+  # runner ClusterRole is get/list/watch only (plus namespaced writes in the
+  # release namespace for scanner Jobs, script-runner pods and PrometheusRules).
+  # Adds ALL cluster-wide remediation writes: pod delete/exec/eviction, workload
+  # patch/update/delete/scale, node cordon/drain/patch, PDB/HPA updates, node delete/drain, service management, secret updates,
   # ingress/networkpolicy writes, resource quotas, limit ranges, namespace creation,
   # statefulset scaling, workload creation, and rollout lifecycle management.
   enableWritePermissions: false
