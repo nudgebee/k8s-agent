@@ -8,6 +8,12 @@ updates:
     labels:
       - dependencies
       - ci
+    groups:
+      # init, analyze and upload-sarif must run the same version; bumped
+      # separately, each PR fails CodeQL until the last one lands.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   - package-ecosystem: docker
     directory: /
@@ -33,3 +39,10 @@ updates:
     labels:
       - dependencies
       - go
+    groups:
+      # k8s.io modules only build against each other at the same minor, and
+      # controller-runtime pins that minor too.
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
