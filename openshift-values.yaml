@@ -1,0 +1,28 @@
+# Values for installing the NudgeBee agent on Red Hat OpenShift.
+#
+#   helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent \
+#     -n nudgebee-agent --create-namespace \
+#     -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/openshift-values.yaml \
+#     --set runner.nudgebee.auth_secret_key="<access_key>:<access_secret>"
+#
+# Needs cluster-admin: the chart creates two SecurityContextConstraints and
+# ClusterRoles. installation.sh -o sets the same values.
+
+openshift:
+  enabled: true
+  # SCC for the runner and the forwarder (uid 1000, no host access).
+  createScc: true
+  # SCC for the node-agent: privileged, hostPID, hostPath. The node-agent is on
+  # by default and cannot start without it. Set this to false together with
+  # `nodeAgent.enabled: false` to install without any privileged workload.
+  createPrivilegedScc: true
+
+# The ClickHouse subchart hardcodes uid/fsGroup 1001, which OpenShift's
+# restricted SCC rejects (the namespace's own UID range applies instead). With
+# these off, the SCC assigns the UID and fsGroup. Only used when ClickHouse is
+# enabled.
+clickhouse:
+  podSecurityContext:
+    enabled: false
+  containerSecurityContext:
+    enabled: false
