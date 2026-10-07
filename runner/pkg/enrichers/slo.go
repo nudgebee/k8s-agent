@@ -3,9 +3,11 @@ package enrichers
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -89,30 +91,29 @@ func (s *SLOEnricher) compute(ctx context.Context, params map[string]any) ([]map
 	endTime := time.Now().UTC()
 	startTime := endTime.Add(-time.Duration(cfg.Window) * time.Second)
 
-	queries, err := buildSLOQueries(cfg)
-	if err != nil {
+	if _, err := buildSLOQueries(cfg); err != nil {
 		return nil, err
 	}
-	step := int64(cfg.Window) // SLO uses window as step (one bucket).
+	// Instant queries at endTime, so the counts cover exactly the window the
+	// report's start_time/end_time name. A failed query fails the run: a report
+	// computed without its bad series would read as zero errors, and one without
+	// its good series as zero successes.
+	apps, err := s.statsForWindow(ctx, cfg, cfg.Window, endTime, false)
+	if err != nil {
+		return nil, fmt.Errorf("slo_generator: %w", err)
+	}
 
-	// Reuse the application_stats Prometheus runner so the parsing path is
-	// identical to get_application_stats.
-	a := &AppStatsEnricher{q: s.q}
-	results := a.runQueries(ctx, queries, startTime, endTime, step, "", "", "")
-	apps := extractMetricStats(results)
-
-	// Multi-window burn rates (coroot parity, see slo_burnrate.go). Best-effort:
-	// when this yields nothing the report keeps its legacy single-window
-	// `alert`/`alert_message`, so a Prometheus hiccup degrades rather than
-	// blanks the SLO.
-	burnRatesByApp := s.burnRatesByApp(ctx, cfg, endTime)
+	// Multi-window burn rates (coroot parity, see slo_burnrate.go). When they
+	// cannot be evaluated the reports keep the single-window `alert`.
+	burnRatesByApp, burnOK := s.burnRatesByApp(ctx, cfg, endTime)
 
 	minValidEvents := envIntDefault("MIN_VALID_EVENTS", 1)
 	reports := make([]map[string]any, 0, len(apps))
-	for _, app := range apps {
-		stats := app.toResponse()
-		report := buildSLOReport(cfg, stats, startTime, endTime, minValidEvents)
-		attachBurnRates(report, burnRatesByApp[app.Name+"/"+app.Namespace])
+	for _, key := range slices.Sorted(maps.Keys(apps)) {
+		report := buildSLOReport(cfg, apps[key].legacyStats(), startTime, endTime, minValidEvents)
+		if burnOK {
+			attachBurnRates(report, burnRatesByApp[key])
+		}
 		reports = append(reports, report)
 	}
 	return reports, nil
@@ -145,20 +146,27 @@ func parseSLOConfig(m map[string]any) sloConfig {
 // Ports the backend verbatim, including the _bucket→_count rewrite
 // and the `le=~"^<bucket>(\\.0+)?$"` regex match (see fmtSLOQuery for the escaping).
 func buildSLOQueries(cfg sloConfig) (map[string]string, error) {
-	groupOp := fmt.Sprintf("sum by (%s)", cfg.GroupBy)
+	return sloQueries(cfg, cfg.Window, "increase")
+}
+
+// sloQueries builds the config's per-series queries with the range function fn
+// applied over rangeSec: increase for event counts, count_over_time for the
+// burn-rate coverage check.
+func sloQueries(cfg sloConfig, rangeSec int, fn string) (map[string]string, error) {
+	ops := []string{fn, fmt.Sprintf("sum by (%s)", cfg.GroupBy)}
 	switch cfg.Method {
 	case "good_bad_ratio":
 		if cfg.FilterGood == "" {
 			return nil, fmt.Errorf("slo_generator: good_bad_ratio requires filter_good")
 		}
 		queries := map[string]string{
-			"filter_good": fmtSLOQuery(cfg.FilterGood, cfg.Window, []string{"increase", groupOp}, nil),
+			"filter_good": fmtSLOQuery(cfg.FilterGood, rangeSec, ops, nil),
 		}
 		switch {
 		case cfg.FilterBad != "":
-			queries["filter_bad"] = fmtSLOQuery(cfg.FilterBad, cfg.Window, []string{"increase", groupOp}, nil)
+			queries["filter_bad"] = fmtSLOQuery(cfg.FilterBad, rangeSec, ops, nil)
 		case cfg.FilterValid != "":
-			queries["filter_valid"] = fmtSLOQuery(cfg.FilterValid, cfg.Window, []string{"increase", groupOp}, nil)
+			queries["filter_valid"] = fmtSLOQuery(cfg.FilterValid, rangeSec, ops, nil)
 		default:
 			return nil, fmt.Errorf("slo_generator: good_bad_ratio requires filter_bad or filter_valid")
 		}
@@ -169,10 +177,10 @@ func buildSLOQueries(cfg sloConfig) (map[string]string, error) {
 		}
 		bucket := strconv.FormatFloat(cfg.ThresholdBucket, 'f', -1, 64)
 		queries := map[string]string{
-			"filter_good": fmtSLOQuery(cfg.Expression, cfg.Window, []string{"increase", groupOp}, map[string]string{"le": bucket}),
+			"filter_good": fmtSLOQuery(cfg.Expression, rangeSec, ops, map[string]string{"le": bucket}),
 		}
 		exprCount := strings.ReplaceAll(cfg.Expression, "_bucket", "_count")
-		queries["filter_valid"] = fmtSLOQuery(exprCount, cfg.Window, []string{"increase", groupOp}, nil)
+		queries["filter_valid"] = fmtSLOQuery(exprCount, rangeSec, ops, nil)
 		return queries, nil
 	}
 	return nil, fmt.Errorf("slo_generator: unknown method %q", cfg.Method)
@@ -275,12 +283,7 @@ func buildSLOReport(cfg sloConfig, stats map[string]any, startTime, endTime time
 	}
 	// The window is what the burn rate was measured over — dividing the RATE by
 	// 3600 (as an earlier port of coroot's FormatSLOStatus did) is always 0.
-	hours := cfg.Window / (60 * 60)
-	hourLabel := "hours"
-	if hours == 1 {
-		hourLabel = "hour"
-	}
-	alertMessage := fmt.Sprintf("error budget burn rate is %.1fx within %d %s", ebBurnRate, hours, hourLabel)
+	alertMessage := formatBurnStatus(ebBurnRate, cfg.Window)
 	alert := false
 	if cfg.ErrorBudgetBurnRateThreshold > 0 {
 		alert = ebBurnRate > cfg.ErrorBudgetBurnRateThreshold
