@@ -13,7 +13,7 @@ sort key all rely on it.
 | resource `k8s.namespace.name` | yes | Pod namespace |
 | resource `k8s.pod.name`, `k8s.pod.uid` | yes | Pod name and UID |
 | resource `k8s.container.name` | yes | Container name |
-| resource `k8s.node.name` | yes | Node the pod runs on |
+| resource `k8s.node.name` | yes | Node the pod runs on; the log agent fills it from its own node when k8s_attributes can't (static control-plane pods) |
 | resource `k8s.deployment.name` / `k8s.statefulset.name` / `k8s.daemonset.name` / `k8s.cronjob.name` / `k8s.job.name` | when owned | The top-level owner is required when the pod is owned; intermediate owners (`k8s.replicaset.name`, or `k8s.job.name` under a cronjob) may also be present. The table picks the top-level one in the order deployment > statefulset > daemonset > cronjob > job > pod |
 | resource `service.name` | yes | The top-level owner's name (same priority as above), else the pod name; set by the collector, overriding any label/annotation-derived value |
 | log attribute `log.iostream` | yes | `stdout` or `stderr` |

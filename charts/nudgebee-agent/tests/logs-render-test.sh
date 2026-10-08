@@ -76,4 +76,10 @@ svc_stmts=$(q '.processors["transform/service_name"].log_statements[].statements
 [ -n "$svc_stmts" ] || fail "transform/service_name statements missing"
 if grep -q 'service.name"\] == nil' <<<"$svc_stmts"; then fail "service.name statements must be unconditional (k8s_attributes pre-sets it from labels)"; fi
 tail -n1 <<<"$svc_stmts" | grep -q 'attributes\["k8s.deployment.name"\]' || fail "last service.name statement must use k8s.deployment.name"
+# Mirror (static control-plane) pods can't be associated by k8s_attributes; the agent only reads its own node's logs.
+[ "$(q '.processors["resource/node"].attributes[] | select(.key == "k8s.node.name") | .action' <<<"$agent_cfg")" = "insert" ] || fail "resource/node must insert k8s.node.name (never overwrite k8s_attributes)"
+[ "$(q '.processors["resource/node"].attributes[] | select(.key == "k8s.node.name") | .value' <<<"$agent_cfg")" = '${env:K8S_NODE_NAME}' ] || fail "resource/node must take the node from K8S_NODE_NAME"
+procs=$(q '.service.pipelines.logs.processors | join(",")' <<<"$agent_cfg")
+case "$procs" in *k8s_attributes,resource/node*) ;; *) fail "resource/node must run right after k8s_attributes: $procs";; esac
+q 'select(.kind == "DaemonSet" and (.metadata.name | test("otel-log-agent"))) | .spec.template.spec.containers[0].env[] | select(.name == "K8S_NODE_NAME") | .valueFrom.fieldRef.fieldPath' <<<"$on" | grep -qx 'spec.nodeName' || fail "log agent must have K8S_NODE_NAME from spec.nodeName"
 echo "PASS: log agent"

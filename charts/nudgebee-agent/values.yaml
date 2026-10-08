@@ -615,6 +615,14 @@ otel-log-agent:
             max_log_size: 102400
             force_flush_period: 1s
     processors:
+      # Static control-plane (mirror) pods can't be associated by k8s_attributes. This
+      # DaemonSet only reads its own node's /var/log/pods, so every record is from
+      # this node. insert never overwrites a value k8s_attributes set.
+      resource/node:
+        attributes:
+          - key: k8s.node.name
+            value: ${env:K8S_NODE_NAME}
+            action: insert
       # Must be unconditional: k8s_attributes already sets service.name from
       # app.kubernetes.io labels/annotations, but the row contract requires the
       # top-level owner's name. Last matching statement wins (priority order).
@@ -644,7 +652,7 @@ otel-log-agent:
       pipelines:
         logs:
           receivers: [filelog]
-          processors: [memory_limiter, k8s_attributes, transform/service_name, batch]
+          processors: [memory_limiter, k8s_attributes, resource/node, transform/service_name, batch]
           exporters: [otlp]
         # traces/metrics: null intentionally drop the subchart's default pipelines (this pod only
         # ships logs); Helm prints harmless "cannot overwrite table with non table" warnings.
