@@ -3,11 +3,12 @@ package clickhouse
 // otel_logs: the table container logs land in (#40144).
 //
 // The gateway collector's clickhouse exporter runs with create_schema: false,
-// so this package owns the table. The exporter's own schema sorts by
-// (ServiceName, Timestamp), which is a full scan for Kubernetes logs that have
-// no meaningful service.name, so ours materializes the Kubernetes labels and
-// sorts by them. The row contract the collectors must meet is in
-// runner/docs/logs-row-contract.md.
+// so this package owns the table. The exporter's own schema (v0.157) sorts by
+// (toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp), so a query by
+// namespace or pod reads every row in its time range; ours materializes the
+// Kubernetes labels and sorts by them. The row contract the collectors must
+// meet is in runner/docs/logs-row-contract.md; upgrades and retention are in
+// runner/docs/logs-operations.md.
 
 import (
 	"context"
@@ -180,8 +181,9 @@ const (
 	LogsTableUnavailable LogsTableState = iota
 	// LogsTableReady: otel_logs has every exporter and Nudgebee column.
 	LogsTableReady
-	// LogsTableLegacyShape: otel_logs exists but was created by the exporter's
-	// own schema. Inserts still work; queries would full-scan. Needs a rename.
+	// LogsTableLegacyShape: otel_logs was created by the exporter's own schema
+	// and could not be moved aside automatically (it has rows, or the rename
+	// failed). Inserts still work; queries would full-scan. Needs a rename.
 	LogsTableLegacyShape
 )
 
@@ -198,7 +200,8 @@ func (s LogsTableState) String() string {
 
 // EnsureLogsTable creates otel_logs if absent, checks it has the shape the
 // exporter and our queries need, and brings its TTL in line with retention.
-// Safe to call repeatedly.
+// An empty exporter-created otel_logs (what the 0.1.27 gateway left behind)
+// is renamed to otel_logs_legacy and replaced. Safe to call repeatedly.
 func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration, logger *slog.Logger) (LogsTableState, error) {
 	if c == nil {
 		return LogsTableUnavailable, errors.New("clickhouse: not configured")
@@ -206,12 +209,36 @@ func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration, lo
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	missing, err := createLogsTable(ctx, c, retention)
+	if err != nil {
+		return LogsTableUnavailable, err
+	}
+	if len(missing) > 0 {
+		if err := moveEmptyLegacyTable(ctx, c, logger); err != nil {
+			return LogsTableLegacyShape, legacyShapeError(c.Database, missing, err)
+		}
+		if missing, err = createLogsTable(ctx, c, retention); err != nil {
+			return LogsTableUnavailable, err
+		}
+		if len(missing) > 0 {
+			return LogsTableLegacyShape, legacyShapeError(c.Database, missing, errors.New("columns still missing after the rename"))
+		}
+	}
+	if err := ensureLogsTTL(ctx, c, retention, logger); err != nil {
+		return LogsTableUnavailable, fmt.Errorf("%s retention: %w", LogsTable, err)
+	}
+	return LogsTableReady, nil
+}
+
+// createLogsTable runs the DDL and returns the exporter and Nudgebee columns
+// the table lacks. CREATE IF NOT EXISTS leaves an existing table as it is.
+func createLogsTable(ctx context.Context, c *Client, retention time.Duration) ([]string, error) {
 	if err := c.Exec(ctx, LogsTableDDL(c.Database, retention)); err != nil {
-		return LogsTableUnavailable, fmt.Errorf("create %s: %w", LogsTable, err)
+		return nil, fmt.Errorf("create %s: %w", LogsTable, err)
 	}
 	cols, err := columnsOf(ctx, c, LogsTable)
 	if err != nil {
-		return LogsTableUnavailable, fmt.Errorf("read %s columns: %w", LogsTable, err)
+		return nil, fmt.Errorf("read %s columns: %w", LogsTable, err)
 	}
 	var missing []string
 	for _, group := range [][]string{exporterInsertColumns, nudgebeeLogColumns} {
@@ -221,16 +248,54 @@ func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration, lo
 			}
 		}
 	}
-	if len(missing) > 0 {
-		db, tbl := quoteIdent(c.Database), quoteIdent(LogsTable)
-		return LogsTableLegacyShape, fmt.Errorf(
-			"%s.%s exists without columns [%s]; run RENAME TABLE %s.%s TO %s.%s and the runner will recreate it",
-			db, tbl, strings.Join(missing, ", "), db, tbl, db, quoteIdent(LogsTable+"_legacy"))
+	return missing, nil
+}
+
+// moveEmptyLegacyTable renames an empty exporter-created otel_logs to
+// otel_logs_legacy so the runner's table can take its place. Rows are never
+// moved automatically: a table that has any is left for the operator.
+func moveEmptyLegacyTable(ctx context.Context, c *Client, logger *slog.Logger) error {
+	db, tbl, legacy := quoteIdent(c.Database), quoteIdent(LogsTable), quoteIdent(LogsTable+"_legacy")
+	res, err := c.Query(ctx, fmt.Sprintf("SELECT count() FROM %s.%s", db, tbl), nil)
+	if err != nil {
+		return fmt.Errorf("count rows: %w", err)
 	}
-	if err := ensureLogsTTL(ctx, c, retention, logger); err != nil {
-		return LogsTableUnavailable, fmt.Errorf("%s retention: %w", LogsTable, err)
+	if res.Error != nil {
+		return fmt.Errorf("count rows: %s", *res.Error)
 	}
-	return LogsTableReady, nil
+	if len(res.Data) == 0 || len(res.Data[0]) == 0 {
+		return errors.New("count rows: empty result")
+	}
+	// JSONCompact quotes UInt64 by default; accept a bare number too.
+	var rows uint64
+	switch v := res.Data[0][0].(type) {
+	case string:
+		if rows, err = strconv.ParseUint(v, 10, 64); err != nil {
+			return fmt.Errorf("count rows: %w", err)
+		}
+	case float64:
+		rows = uint64(v)
+	default:
+		return fmt.Errorf("count rows: unexpected value %v", v)
+	}
+	if rows > 0 {
+		return fmt.Errorf("it is not empty: count() = %d", rows)
+	}
+	if err := c.Exec(ctx, fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s", db, tbl, db, legacy)); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	logger.Info("renamed empty exporter-created otel_logs to otel_logs_legacy; creating the runner's otel_logs",
+		"database", c.Database, "from", LogsTable, "to", LogsTable+"_legacy")
+	return nil
+}
+
+func legacyShapeError(database string, missing []string, notMoved error) error {
+	db, tbl := quoteIdent(database), quoteIdent(LogsTable)
+	return fmt.Errorf(
+		"%s.%s exists without columns [%s] and was not renamed automatically (%v); "+
+			"run RENAME TABLE %s.%s TO %s.%s and the runner will recreate it; "+
+			"to copy the old rows into the new table, see runner/docs/logs-operations.md",
+		db, tbl, strings.Join(missing, ", "), notMoved, db, tbl, db, quoteIdent(LogsTable+"_legacy"))
 }
 
 // KeepEnsuringLogsTable calls EnsureLogsTable until the table is ready or ctx

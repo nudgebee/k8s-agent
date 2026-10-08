@@ -145,6 +145,37 @@ func TestOtelLogs_AgainstRealClickHouse(t *testing.T) {
 			t.Errorf("second ensure logged a retention change:\n%s", logs.String())
 		}
 	})
+
+	// The 0.1.27 gateway created otel_logs with the exporter's own schema
+	// (create_schema defaulted to true), so upgrades start from this shape.
+	t.Run("empty exporter-shaped table is renamed and replaced", func(t *testing.T) {
+		lc := legacyDatabase(ctx, t, c, "legacy_empty", 0)
+		if state, err := EnsureLogsTable(ctx, lc, DefaultLogsRetention, discardLogger()); state != LogsTableReady {
+			t.Fatalf("want ready, got %v (%v)", state, err)
+		}
+		if got := tablesIn(ctx, t, lc, "legacy_empty"); got != "otel_logs,otel_logs_legacy" {
+			t.Errorf("tables = %s; want otel_logs,otel_logs_legacy", got)
+		}
+		cols, err := columnsOf(ctx, lc, LogsTable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := cols["namespace"]; !ok {
+			t.Errorf("new otel_logs lacks namespace: %v", cols)
+		}
+	})
+
+	t.Run("exporter-shaped table with rows is left alone", func(t *testing.T) {
+		lc := legacyDatabase(ctx, t, c, "legacy_rows", 1)
+		state, err := EnsureLogsTable(ctx, lc, DefaultLogsRetention, discardLogger())
+		if state != LogsTableLegacyShape {
+			t.Fatalf("want legacy shape, got %v (%v)", state, err)
+		}
+		t.Logf("legacy-shape error: %v", err)
+		if got := tablesIn(ctx, t, lc, "legacy_rows"); got != "otel_logs" {
+			t.Errorf("tables = %s; want otel_logs only", got)
+		}
+	})
 }
 
 type chTableInfo struct {
@@ -162,3 +193,57 @@ func tableInfo(ctx context.Context, t *testing.T, c *Client, db, table string) c
 	}
 	return chTableInfo{fmt.Sprint(res.Data[0][0]), fmt.Sprint(res.Data[0][1])}
 }
+
+func tablesIn(ctx context.Context, t *testing.T, c *Client, db string) string {
+	t.Helper()
+	res, err := c.Query(ctx, fmt.Sprintf("SELECT arrayStringConcat(groupArray(name), ',') FROM (SELECT name FROM system.tables WHERE database = '%s' ORDER BY name)", db), nil)
+	if err != nil || res.Error != nil || len(res.Data) != 1 || len(res.Data[0]) != 1 {
+		t.Fatalf("list tables: %v %+v", err, res)
+	}
+	return fmt.Sprint(res.Data[0][0])
+}
+
+// legacyDatabase creates db holding an otel_logs in the exporter's own shape
+// (its 15 insert columns, the v0.157 sort key) with `rows` rows, and returns
+// a client for db.
+func legacyDatabase(ctx context.Context, t *testing.T, c *Client, db string, rows int) *Client {
+	t.Helper()
+	if err := c.Exec(ctx, "CREATE DATABASE "+db); err != nil {
+		t.Fatal(err)
+	}
+	lc := *c
+	lc.Database = db
+	if err := lc.Exec(ctx, fmt.Sprintf(exporterShapedLogsDDL, db)); err != nil {
+		t.Fatalf("legacy DDL: %v", err)
+	}
+	for i := 0; i < rows; i++ {
+		if err := lc.Exec(ctx, fmt.Sprintf("INSERT INTO %s.otel_logs (Timestamp, ServiceName, Body) VALUES (now64(9), 'legacy', 'row %d')", db, i)); err != nil {
+			t.Fatalf("legacy insert: %v", err)
+		}
+	}
+	return &lc
+}
+
+const exporterShapedLogsDDL = `CREATE TABLE %s.otel_logs
+(
+    Timestamp DateTime64(9) CODEC(Delta(8), ZSTD(1)),
+    TraceId String CODEC(ZSTD(1)),
+    SpanId String CODEC(ZSTD(1)),
+    TraceFlags UInt8 CODEC(ZSTD(1)),
+    SeverityText LowCardinality(String) CODEC(ZSTD(1)),
+    SeverityNumber UInt8 CODEC(ZSTD(1)),
+    ServiceName LowCardinality(String) CODEC(ZSTD(1)),
+    Body String CODEC(ZSTD(1)),
+    ResourceSchemaUrl LowCardinality(String) CODEC(ZSTD(1)),
+    ResourceAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    ScopeSchemaUrl LowCardinality(String) CODEC(ZSTD(1)),
+    ScopeName String CODEC(ZSTD(1)),
+    ScopeVersion LowCardinality(String) CODEC(ZSTD(1)),
+    ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1))
+)
+ENGINE = MergeTree
+PARTITION BY toDate(Timestamp)
+ORDER BY (toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp)
+TTL toDateTime(Timestamp) + toIntervalDay(3)
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1`

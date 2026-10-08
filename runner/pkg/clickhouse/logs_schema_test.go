@@ -292,17 +292,54 @@ func TestEnsureLogsTable_DifferentTTLAltersOnce(t *testing.T) {
 	}
 }
 
-// Review Focus 1: a table created by the exporter's own schema has the OTel
-// columns but none of ours. CREATE IF NOT EXISTS is a no-op there, so the
-// runner must say so instead of claiming ready.
-func TestEnsureLogsTable_LegacyShape(t *testing.T) {
-	s := &logsStub{columns: exporterInsertColumns}
-	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention, discardLogger())
-	if state != LogsTableLegacyShape {
-		t.Fatalf("want legacy shape, got %v", state)
+// Review Focus 1, upgrade path: the 0.1.27 gateway created otel_logs with the
+// exporter's own schema. An empty one is moved aside and ours is created.
+func TestEnsureLogsTable_EmptyLegacyIsRenamedAndRecreated(t *testing.T) {
+	s := &logsStub{columns: exporterInsertColumns, ttlHours: "72", rows: 0}
+	logger, logs := bufLogger()
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention, logger)
+	if state != LogsTableReady || err != nil {
+		t.Fatalf("want ready, got %v (%v)", state, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "namespace") || !strings.Contains(err.Error(), "RENAME TABLE") {
-		t.Errorf("error must name missing columns and the remedy, got %v", err)
+	if n := s.renameCount(); n != 1 {
+		t.Errorf("want 1 RENAME, got %d", n)
+	}
+	if n := s.createCount(); n != 2 {
+		t.Errorf("want CREATE before and after the rename (2), got %d", n)
+	}
+	for _, w := range []string{`"level":"INFO"`, "otel_logs_legacy"} {
+		if !strings.Contains(logs.String(), w) {
+			t.Errorf("log missing %q:\n%s", w, logs.String())
+		}
+	}
+}
+
+// Rows in an exporter-shaped table are never moved automatically, and a failed
+// count or rename leaves the table as it is. The operator gets the remedy.
+func TestEnsureLogsTable_LegacyShapeNotRenamed(t *testing.T) {
+	cases := map[string]struct {
+		stub        *logsStub
+		wantRenames int
+	}{
+		"has rows":     {&logsStub{columns: exporterInsertColumns, rows: 1242}, 0},
+		"count fails":  {&logsStub{columns: exporterInsertColumns, failCount: true}, 0},
+		"rename fails": {&logsStub{columns: exporterInsertColumns, failRename: true}, 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			state, err := EnsureLogsTable(context.Background(), tc.stub.client(t), DefaultLogsRetention, discardLogger())
+			if state != LogsTableLegacyShape {
+				t.Fatalf("want legacy shape, got %v (%v)", state, err)
+			}
+			if n := tc.stub.renameCount(); n != tc.wantRenames {
+				t.Errorf("want %d RENAME, got %d", tc.wantRenames, n)
+			}
+			for _, w := range []string{"namespace", "RENAME TABLE", "runner/docs/logs-operations.md"} {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("error must contain %q, got %v", w, err)
+				}
+			}
+		})
 	}
 }
 
