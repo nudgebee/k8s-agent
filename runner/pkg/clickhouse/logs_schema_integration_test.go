@@ -52,7 +52,7 @@ func TestOtelLogs_AgainstRealClickHouse(t *testing.T) {
 
 	// Fresh table is created and reports ready; a second call is a no-op.
 	for i := 0; i < 2; i++ {
-		if state, err := EnsureLogsTable(ctx, c, DefaultLogsRetention); state != LogsTableReady {
+		if state, err := EnsureLogsTable(ctx, c, DefaultLogsRetention, discardLogger()); state != LogsTableReady {
 			t.Fatalf("call %d: want ready, got %v (%v)", i+1, state, err)
 		}
 	}
@@ -109,4 +109,56 @@ func TestOtelLogs_AgainstRealClickHouse(t *testing.T) {
 	if got := fmt.Sprint(sk.Data[0][0]); got != "namespace, workload, toStartOfFiveMinutes(Timestamp), pod, container, Timestamp" {
 		t.Errorf("sorting key = %q", got)
 	}
+
+	t.Run("retention follows config", func(t *testing.T) {
+		before := tableInfo(ctx, t, c, "default", LogsTable)
+		t.Logf("engine_full at 72h: %s", before.engineFull)
+		if !strings.Contains(before.engineFull, "TTL toDateTime(Timestamp) + toIntervalHour(72) ") {
+			t.Fatalf("created at 72h, engine_full = %s", before.engineFull)
+		}
+
+		logger, logs := bufLogger()
+		if state, err := EnsureLogsTable(ctx, c, 24*time.Hour, logger); state != LogsTableReady {
+			t.Fatalf("ensure at 24h: %v (%v)", state, err)
+		}
+		changed := tableInfo(ctx, t, c, "default", LogsTable)
+		t.Logf("engine_full at 24h: %s", changed.engineFull)
+		if !strings.Contains(changed.engineFull, "TTL toDateTime(Timestamp) + toIntervalHour(24) ") {
+			t.Fatalf("engine_full after 24h = %s", changed.engineFull)
+		}
+		if !strings.Contains(logs.String(), `"old_retention":"72h0m0s"`) || !strings.Contains(logs.String(), `"new_retention":"24h0m0s"`) {
+			t.Errorf("retention change not logged:\n%s", logs.String())
+		}
+
+		// Same retention again: no ALTER. metadata_modification_time has
+		// second resolution, so wait past it to make a second ALTER visible.
+		time.Sleep(1100 * time.Millisecond)
+		logger, logs = bufLogger()
+		if state, err := EnsureLogsTable(ctx, c, 24*time.Hour, logger); state != LogsTableReady {
+			t.Fatalf("ensure at 24h again: %v (%v)", state, err)
+		}
+		again := tableInfo(ctx, t, c, "default", LogsTable)
+		if again != changed {
+			t.Errorf("second ensure changed the table:\nbefore %+v\nafter  %+v", changed, again)
+		}
+		if strings.Contains(logs.String(), "retention") {
+			t.Errorf("second ensure logged a retention change:\n%s", logs.String())
+		}
+	})
+}
+
+type chTableInfo struct {
+	engineFull, metadataModified string
+}
+
+func tableInfo(ctx context.Context, t *testing.T, c *Client, db, table string) chTableInfo {
+	t.Helper()
+	res, err := c.Query(ctx, fmt.Sprintf("SELECT engine_full, toString(metadata_modification_time) FROM system.tables WHERE database = '%s' AND name = '%s'", db, table), nil)
+	if err != nil || res.Error != nil {
+		t.Fatalf("system.tables: %v %v", err, res.Error)
+	}
+	if len(res.Data) != 1 || len(res.Data[0]) != 2 {
+		t.Fatalf("system.tables: want 1 row of 2, got %v", res.Data)
+	}
+	return chTableInfo{fmt.Sprint(res.Data[0][0]), fmt.Sprint(res.Data[0][1])}
 }

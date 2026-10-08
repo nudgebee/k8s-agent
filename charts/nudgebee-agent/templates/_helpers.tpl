@@ -254,12 +254,18 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
     {{- end }}
     {{- if $otelEnabled }}
+    {{- /* The runner parses this with Go's time.ParseDuration (no days) and
+           falls back to 72h on anything else, so reject bad values here. */}}
+    {{- $logsRetention := toString (dig "retention" "72h" (default (dict) .Values.logs)) }}
+    {{- if or (eq $logsRetention "") (not (regexMatch "^([0-9]+h)?([0-9]+m)?([0-9]+s)?$" $logsRetention)) }}
+    {{- fail (printf "logs.retention must be a duration in hours, minutes or seconds, such as 72h or 90m (got %q; days like 7d are not supported, use 168h)" $logsRetention) }}
+    {{- end }}
     # The gateway's logs exporter runs with create_schema: false (#40144);
     # the runner creates otel_logs and applies logs.retention as its TTL.
     - name: LOGS_CLICKHOUSE_ENABLED
       value: "true"
     - name: LOGS_RETENTION
-      value: {{ dig "retention" "72h" (default (dict) .Values.logs) | quote }}
+      value: {{ $logsRetention | quote }}
     {{- end }}
     {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in

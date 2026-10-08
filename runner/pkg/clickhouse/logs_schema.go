@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -85,12 +87,18 @@ const logsTableTemplate = `CREATE TABLE IF NOT EXISTS %s.%s
 ENGINE = MergeTree
 PARTITION BY toDate(Timestamp)
 ORDER BY (namespace, workload, toStartOfFiveMinutes(Timestamp), pod, container, Timestamp)
-TTL toDateTime(Timestamp) + toIntervalHour(%d)
+TTL %s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1`
 
 // LogsTableDDL returns the CREATE TABLE IF NOT EXISTS statement for otel_logs.
 func LogsTableDDL(database string, retention time.Duration) string {
-	return fmt.Sprintf(logsTableTemplate, quoteIdent(database), quoteIdent(LogsTable), retentionHours(retention))
+	return fmt.Sprintf(logsTableTemplate, quoteIdent(database), quoteIdent(LogsTable), logsTTL(retention))
+}
+
+// logsTTL is the table's TTL expression, written exactly as ClickHouse 24.12
+// prints it back in system.tables.engine_full.
+func logsTTL(retention time.Duration) string {
+	return fmt.Sprintf("toDateTime(Timestamp) + toIntervalHour(%d)", retentionHours(retention))
 }
 
 // retentionHours rounds up so the table never keeps less than asked.
@@ -103,6 +111,65 @@ func retentionHours(d time.Duration) int64 {
 		h++
 	}
 	return h
+}
+
+// effectiveRetention is the retention the table actually applies.
+func effectiveRetention(d time.Duration) time.Duration {
+	return time.Duration(retentionHours(d)) * time.Hour
+}
+
+var (
+	ttlClausePattern = regexp.MustCompile(`\bTTL (.+?)(?: SETTINGS |$)`)
+	ttlHoursPattern  = regexp.MustCompile(`^toDateTime\(Timestamp\) \+ toIntervalHour\((\d+)\)$`)
+)
+
+// ensureLogsTTL makes an existing table follow the configured retention.
+// CREATE IF NOT EXISTS never changes a table that exists, so without this a
+// new logs.retention would only reach a table created after the change.
+func ensureLogsTTL(ctx context.Context, c *Client, retention time.Duration, logger *slog.Logger) error {
+	q := fmt.Sprintf(
+		"SELECT engine_full FROM system.tables WHERE database = '%s' AND name = '%s'",
+		escapeLiteral(c.Database), escapeLiteral(LogsTable),
+	)
+	res, err := c.Query(ctx, q, nil)
+	if err != nil {
+		return err
+	}
+	if res.Error != nil {
+		return fmt.Errorf("%s", *res.Error)
+	}
+	if len(res.Data) == 0 || len(res.Data[0]) == 0 {
+		return fmt.Errorf("%s not found in system.tables", LogsTable)
+	}
+	engine, _ := res.Data[0][0].(string)
+	var current string
+	if m := ttlClausePattern.FindStringSubmatch(engine); m != nil {
+		current = m[1]
+	}
+	want := logsTTL(retention)
+	if current == want {
+		return nil
+	}
+	stmt := fmt.Sprintf("ALTER TABLE %s.%s MODIFY TTL %s", quoteIdent(c.Database), quoteIdent(LogsTable), want)
+	if err := c.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("modify TTL: %w", err)
+	}
+	logger.Info("otel_logs retention changed",
+		"old_retention", describeTTL(current), "new_retention", effectiveRetention(retention).String())
+	return nil
+}
+
+// describeTTL renders a TTL clause found in engine_full for a log line.
+func describeTTL(clause string) string {
+	if m := ttlHoursPattern.FindStringSubmatch(clause); m != nil {
+		if h, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			return (time.Duration(h) * time.Hour).String()
+		}
+	}
+	if clause == "" {
+		return "none"
+	}
+	return clause
 }
 
 // LogsTableState is what EnsureLogsTable found.
@@ -129,11 +196,15 @@ func (s LogsTableState) String() string {
 	}
 }
 
-// EnsureLogsTable creates otel_logs if absent and checks it has the shape the
-// exporter and our queries need. Safe to call repeatedly.
-func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration) (LogsTableState, error) {
+// EnsureLogsTable creates otel_logs if absent, checks it has the shape the
+// exporter and our queries need, and brings its TTL in line with retention.
+// Safe to call repeatedly.
+func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration, logger *slog.Logger) (LogsTableState, error) {
 	if c == nil {
 		return LogsTableUnavailable, errors.New("clickhouse: not configured")
+	}
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
 	if err := c.Exec(ctx, LogsTableDDL(c.Database, retention)); err != nil {
 		return LogsTableUnavailable, fmt.Errorf("create %s: %w", LogsTable, err)
@@ -156,6 +227,9 @@ func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration) (L
 			"%s.%s exists without columns [%s]; run RENAME TABLE %s.%s TO %s.%s and the runner will recreate it",
 			db, tbl, strings.Join(missing, ", "), db, tbl, db, quoteIdent(LogsTable+"_legacy"))
 	}
+	if err := ensureLogsTTL(ctx, c, retention, logger); err != nil {
+		return LogsTableUnavailable, fmt.Errorf("%s retention: %w", LogsTable, err)
+	}
 	return LogsTableReady, nil
 }
 
@@ -165,9 +239,9 @@ func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration) (L
 func KeepEnsuringLogsTable(ctx context.Context, c *Client, retention, interval time.Duration, logger *slog.Logger) LogsTableState {
 	last := LogsTableState(-1)
 	for {
-		state, err := EnsureLogsTable(ctx, c, retention)
+		state, err := EnsureLogsTable(ctx, c, retention, logger)
 		if state == LogsTableReady {
-			logger.Info("otel_logs ready", "retention", retention)
+			logger.Info("otel_logs ready", "retention", effectiveRetention(retention).String())
 			return state
 		}
 		if state != last {

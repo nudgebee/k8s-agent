@@ -27,6 +27,14 @@ grep -A1 'name: LOGS_RETENTION' <<<"$out" | grep -q '"72h"' || fail "runner LOGS
 # Capture renders first so a failing `helm template` aborts under set -e.
 ret=$(render --set logs.retention=24h)
 grep -A1 'name: LOGS_RETENTION' <<<"$ret" | grep -q '"24h"' || fail "logs.retention not passed through"
+ret=$(render --set logs.retention=72h)
+grep -A1 'name: LOGS_RETENTION' <<<"$ret" | grep -q '"72h"' || fail "logs.retention=72h must render"
+# The runner reads LOGS_RETENTION with time.ParseDuration, which has no days:
+# a bad value must stop the install, not silently become 72h.
+for bad in 7d ""; do
+  if err=$(render --set "logs.retention=$bad" 2>&1); then fail "logs.retention='$bad' must fail the render"; fi
+  grep -q 'logs.retention must be a duration in hours, minutes or seconds' <<<"$err" || fail "logs.retention='$bad': unexpected error: $err"
+done
 off=$(render --set opentelemetry-collector.enabled=false)
 if grep -q 'name: LOGS_CLICKHOUSE_ENABLED' <<<"$off"; then fail "LOGS_CLICKHOUSE_ENABLED must be absent without the collector"; fi
 echo "PASS: gateway + runner"

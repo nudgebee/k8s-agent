@@ -1,11 +1,14 @@
 package clickhouse
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -93,16 +96,32 @@ func TestLogsTableDDL_LevelRegexesEscapeWordBoundary(t *testing.T) {
 	}
 }
 
-// logsStub answers CREATE with an empty 200 (as ClickHouse does) and
-// system.columns reads from a fixed column list.
+// logsStub plays ClickHouse for one otel_logs table. Tests preset its
+// columns (nil: the table does not exist), TTL hours and row count. CREATE
+// creates the table when absent, RENAME moves it away, ALTER ... MODIFY TTL
+// changes its TTL.
 // mu guards every field: the HTTP handler runs on server goroutines while
 // tests flip and read them.
 type logsStub struct {
 	mu         sync.Mutex
 	columns    []string
+	ttlHours   string
+	rows       int
 	failCreate bool
+	failCount  bool
+	failRename bool
 	creates    int
+	renames    int
+	alters     []string
 	colsTable  string
+}
+
+var ttlHoursRe = regexp.MustCompile(`toIntervalHour\((\d+)\)`)
+
+// engineFull renders system.tables.engine_full the way ClickHouse 24.12 does
+// for our DDL (see the integration test).
+func engineFull(ttlHours string) string {
+	return "MergeTree PARTITION BY toDate(Timestamp) ORDER BY (namespace, workload, toStartOfFiveMinutes(Timestamp), pod, container, Timestamp) TTL toDateTime(Timestamp) + toIntervalHour(" + ttlHours + ") SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1"
 }
 
 func (s *logsStub) setFailCreate(v bool) {
@@ -117,6 +136,18 @@ func (s *logsStub) createCount() int {
 	return s.creates
 }
 
+func (s *logsStub) renameCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.renames
+}
+
+func (s *logsStub) alterStatements() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.alters...)
+}
+
 func (s *logsStub) columnsTable() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,30 +159,55 @@ func (s *logsStub) client(t *testing.T) *Client {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		q := string(b)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fail := func(status int, msg string) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(msg))
+		}
 		switch {
 		case strings.HasPrefix(q, "CREATE TABLE"):
-			s.mu.Lock()
 			s.creates++
-			fail := s.failCreate
-			s.mu.Unlock()
-			if fail {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte("Code: 999. DB::Exception: not ready"))
+			if s.failCreate {
+				fail(http.StatusServiceUnavailable, "Code: 999. DB::Exception: not ready")
+				return
+			}
+			if s.columns == nil {
+				s.columns = fullLogsColumns()
+				s.ttlHours = ttlHoursRe.FindStringSubmatch(q)[1]
 			}
 		case strings.Contains(q, "system.columns"):
 			if m := regexp.MustCompile(`table = '([^']+)'`).FindStringSubmatch(q); m != nil {
-				s.mu.Lock()
 				s.colsTable = m[1]
-				s.mu.Unlock()
 			}
-			s.mu.Lock()
-			cols := append([]string(nil), s.columns...)
-			s.mu.Unlock()
-			rows := make([][]any, 0, len(cols))
-			for _, c := range cols {
+			rows := make([][]any, 0, len(s.columns))
+			for _, c := range s.columns {
 				rows = append(rows, []any{c})
 			}
 			writeRows(w, "name", rows)
+		case strings.Contains(q, "engine_full") && strings.Contains(q, "system.tables"):
+			var rows [][]any
+			if s.columns != nil {
+				rows = [][]any{{engineFull(s.ttlHours)}}
+			}
+			writeRows(w, "engine_full", rows)
+		case strings.HasPrefix(q, "SELECT count() FROM"):
+			if s.failCount {
+				fail(http.StatusInternalServerError, "Code: 999. DB::Exception: count failed")
+				return
+			}
+			// JSONCompact quotes UInt64 values.
+			writeRows(w, "count()", [][]any{{strconv.Itoa(s.rows)}})
+		case strings.HasPrefix(q, "RENAME TABLE"):
+			s.renames++
+			if s.failRename {
+				fail(http.StatusInternalServerError, "Code: 57. DB::Exception: Table default.otel_logs_legacy already exists. (TABLE_ALREADY_EXISTS)")
+				return
+			}
+			s.columns = nil
+		case strings.HasPrefix(q, "ALTER TABLE") && strings.Contains(q, "MODIFY TTL"):
+			s.alters = append(s.alters, q)
+			s.ttlHours = ttlHoursRe.FindStringSubmatch(q)[1]
 		default:
 			t.Errorf("unexpected query: %s", q)
 		}
@@ -164,9 +220,18 @@ func fullLogsColumns() []string {
 	return append(append([]string{"EventName"}, exporterInsertColumns...), nudgebeeLogColumns...)
 }
 
+// bufLogger records log output as JSON, the runner's format (where a
+// time.Duration attribute prints as integer nanoseconds). EnsureLogsTable and
+// KeepEnsuringLogsTable log on the caller's goroutine, so the buffer needs no
+// lock.
+func bufLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, nil)), &buf
+}
+
 func TestEnsureLogsTable_CreatesAndReportsReady(t *testing.T) {
-	s := &logsStub{columns: fullLogsColumns()}
-	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention)
+	s := &logsStub{} // no table yet
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention, discardLogger())
 	if state != LogsTableReady || err != nil {
 		t.Fatalf("want ready, got %v (%v)", state, err)
 	}
@@ -176,13 +241,54 @@ func TestEnsureLogsTable_CreatesAndReportsReady(t *testing.T) {
 	if got := s.columnsTable(); got != LogsTable {
 		t.Errorf("columns read from %q, want %q", got, LogsTable)
 	}
+	if alters := s.alterStatements(); len(alters) != 0 {
+		t.Errorf("fresh table got a TTL ALTER: %v", alters)
+	}
 }
 
 func TestEnsureLogsTable_CreateFailureIsUnavailable(t *testing.T) {
 	s := &logsStub{failCreate: true}
-	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention)
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention, discardLogger())
 	if state != LogsTableUnavailable || err == nil {
 		t.Fatalf("want unavailable with error, got %v (%v)", state, err)
+	}
+}
+
+// CREATE IF NOT EXISTS never changes an existing table, so a new
+// logs.retention only reaches it through ALTER ... MODIFY TTL.
+func TestEnsureLogsTable_MatchingTTLNoAlter(t *testing.T) {
+	s := &logsStub{columns: fullLogsColumns(), ttlHours: "72"}
+	if state, err := EnsureLogsTable(context.Background(), s.client(t), 72*time.Hour, discardLogger()); state != LogsTableReady {
+		t.Fatalf("want ready, got %v (%v)", state, err)
+	}
+	if alters := s.alterStatements(); len(alters) != 0 {
+		t.Errorf("TTL already matches, want no ALTER, got %v", alters)
+	}
+}
+
+func TestEnsureLogsTable_DifferentTTLAltersOnce(t *testing.T) {
+	s := &logsStub{columns: fullLogsColumns(), ttlHours: "72"}
+	c := s.client(t)
+	logger, logs := bufLogger()
+	if state, err := EnsureLogsTable(context.Background(), c, 24*time.Hour, logger); state != LogsTableReady {
+		t.Fatalf("want ready, got %v (%v)", state, err)
+	}
+	want := "ALTER TABLE `default`.`otel_logs` MODIFY TTL toDateTime(Timestamp) + toIntervalHour(24)"
+	if alters := s.alterStatements(); len(alters) != 1 || alters[0] != want {
+		t.Fatalf("want exactly [%s], got %q", want, alters)
+	}
+	for _, w := range []string{`"level":"INFO"`, `"old_retention":"72h0m0s"`, `"new_retention":"24h0m0s"`} {
+		if !strings.Contains(logs.String(), w) {
+			t.Errorf("log missing %q:\n%s", w, logs.String())
+		}
+	}
+
+	// The TTL now matches: a second pass changes nothing.
+	if state, err := EnsureLogsTable(context.Background(), c, 24*time.Hour, discardLogger()); state != LogsTableReady {
+		t.Fatalf("second pass: want ready, got %v (%v)", state, err)
+	}
+	if n := len(s.alterStatements()); n != 1 {
+		t.Errorf("second pass ran another ALTER (%d total)", n)
 	}
 }
 
@@ -191,7 +297,7 @@ func TestEnsureLogsTable_CreateFailureIsUnavailable(t *testing.T) {
 // runner must say so instead of claiming ready.
 func TestEnsureLogsTable_LegacyShape(t *testing.T) {
 	s := &logsStub{columns: exporterInsertColumns}
-	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention)
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention, discardLogger())
 	if state != LogsTableLegacyShape {
 		t.Fatalf("want legacy shape, got %v", state)
 	}
@@ -201,13 +307,13 @@ func TestEnsureLogsTable_LegacyShape(t *testing.T) {
 }
 
 func TestEnsureLogsTable_NilClient(t *testing.T) {
-	if state, err := EnsureLogsTable(context.Background(), nil, DefaultLogsRetention); state != LogsTableUnavailable || err == nil {
+	if state, err := EnsureLogsTable(context.Background(), nil, DefaultLogsRetention, discardLogger()); state != LogsTableUnavailable || err == nil {
 		t.Fatalf("want unavailable, got %v (%v)", state, err)
 	}
 }
 
 func TestKeepEnsuringLogsTable_RetriesUntilReady(t *testing.T) {
-	s := &logsStub{columns: fullLogsColumns(), failCreate: true}
+	s := &logsStub{failCreate: true}
 	c := s.client(t)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -215,12 +321,17 @@ func TestKeepEnsuringLogsTable_RetriesUntilReady(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	state := KeepEnsuringLogsTable(ctx, c, DefaultLogsRetention, 10*time.Millisecond, discardLogger())
+	logger, logs := bufLogger()
+	state := KeepEnsuringLogsTable(ctx, c, DefaultLogsRetention, 10*time.Millisecond, logger)
 	if state != LogsTableReady {
 		t.Fatalf("want ready after retries, got %v", state)
 	}
 	if n := s.createCount(); n < 2 {
 		t.Errorf("want retries, got %d CREATE attempts", n)
+	}
+	// Human-readable, not integer nanoseconds.
+	if !strings.Contains(logs.String(), `"retention":"72h0m0s"`) {
+		t.Errorf("ready log must carry retention as 72h0m0s:\n%s", logs.String())
 	}
 }
 
