@@ -54,7 +54,7 @@ func TestLogsTableDDL_TokenIndexOnBody(t *testing.T) {
 func TestLogsTableDDL_TTLFromRetention(t *testing.T) {
 	cases := map[time.Duration]string{
 		72 * time.Hour:   "toIntervalHour(72)",
-		90 * time.Minute: "toIntervalHour(2)", // round up, never shorter than asked
+		90 * time.Minute: "toIntervalHour(2)",  // round up, never shorter than asked
 		0:                "toIntervalHour(72)", // unset falls back to the default
 		-time.Hour:       "toIntervalHour(72)",
 	}
