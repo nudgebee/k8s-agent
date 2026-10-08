@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -94,11 +95,32 @@ func TestLogsTableDDL_LevelRegexesEscapeWordBoundary(t *testing.T) {
 
 // logsStub answers CREATE with an empty 200 (as ClickHouse does) and
 // system.columns reads from a fixed column list.
+// mu guards every field: the HTTP handler runs on server goroutines while
+// tests flip and read them.
 type logsStub struct {
+	mu         sync.Mutex
 	columns    []string
 	failCreate bool
 	creates    int
 	colsTable  string
+}
+
+func (s *logsStub) setFailCreate(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failCreate = v
+}
+
+func (s *logsStub) createCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.creates
+}
+
+func (s *logsStub) columnsTable() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.colsTable
 }
 
 func (s *logsStub) client(t *testing.T) *Client {
@@ -108,17 +130,25 @@ func (s *logsStub) client(t *testing.T) *Client {
 		q := string(b)
 		switch {
 		case strings.HasPrefix(q, "CREATE TABLE"):
+			s.mu.Lock()
 			s.creates++
-			if s.failCreate {
+			fail := s.failCreate
+			s.mu.Unlock()
+			if fail {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte("Code: 999. DB::Exception: not ready"))
 			}
 		case strings.Contains(q, "system.columns"):
 			if m := regexp.MustCompile(`table = '([^']+)'`).FindStringSubmatch(q); m != nil {
+				s.mu.Lock()
 				s.colsTable = m[1]
+				s.mu.Unlock()
 			}
-			rows := make([][]any, 0, len(s.columns))
-			for _, c := range s.columns {
+			s.mu.Lock()
+			cols := append([]string(nil), s.columns...)
+			s.mu.Unlock()
+			rows := make([][]any, 0, len(cols))
+			for _, c := range cols {
 				rows = append(rows, []any{c})
 			}
 			writeRows(w, "name", rows)
@@ -140,11 +170,11 @@ func TestEnsureLogsTable_CreatesAndReportsReady(t *testing.T) {
 	if state != LogsTableReady || err != nil {
 		t.Fatalf("want ready, got %v (%v)", state, err)
 	}
-	if s.creates != 1 {
-		t.Errorf("want 1 CREATE, got %d", s.creates)
+	if n := s.createCount(); n != 1 {
+		t.Errorf("want 1 CREATE, got %d", n)
 	}
-	if s.colsTable != LogsTable {
-		t.Errorf("columns read from %q, want %q", s.colsTable, LogsTable)
+	if got := s.columnsTable(); got != LogsTable {
+		t.Errorf("columns read from %q, want %q", got, LogsTable)
 	}
 }
 
@@ -173,5 +203,32 @@ func TestEnsureLogsTable_LegacyShape(t *testing.T) {
 func TestEnsureLogsTable_NilClient(t *testing.T) {
 	if state, err := EnsureLogsTable(context.Background(), nil, DefaultLogsRetention); state != LogsTableUnavailable || err == nil {
 		t.Fatalf("want unavailable, got %v (%v)", state, err)
+	}
+}
+
+func TestKeepEnsuringLogsTable_RetriesUntilReady(t *testing.T) {
+	s := &logsStub{columns: fullLogsColumns(), failCreate: true}
+	c := s.client(t)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.setFailCreate(false) // ClickHouse comes up
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	state := KeepEnsuringLogsTable(ctx, c, DefaultLogsRetention, 10*time.Millisecond, discardLogger())
+	if state != LogsTableReady {
+		t.Fatalf("want ready after retries, got %v", state)
+	}
+	if n := s.createCount(); n < 2 {
+		t.Errorf("want retries, got %d CREATE attempts", n)
+	}
+}
+
+func TestKeepEnsuringLogsTable_StopsOnContextCancel(t *testing.T) {
+	s := &logsStub{failCreate: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if state := KeepEnsuringLogsTable(ctx, s.client(t), DefaultLogsRetention, 10*time.Millisecond, discardLogger()); state != LogsTableUnavailable {
+		t.Fatalf("want unavailable on cancel, got %v", state)
 	}
 }

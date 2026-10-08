@@ -83,6 +83,7 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		ClickHouseEnabled: true,
 		ClickHousePort:    8123,
 		ClickHouseDB:      "default",
+		LogsRetention:     72 * time.Hour,
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Config\n got:  %+v\n want: %+v", c, want)
@@ -130,6 +131,9 @@ func TestFromEnv_DefaultsWhenOptionalMissing(t *testing.T) {
 	}
 	if c.GCPEnabled {
 		t.Error("GCPEnabled default should be false (needs GCP_PROJECT_ID + ADC)")
+	}
+	if c.LogsClickHouseEnabled || c.LogsRetention != 72*time.Hour {
+		t.Errorf("logs defaults: enabled=%v retention=%v; want false / 72h", c.LogsClickHouseEnabled, c.LogsRetention)
 	}
 }
 
@@ -289,5 +293,26 @@ func TestFromEnv_TriggerRateLimitsDefaultsEmpty(t *testing.T) {
 	}
 	if len(cfg.TriggerRateLimits) != 0 {
 		t.Errorf("TriggerRateLimits = %v; want empty so matchers keep their compiled windows", cfg.TriggerRateLimits)
+	}
+}
+
+func TestFromEnv_LogsSettings(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("LOGS_CLICKHOUSE_ENABLED", "true")
+	t.Setenv("LOGS_RETENTION", "48h")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.LogsClickHouseEnabled || c.LogsRetention != 48*time.Hour {
+		t.Errorf("got enabled=%v retention=%v", c.LogsClickHouseEnabled, c.LogsRetention)
+	}
+
+	t.Setenv("LOGS_CLICKHOUSE_ENABLED", "")
+	t.Setenv("LOGS_RETENTION", "not-a-duration")
+	c, _ = FromEnv()
+	if c.LogsClickHouseEnabled || c.LogsRetention != 72*time.Hour {
+		t.Errorf("defaults: got enabled=%v retention=%v", c.LogsClickHouseEnabled, c.LogsRetention)
 	}
 }

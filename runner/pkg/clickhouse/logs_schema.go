@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -156,4 +157,27 @@ func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration) (L
 			db, tbl, strings.Join(missing, ", "), db, tbl, db, quoteIdent(LogsTable+"_legacy"))
 	}
 	return LogsTableReady, nil
+}
+
+// KeepEnsuringLogsTable calls EnsureLogsTable until the table is ready or ctx
+// ends. The collector may start first and ClickHouse may restart, so a single
+// attempt is not enough. Logs once per state change, not every attempt.
+func KeepEnsuringLogsTable(ctx context.Context, c *Client, retention, interval time.Duration, logger *slog.Logger) LogsTableState {
+	last := LogsTableState(-1)
+	for {
+		state, err := EnsureLogsTable(ctx, c, retention)
+		if state == LogsTableReady {
+			logger.Info("otel_logs ready", "retention", retention)
+			return state
+		}
+		if state != last {
+			logger.Warn("otel_logs not ready; retrying", "state", state.String(), "err", err)
+			last = state
+		}
+		select {
+		case <-ctx.Done():
+			return state
+		case <-time.After(interval):
+		}
+	}
 }

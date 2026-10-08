@@ -491,6 +491,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	handlers["query_data"] = enrichers.QueryData(ch)
 	lightActions["query_data"] = struct{}{}
 
+	// otel_logs (#40144): the gateway's logs exporter does not create tables,
+	// so the runner must, before the first batch is dropped by retries.
+	if cfg.LogsClickHouseEnabled && ch != nil {
+		go chclient.KeepEnsuringLogsTable(ctx, ch, cfg.LogsRetention, 30*time.Second, logger.With("component", "logs-schema"))
+	}
+
 	// api_traces_enricher_v2: OTel traces query against the same ClickHouse.
 	// Same registration semantics as query_data — register unconditionally so
 	// callers see an empty result instead of "auth rejected" when CH is off.

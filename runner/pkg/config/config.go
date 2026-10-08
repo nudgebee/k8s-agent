@@ -211,6 +211,12 @@ type Config struct {
 	ClickHousePassword string
 	ClickHouseDB       string
 	ClickHouseSSL      bool
+
+	// Logs in ClickHouse (#40144). The chart sets LOGS_CLICKHOUSE_ENABLED
+	// whenever the gateway collector is on, because its logs exporter runs
+	// with create_schema: false and the runner owns otel_logs.
+	LogsClickHouseEnabled bool
+	LogsRetention         time.Duration
 }
 
 // FromEnv reads config from env vars and returns it. Missing required fields
@@ -327,6 +333,8 @@ func FromEnv() (*Config, error) {
 		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
+		LogsClickHouseEnabled:      envBool("LOGS_CLICKHOUSE_ENABLED", false),
+		LogsRetention:              parseDuration(os.Getenv("LOGS_RETENTION"), 72*time.Hour),
 	}
 	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring
 	// the legacy f-string default (utils.py).
