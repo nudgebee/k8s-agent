@@ -16,6 +16,13 @@ The 0.1.27 gateway wrote logs with the `clickhouse` exporter, whose
 (`namespace`, `workload`, `pod`, `container`, `node`, `stream`, `level`) and
 sorts by `(toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp)`.
 
+**Avoid the race.** The automatic rename only happens while the table is empty,
+and the log agent's first batches can reach the old table before the runner
+checks it. So upgrade first with `otel-log-agent.enabled` unchanged, wait for
+the runner log `otel_logs ready`, then enable the log agent in a second
+upgrade. If both were enabled together and the runner reports `state:
+legacy-shape`, follow the manual RENAME + backfill steps below.
+
 - **Empty table:** handled automatically. The runner renames it to
   `otel_logs_legacy`, logs `renamed empty exporter-created otel_logs to
   otel_logs_legacy` at Info, creates its own `otel_logs` and logs

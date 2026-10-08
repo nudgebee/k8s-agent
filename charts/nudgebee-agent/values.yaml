@@ -558,6 +558,7 @@ opentelemetry-collector:
 # Requires opentelemetry-collector.enabled: true (the exporter targets the gateway Service).
 otel-log-agent:
   # Upgrading an existing otel_logs, first-start gap, duplicates: runner/docs/logs-operations.md
+  # Upgrading from 0.1.27: upgrade with this unchanged, wait for the runner log "otel_logs ready", then enable it.
   enabled: false
   mode: daemonset
   nameOverride: otel-log-agent
