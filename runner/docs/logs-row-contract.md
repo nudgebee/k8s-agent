@@ -22,3 +22,9 @@ sort key all rely on it.
 
 Derived columns (do not send them): `namespace`, `workload`, `pod`, `container`,
 `node`, `stream`, `level`.
+
+At-least-once delivery: a retried insert can store the same record twice, so
+readers must tolerate duplicate rows (deduplication is #40148).
+
+Upgrades, retention changes and other operational behaviour are in
+[logs-operations.md](logs-operations.md).
