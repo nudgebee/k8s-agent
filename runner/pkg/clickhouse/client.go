@@ -156,6 +156,42 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 	return out, nil
 }
 
+// Exec runs a statement that returns no result set (CREATE, ALTER, RENAME).
+// ClickHouse answers those with an empty body, which Query would misreport
+// as a JSON parse failure, so success here is simply a 2xx status.
+func (c *Client) Exec(ctx context.Context, stmt string) error {
+	if c == nil {
+		return fmt.Errorf("clickhouse: not configured")
+	}
+	s := strings.TrimSpace(stmt)
+	if s == "" {
+		return fmt.Errorf("clickhouse: empty statement")
+	}
+	v := url.Values{}
+	v.Set("database", c.Database)
+	if c.User != "" {
+		v.Set("user", c.User)
+	}
+	if c.Password != "" {
+		v.Set("password", c.Password)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/?"+v.Encode(), bytes.NewBufferString(s))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("clickhouse: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("clickhouse: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // errResult wraps a string error in a QueryResult so the wire shape is uniform.
 func errResult(msg string) *QueryResult {
 	s := msg

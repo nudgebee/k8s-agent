@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -107,5 +108,48 @@ func TestBaseTypeStripsNullable(t *testing.T) {
 	}
 	if baseType("UInt64") != "UInt64" {
 		t.Error("baseType modified bare type")
+	}
+}
+
+func TestExec_EmptyBodyIsSuccess(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = string(b)
+		w.WriteHeader(http.StatusOK) // ClickHouse sends no body for DDL
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://")})
+
+	if err := c.Exec(context.Background(), "CREATE TABLE t (x UInt8) ENGINE = Memory"); err != nil {
+		t.Fatalf("Exec on empty 200: %v", err)
+	}
+	if strings.Contains(got, "FORMAT") {
+		t.Errorf("Exec must send the statement verbatim, got %q", got)
+	}
+}
+
+func TestExec_HTTPErrorCarriesBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Code: 62. DB::Exception: Syntax error"))
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://")})
+
+	err := c.Exec(context.Background(), "CREATE TABLE")
+	if err == nil || !strings.Contains(err.Error(), "Syntax error") || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("want error with status and body, got %v", err)
+	}
+}
+
+func TestExec_NilClientAndEmptyStatement(t *testing.T) {
+	var c *Client
+	if err := c.Exec(context.Background(), "SELECT 1"); err == nil {
+		t.Error("nil client must error")
+	}
+	c = New(Config{Host: "localhost"})
+	if err := c.Exec(context.Background(), "   "); err == nil {
+		t.Error("empty statement must error")
 	}
 }
