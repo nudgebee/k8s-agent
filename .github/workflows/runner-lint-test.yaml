@@ -60,6 +60,11 @@ jobs:
       - name: Unit tests with race detector
         run: go test -race -count=1 ./...
 
+      # otel_logs DDL, retention and upgrade path against a real ClickHouse
+      # (testcontainers runs clickhouse/clickhouse-server:24.12 on the runner's Docker).
+      - name: ClickHouse integration tests
+        run: go test -count=1 -tags=integration ./pkg/clickhouse/...
+
       - name: Coverage
         run: |
           go test -race -count=1 \

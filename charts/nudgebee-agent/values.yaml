@@ -524,7 +524,9 @@ opentelemetry-collector:
         logs_table_name: otel_logs
         create_schema: false
         async_insert: true
-        timeout: 10s
+        # A timed-out insert that ClickHouse already committed is retried and
+        # stored twice; 30s makes that rarer (runner/docs/logs-operations.md).
+        timeout: 30s
         retry_on_failure:
           enabled: true
           initial_interval: 5s
@@ -563,9 +565,17 @@ otel-log-agent:
     repository: ghcr.io/nudgebee/opentelemetry-collector-contrib
     tag: 0.157.0
   # /var/log/pods files are root-owned 0640; the image's default uid cannot read them.
+  # uid 0 owns those files and the /var/lib/otelcol checkpoints, so it needs no
+  # capabilities; everything else is locked down.
   securityContext:
     runAsUser: 0
     runAsGroup: 0
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    readOnlyRootFilesystem: true
+    seccompProfile:
+      type: RuntimeDefault
   resources:
     requests:
       cpu: 100m

@@ -16,6 +16,10 @@ drop the signal entirely until the columns are added. Per signal:
             ScopeAttributes. EventName is also new but the exporter probes for
             it and omits it from the insert when absent, so it is optional; we
             add it anyway to keep upgraded tables at parity with fresh ones.
+            Since #40144 the runner, not the exporter, creates otel_logs
+            (clickhouse/logs runs with create_schema: false). The runner's
+            table already has these columns, so the ALTER is a no-op there; it
+            still matters for an exporter-created otel_logs from an older install.
 
 This hook runs the additive, idempotent ALTERs before each upgrade: harmless
 when the columns (or the tables themselves) don't exist yet, and it keeps
@@ -33,11 +37,14 @@ queries won't hit the primary key on upgraded clusters.
 {{- $chFullname := coalesce .Values.clickhouse.fullnameOverride (printf "%s-%s" .Release.Name (default "clickhouse" .Values.clickhouse.nameOverride)) }}
 {{- $chSecretName := default $chFullname (dig "auth" "existingSecret" "" .Values.clickhouse) }}
 {{- $chSecretKey := default "admin-password" (dig "auth" "existingSecretKey" "" .Values.clickhouse) }}
-{{- /* Keep the target database/table in lockstep with the exporter config. */}}
+{{- /* Keep the target database/tables in lockstep with the exporter config.
+       Logs are written by clickhouse/logs (#40144), so its table name wins,
+       then the clickhouse exporter's, then the default. */}}
 {{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
+{{- $chLogsExporter := dig "config" "exporters" "clickhouse/logs" (dict) (index .Values "opentelemetry-collector") }}
 {{- $chDatabase := default "default" (get $chExporter "database") }}
 {{- $chTracesTable := default "otel_traces" (get $chExporter "traces_table_name") }}
-{{- $chLogsTable := default "otel_logs" (get $chExporter "logs_table_name") }}
+{{- $chLogsTable := coalesce (get $chLogsExporter "logs_table_name") (get $chExporter "logs_table_name") "otel_logs" }}
 {{- /* Metric table names come from exporter `metrics_tables.<type>.name`. The
        exponential histogram default is otel_metrics_exponential_histogram —
        not ..._exp_histogram, which is only the exporter's internal shorthand. */}}

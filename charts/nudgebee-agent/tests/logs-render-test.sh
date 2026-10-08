@@ -21,6 +21,13 @@ cfg=$(gateway_cfg "$out")
 [ "$(q '.exporters["clickhouse/logs"].async_insert' <<<"$cfg")" = "true" ]   || fail "clickhouse/logs must use async_insert"
 [ "$(q '.exporters["clickhouse/logs"].logs_table_name' <<<"$cfg")" = "otel_logs" ] || fail "wrong logs table"
 [ "$(q '.service.pipelines.logs.exporters[0]' <<<"$cfg")" = "clickhouse/logs" ] || fail "logs pipeline must export to clickhouse/logs"
+# Longer than the 10s default: a timed-out insert that ClickHouse committed is retried and duplicated.
+[ "$(q '.exporters["clickhouse/logs"].timeout' <<<"$cfg")" = "30s" ] || fail "clickhouse/logs timeout must be 30s"
+# The pre-upgrade schema job ALTERs the logs table that clickhouse/logs writes.
+job_logs_table() { q 'select(.kind == "Job" and (.metadata.name | test("ch-schema-upgrade"))) | .spec.template.spec.containers[0].env[] | select(.name == "CH_LOGS_TABLE") | .value' <<<"$1"; }
+[ "$(job_logs_table "$out")" = "otel_logs" ] || fail "schema upgrade job must default the logs table to otel_logs"
+job=$(render --set 'opentelemetry-collector.config.exporters.clickhouse/logs.logs_table_name=custom_logs')
+[ "$(job_logs_table "$job")" = "custom_logs" ] || fail "schema upgrade job must take the logs table from clickhouse/logs"
 grep -q 'name: LOGS_CLICKHOUSE_ENABLED' <<<"$out" || fail "runner missing LOGS_CLICKHOUSE_ENABLED"
 grep -A1 'name: LOGS_RETENTION' <<<"$out" | grep -q '"72h"' || fail "runner LOGS_RETENTION default must be 72h"
 
@@ -58,7 +65,13 @@ q '.receivers.filelog.exclude[]' <<<"$agent_cfg" | grep -q '^/var/log/pods/nudge
 [ "$(q '.service.pipelines | keys | length' <<<"$agent_cfg")" = "1" ] || fail "log agent must only run a logs pipeline"
 q 'select(.kind == "Service") | .metadata.name' <<<"$on" | grep -qx 'nudgebee-agent-opentelemetry-collector' || fail "gateway Service name changed"
 q 'select(.kind == "DaemonSet" and (.metadata.name | test("otel-log-agent"))) | .spec.template.spec.volumes[].hostPath.path' <<<"$on" | grep -qx '/var/log/pods' || fail "log agent must mount /var/log/pods"
-[ "$(q 'select(.kind == "DaemonSet" and (.metadata.name | test("otel-log-agent"))) | .spec.template.spec.containers[0].securityContext.runAsUser' <<<"$on")" = "0" ] || fail "log agent must run as root to read pod logs"
+agent_sc=$(q 'select(.kind == "DaemonSet" and (.metadata.name | test("otel-log-agent"))) | .spec.template.spec.containers[0].securityContext' <<<"$on")
+[ "$(q '.runAsUser' <<<"$agent_sc")" = "0" ] || fail "log agent must run as root to read pod logs"
+# Root only for file ownership: no privileges beyond that.
+[ "$(q '.allowPrivilegeEscalation' <<<"$agent_sc")" = "false" ] || fail "log agent must set allowPrivilegeEscalation: false"
+[ "$(q '.capabilities.drop | join(",")' <<<"$agent_sc")" = "ALL" ] || fail "log agent must drop ALL capabilities"
+[ "$(q '.readOnlyRootFilesystem' <<<"$agent_sc")" = "true" ] || fail "log agent must have a read-only root filesystem"
+[ "$(q '.seccompProfile.type' <<<"$agent_sc")" = "RuntimeDefault" ] || fail "log agent must use the RuntimeDefault seccomp profile"
 svc_stmts=$(q '.processors["transform/service_name"].log_statements[].statements[]' <<<"$agent_cfg")
 [ -n "$svc_stmts" ] || fail "transform/service_name statements missing"
 if grep -q 'service.name"\] == nil' <<<"$svc_stmts"; then fail "service.name statements must be unconditional (k8s_attributes pre-sets it from labels)"; fi
