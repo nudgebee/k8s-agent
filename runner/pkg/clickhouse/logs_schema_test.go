@@ -72,3 +72,18 @@ func TestLogsTableDDL_QuotesDatabase(t *testing.T) {
 		t.Errorf("database not quoted:\n%s", ddl[:80])
 	}
 }
+
+// The level regexes reach ClickHouse through a Go raw string, so \b must be
+// written \b; a single backslash is a backspace inside a ClickHouse literal.
+func TestLogsTableDDL_LevelRegexesEscapeWordBoundary(t *testing.T) {
+	ddl := LogsTableDDL("default", DefaultLogsRetention)
+	for _, want := range []string{
+		`match(Body, '(?i)\\b(fatal|panic|critical)\\b')`,
+		`match(Body, '(?i)\\b(error|err|exception)\\b')`,
+		`match(Body, '(?i)\\bwarn(ing)?\\b')`,
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("want %s in DDL", want)
+		}
+	}
+}
