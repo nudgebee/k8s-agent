@@ -1,6 +1,10 @@
 package clickhouse
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -85,5 +89,89 @@ func TestLogsTableDDL_LevelRegexesEscapeWordBoundary(t *testing.T) {
 		if !strings.Contains(ddl, want) {
 			t.Errorf("want %s in DDL", want)
 		}
+	}
+}
+
+// logsStub answers CREATE with an empty 200 (as ClickHouse does) and
+// system.columns reads from a fixed column list.
+type logsStub struct {
+	columns    []string
+	failCreate bool
+	creates    int
+	colsTable  string
+}
+
+func (s *logsStub) client(t *testing.T) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		q := string(b)
+		switch {
+		case strings.HasPrefix(q, "CREATE TABLE"):
+			s.creates++
+			if s.failCreate {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("Code: 999. DB::Exception: not ready"))
+			}
+		case strings.Contains(q, "system.columns"):
+			if m := regexp.MustCompile(`table = '([^']+)'`).FindStringSubmatch(q); m != nil {
+				s.colsTable = m[1]
+			}
+			rows := make([][]any, 0, len(s.columns))
+			for _, c := range s.columns {
+				rows = append(rows, []any{c})
+			}
+			writeRows(w, "name", rows)
+		default:
+			t.Errorf("unexpected query: %s", q)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return New(Config{Host: strings.TrimPrefix(srv.URL, "http://"), Database: "default"})
+}
+
+func fullLogsColumns() []string {
+	return append(append([]string{"EventName"}, exporterInsertColumns...), nudgebeeLogColumns...)
+}
+
+func TestEnsureLogsTable_CreatesAndReportsReady(t *testing.T) {
+	s := &logsStub{columns: fullLogsColumns()}
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention)
+	if state != LogsTableReady || err != nil {
+		t.Fatalf("want ready, got %v (%v)", state, err)
+	}
+	if s.creates != 1 {
+		t.Errorf("want 1 CREATE, got %d", s.creates)
+	}
+	if s.colsTable != LogsTable {
+		t.Errorf("columns read from %q, want %q", s.colsTable, LogsTable)
+	}
+}
+
+func TestEnsureLogsTable_CreateFailureIsUnavailable(t *testing.T) {
+	s := &logsStub{failCreate: true}
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention)
+	if state != LogsTableUnavailable || err == nil {
+		t.Fatalf("want unavailable with error, got %v (%v)", state, err)
+	}
+}
+
+// Review Focus 1: a table created by the exporter's own schema has the OTel
+// columns but none of ours. CREATE IF NOT EXISTS is a no-op there, so the
+// runner must say so instead of claiming ready.
+func TestEnsureLogsTable_LegacyShape(t *testing.T) {
+	s := &logsStub{columns: exporterInsertColumns}
+	state, err := EnsureLogsTable(context.Background(), s.client(t), DefaultLogsRetention)
+	if state != LogsTableLegacyShape {
+		t.Fatalf("want legacy shape, got %v", state)
+	}
+	if err == nil || !strings.Contains(err.Error(), "namespace") || !strings.Contains(err.Error(), "RENAME TABLE") {
+		t.Errorf("error must name missing columns and the remedy, got %v", err)
+	}
+}
+
+func TestEnsureLogsTable_NilClient(t *testing.T) {
+	if state, err := EnsureLogsTable(context.Background(), nil, DefaultLogsRetention); state != LogsTableUnavailable || err == nil {
+		t.Fatalf("want unavailable, got %v (%v)", state, err)
 	}
 }

@@ -205,12 +205,17 @@ func hasAll(columns map[string]struct{}, required map[string]string) bool {
 	return true
 }
 
-// tableColumns returns the column names of otel_traces. An absent table yields
-// an empty set, not an error — that is the normal pre-first-span state.
+// tableColumns returns the column names of otel_traces.
 func tableColumns(ctx context.Context, c *Client) (map[string]struct{}, error) {
+	return columnsOf(ctx, c, TracesTable)
+}
+
+// columnsOf returns the column names of table in c.Database. An absent table
+// yields an empty set, not an error: that is the normal pre-creation state.
+func columnsOf(ctx context.Context, c *Client, table string) (map[string]struct{}, error) {
 	q := fmt.Sprintf(
 		"SELECT name FROM system.columns WHERE database = '%s' AND table = '%s'",
-		escapeLiteral(c.Database), escapeLiteral(TracesTable),
+		escapeLiteral(c.Database), escapeLiteral(table),
 	)
 	res, err := c.Query(ctx, q, nil)
 	if err != nil {

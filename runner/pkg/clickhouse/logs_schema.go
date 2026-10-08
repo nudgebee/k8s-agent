@@ -10,7 +10,10 @@ package clickhouse
 // runner/docs/logs-row-contract.md.
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -99,4 +102,58 @@ func retentionHours(d time.Duration) int64 {
 		h++
 	}
 	return h
+}
+
+// LogsTableState is what EnsureLogsTable found.
+type LogsTableState int
+
+const (
+	// LogsTableUnavailable: ClickHouse unreachable or the DDL failed. Retry.
+	LogsTableUnavailable LogsTableState = iota
+	// LogsTableReady: otel_logs has every exporter and Nudgebee column.
+	LogsTableReady
+	// LogsTableLegacyShape: otel_logs exists but was created by the exporter's
+	// own schema. Inserts still work; queries would full-scan. Needs a rename.
+	LogsTableLegacyShape
+)
+
+func (s LogsTableState) String() string {
+	switch s {
+	case LogsTableReady:
+		return "ready"
+	case LogsTableLegacyShape:
+		return "legacy-shape"
+	default:
+		return "unavailable"
+	}
+}
+
+// EnsureLogsTable creates otel_logs if absent and checks it has the shape the
+// exporter and our queries need. Safe to call repeatedly.
+func EnsureLogsTable(ctx context.Context, c *Client, retention time.Duration) (LogsTableState, error) {
+	if c == nil {
+		return LogsTableUnavailable, errors.New("clickhouse: not configured")
+	}
+	if err := c.Exec(ctx, LogsTableDDL(c.Database, retention)); err != nil {
+		return LogsTableUnavailable, fmt.Errorf("create %s: %w", LogsTable, err)
+	}
+	cols, err := columnsOf(ctx, c, LogsTable)
+	if err != nil {
+		return LogsTableUnavailable, fmt.Errorf("read %s columns: %w", LogsTable, err)
+	}
+	var missing []string
+	for _, group := range [][]string{exporterInsertColumns, nudgebeeLogColumns} {
+		for _, name := range group {
+			if _, ok := cols[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		db, tbl := quoteIdent(c.Database), quoteIdent(LogsTable)
+		return LogsTableLegacyShape, fmt.Errorf(
+			"%s.%s exists without columns [%s]; run RENAME TABLE %s.%s TO %s.%s and the runner will recreate it",
+			db, tbl, strings.Join(missing, ", "), db, tbl, db, quoteIdent(LogsTable+"_legacy"))
+	}
+	return LogsTableReady, nil
 }
