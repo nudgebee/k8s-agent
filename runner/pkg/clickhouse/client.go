@@ -78,7 +78,7 @@ type QueryResult struct {
 	Error       *string  `json:"error"`
 }
 
-// Query runs the SQL via /?database=...&user=...&password=... POST. The
+// Query runs the SQL via a POST to /?database=... (see newRequest). The
 // legacy equivalent is db.run_query(query, values). `values` (positional
 // bind params) are spliced into the query the same way clickhouse-connect
 // does — we accept them but rely on ClickHouse's parameterized-query
@@ -104,21 +104,10 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 		q += " FORMAT JSONCompact"
 	}
 
-	v := url.Values{}
-	v.Set("database", c.Database)
-	if c.User != "" {
-		v.Set("user", c.User)
-	}
-	if c.Password != "" {
-		v.Set("password", c.Password)
-	}
-	endpoint := c.BaseURL + "/?" + v.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(q))
+	req, err := c.newRequest(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -167,19 +156,10 @@ func (c *Client) Exec(ctx context.Context, stmt string) error {
 	if s == "" {
 		return fmt.Errorf("clickhouse: empty statement")
 	}
-	v := url.Values{}
-	v.Set("database", c.Database)
-	if c.User != "" {
-		v.Set("user", c.User)
-	}
-	if c.Password != "" {
-		v.Set("password", c.Password)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/?"+v.Encode(), bytes.NewBufferString(s))
+	req, err := c.newRequest(ctx, s)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("clickhouse: %w", err)
@@ -190,6 +170,29 @@ func (c *Client) Exec(ctx context.Context, stmt string) error {
 		return fmt.Errorf("clickhouse: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+// newRequest builds the POST that Query and Exec send. Credentials go in the
+// Authorization header, never the URL: Go's transport errors (*url.Error)
+// quote the full URL, and those errors are logged.
+func (c *Client) newRequest(ctx context.Context, body string) (*http.Request, error) {
+	v := url.Values{}
+	v.Set("database", c.Database)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/?"+v.Encode(), bytes.NewBufferString(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if c.User != "" || c.Password != "" {
+		// ClickHouse treats a request without a user as `default`; keep that
+		// when only a password is configured.
+		user := c.User
+		if user == "" {
+			user = "default"
+		}
+		req.SetBasicAuth(user, c.Password)
+	}
+	return req, nil
 }
 
 // errResult wraps a string error in a QueryResult so the wire shape is uniform.
