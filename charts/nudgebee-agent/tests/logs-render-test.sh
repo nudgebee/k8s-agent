@@ -46,9 +46,13 @@ q '.processors.k8s_attributes.extract.metadata[]' <<<"$agent_cfg" | grep -qx k8s
 [ "$(q '.exporters.otlp.endpoint' <<<"$agent_cfg")" = "nudgebee-agent-opentelemetry-collector:4317" ] || fail "log agent must send to the gateway"
 q '.receivers.filelog.operators[].type' <<<"$agent_cfg" | grep -qx container || fail "CRI container parser missing"
 q '.receivers.filelog.operators[].type' <<<"$agent_cfg" | grep -qx recombine || fail "stack-trace recombine missing"
-q '.receivers.filelog.exclude[]' <<<"$agent_cfg" | grep -q 'otel-log-agent' || fail "log agent must exclude its own logs"
+q '.receivers.filelog.exclude[]' <<<"$agent_cfg" | grep -q '^/var/log/pods/nudgebee_nudgebee-agent-otel-log-agent' || fail "log agent must exclude its own logs"
 [ "$(q '.service.pipelines | keys | length' <<<"$agent_cfg")" = "1" ] || fail "log agent must only run a logs pipeline"
 q 'select(.kind == "Service") | .metadata.name' <<<"$on" | grep -qx 'nudgebee-agent-opentelemetry-collector' || fail "gateway Service name changed"
 q 'select(.kind == "DaemonSet" and (.metadata.name | test("otel-log-agent"))) | .spec.template.spec.volumes[].hostPath.path' <<<"$on" | grep -qx '/var/log/pods' || fail "log agent must mount /var/log/pods"
 [ "$(q 'select(.kind == "DaemonSet" and (.metadata.name | test("otel-log-agent"))) | .spec.template.spec.containers[0].securityContext.runAsUser' <<<"$on")" = "0" ] || fail "log agent must run as root to read pod logs"
+svc_stmts=$(q '.processors["transform/service_name"].log_statements[].statements[]' <<<"$agent_cfg")
+[ -n "$svc_stmts" ] || fail "transform/service_name statements missing"
+if grep -q 'service.name"\] == nil' <<<"$svc_stmts"; then fail "service.name statements must be unconditional (k8s_attributes pre-sets it from labels)"; fi
+tail -n1 <<<"$svc_stmts" | grep -q 'attributes\["k8s.deployment.name"\]' || fail "last service.name statement must use k8s.deployment.name"
 echo "PASS: log agent"

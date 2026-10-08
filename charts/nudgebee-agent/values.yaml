@@ -553,6 +553,7 @@ opentelemetry-collector:
 # metadata and forwards to the gateway collector, which writes otel_logs.
 # Off until the logs epic (#40143) exits; #40146 replaces this flag with
 # logs.collection.
+# Requires opentelemetry-collector.enabled: true (the exporter targets the gateway Service).
 otel-log-agent:
   enabled: false
   mode: daemonset
@@ -603,17 +604,20 @@ otel-log-agent:
             max_log_size: 102400
             force_flush_period: 1s
     processors:
+      # Must be unconditional: k8s_attributes already sets service.name from
+      # app.kubernetes.io labels/annotations, but the row contract requires the
+      # top-level owner's name. Last matching statement wins (priority order).
       transform/service_name:
         error_mode: ignore
         log_statements:
           - context: resource
             statements:
-              - set(attributes["service.name"], attributes["k8s.deployment.name"]) where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
-              - set(attributes["service.name"], attributes["k8s.statefulset.name"]) where attributes["service.name"] == nil and attributes["k8s.statefulset.name"] != nil
-              - set(attributes["service.name"], attributes["k8s.daemonset.name"]) where attributes["service.name"] == nil and attributes["k8s.daemonset.name"] != nil
-              - set(attributes["service.name"], attributes["k8s.cronjob.name"]) where attributes["service.name"] == nil and attributes["k8s.cronjob.name"] != nil
-              - set(attributes["service.name"], attributes["k8s.job.name"]) where attributes["service.name"] == nil and attributes["k8s.job.name"] != nil
-              - set(attributes["service.name"], attributes["k8s.pod.name"]) where attributes["service.name"] == nil
+              - set(attributes["service.name"], attributes["k8s.pod.name"]) where attributes["k8s.pod.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.job.name"]) where attributes["k8s.job.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.cronjob.name"]) where attributes["k8s.cronjob.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.daemonset.name"]) where attributes["k8s.daemonset.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.statefulset.name"]) where attributes["k8s.statefulset.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.deployment.name"]) where attributes["k8s.deployment.name"] != nil
     exporters:
       otlp:
         endpoint: nudgebee-agent-opentelemetry-collector:4317 # same hardcoded release name as the gateway's clickhouse endpoint
@@ -629,9 +633,11 @@ otel-log-agent:
       pipelines:
         logs:
           receivers: [filelog]
-          processors: [memory_limiter, k8sattributes, transform/service_name, batch]
+          processors: [memory_limiter, k8s_attributes, transform/service_name, batch]
           exporters: [otlp]
-        traces: null    # drop the subchart's default pipelines: this pod only ships logs
+        # traces/metrics: null intentionally drop the subchart's default pipelines (this pod only
+        # ships logs); Helm prints harmless "cannot overwrite table with non table" warnings.
+        traces: null
         metrics: null
 clickhouse:
   enabled: true
