@@ -49,3 +49,10 @@ dependencies:
   version: 0.165.0
   repository: https://open-telemetry.github.io/opentelemetry-helm-charts
   condition: opentelemetry-collector.enabled
+# Per-node log agent (#40144): the same chart again, in daemonset mode, used only
+# to tail /var/log/pods and forward to the gateway above.
+- name: opentelemetry-collector
+  alias: otel-log-agent
+  version: 0.165.0
+  repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+  condition: otel-log-agent.enabled

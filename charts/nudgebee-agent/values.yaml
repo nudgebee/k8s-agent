@@ -549,6 +549,90 @@ opentelemetry-collector:
           processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
+# Per-node log agent (#40144). Tails every container log file, adds Kubernetes
+# metadata and forwards to the gateway collector, which writes otel_logs.
+# Off until the logs epic (#40143) exits; #40146 replaces this flag with
+# logs.collection.
+otel-log-agent:
+  enabled: false
+  mode: daemonset
+  nameOverride: otel-log-agent
+  image:
+    repository: ghcr.io/nudgebee/opentelemetry-collector-contrib
+    tag: 0.157.0
+  # /var/log/pods files are root-owned 0640; the image's default uid cannot read them.
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  tolerations:
+    - operator: Exists
+  ports:
+    otlp: { enabled: false }
+    otlp-http: { enabled: false }
+    jaeger-compact: { enabled: false }
+    jaeger-thrift: { enabled: false }
+    jaeger-grpc: { enabled: false }
+    zipkin: { enabled: false }
+    metrics: { enabled: false }
+  presets:
+    logsCollection:
+      enabled: true
+      includeCollectorLogs: false   # never ingest our own output
+      storeCheckpoints: true        # resume from saved offsets after a restart
+    kubernetesAttributes:
+      enabled: true
+  config:
+    receivers:
+      filelog:
+        # Helm replaces lists, so the preset's CRI parser is restated here.
+        operators:
+          - type: container
+            id: container-parser
+          - type: recombine
+            id: stacktrace
+            combine_field: body
+            source_identifier: attributes["log.file.path"]
+            is_first_entry: body matches "^[^\\s]"   # indented lines continue the previous entry
+            combine_with: "\n"
+            max_log_size: 102400
+            force_flush_period: 1s
+    processors:
+      transform/service_name:
+        error_mode: ignore
+        log_statements:
+          - context: resource
+            statements:
+              - set(attributes["service.name"], attributes["k8s.deployment.name"]) where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.statefulset.name"]) where attributes["service.name"] == nil and attributes["k8s.statefulset.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.daemonset.name"]) where attributes["service.name"] == nil and attributes["k8s.daemonset.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.cronjob.name"]) where attributes["service.name"] == nil and attributes["k8s.cronjob.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.job.name"]) where attributes["service.name"] == nil and attributes["k8s.job.name"] != nil
+              - set(attributes["service.name"], attributes["k8s.pod.name"]) where attributes["service.name"] == nil
+    exporters:
+      otlp:
+        endpoint: nudgebee-agent-opentelemetry-collector:4317 # same hardcoded release name as the gateway's clickhouse endpoint
+        tls:
+          insecure: true
+        sending_queue:
+          enabled: true
+          queue_size: 5000
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 300s
+    service:
+      pipelines:
+        logs:
+          receivers: [filelog]
+          processors: [memory_limiter, k8sattributes, transform/service_name, batch]
+          exporters: [otlp]
+        traces: null    # drop the subchart's default pipelines: this pod only ships logs
+        metrics: null
 clickhouse:
   enabled: true
   image:
