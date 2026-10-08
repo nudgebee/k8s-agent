@@ -253,6 +253,14 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: CLICKHOUSE_HOST
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
     {{- end }}
+    {{- if $otelEnabled }}
+    # The gateway's logs exporter runs with create_schema: false (#40144);
+    # the runner creates otel_logs and applies logs.retention as its TTL.
+    - name: LOGS_CLICKHOUSE_ENABLED
+      value: "true"
+    - name: LOGS_RETENTION
+      value: {{ dig "retention" "72h" (default (dict) .Values.logs) | quote }}
+    {{- end }}
     {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in
     the runner Secret), runner.clickhouse_secret (operator-provisioned), then the
