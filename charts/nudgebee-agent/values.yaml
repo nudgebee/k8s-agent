@@ -40,6 +40,10 @@ kubewatch:
     repository: ghcr.io/nudgebee/kubewatch
     tag: 2.14.1-nb.2
   imagePullPolicy: IfNotPresent
+  # UID the forwarder container runs as. Not set on OpenShift (detected, or
+  # openshift.enabled=true): there the namespace's UID range / the SCC assigns
+  # it, and a hardcoded UID is rejected by restricted-v2. Set to ~ to never set it.
+  runAsUser: 1000
   pprof: true
   resources:
     requests:

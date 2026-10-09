@@ -356,6 +356,16 @@ imagePullSecrets:
 {{- end }}
 
 {{/*
+True on OpenShift: either the user opted in with openshift.enabled, or the
+cluster serves the SecurityContextConstraints API. OpenShift assigns each
+namespace its own UID range, so pods must not hardcode a runAsUser.
+Renders "true" or "" (use with `if include ... .`).
+*/}}
+{{- define "nudgebee-agent.isOpenShift" -}}
+{{- if or .Values.openshift.enabled (.Capabilities.APIVersions.Has "security.openshift.io/v1/SecurityContextConstraints") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "nudgebee-agent.name" -}}

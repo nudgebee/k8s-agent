@@ -75,6 +75,24 @@ cosign verify-blob \
   "nudgebee-agent-${VERSION}.tgz"
 ```
 
+### OpenShift
+
+Install with the OpenShift values file as a cluster-admin (the chart creates
+SecurityContextConstraints and ClusterRoles):
+
+```bash
+helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent \
+  -n nudgebee-agent --create-namespace \
+  -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/openshift-values.yaml \
+  --set runner.nudgebee.auth_secret_key="<access_key>:<access_secret>"
+```
+
+[`openshift-values.yaml`](openshift-values.yaml) creates the SCCs, lets the
+node-agent run under a privileged SCC, and turns off the ClickHouse subchart's
+hardcoded UID so OpenShift can assign one. `installation.sh -o` sets the same
+values. To run without any privileged workload, also pass
+`--set openshift.createPrivilegedScc=false --set nodeAgent.enabled=false`.
+
 ## Configuration
 
 All configurable values live in [`charts/nudgebee-agent/values.yaml`](charts/nudgebee-agent/values.yaml). Common overrides:
