@@ -585,13 +585,20 @@ otel-log-agent:
   tolerations:
     - operator: Exists
   ports:
-    otlp: { enabled: false }
-    otlp-http: { enabled: false }
-    jaeger-compact: { enabled: false }
-    jaeger-thrift: { enabled: false }
-    jaeger-grpc: { enabled: false }
-    zipkin: { enabled: false }
-    metrics: { enabled: false }
+    otlp:
+      enabled: false
+    otlp-http:
+      enabled: false
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+    metrics:
+      enabled: false
   presets:
     logsCollection:
       enabled: true

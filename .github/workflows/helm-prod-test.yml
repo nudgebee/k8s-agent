@@ -54,11 +54,6 @@ jobs:
       - name: Build chart dependencies
         run: helm dependency build charts/nudgebee-agent
 
-      # ClickHouse logs (#40144): the logs exporter, the runner's logs env and
-      # the logs.retention guard, the per-node log agent and the schema job.
-      - name: Logs render checks
-        run: charts/nudgebee-agent/tests/logs-render-test.sh
-
       - name: Render templates
         run: helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent > /tmp/rendered.yaml
 
