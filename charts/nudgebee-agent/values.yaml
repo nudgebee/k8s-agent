@@ -525,7 +525,7 @@ opentelemetry-collector:
         create_schema: false
         async_insert: true
         # A timed-out insert that ClickHouse already committed is retried and
-        # stored twice; 30s makes that rarer (runner/docs/logs-operations.md).
+        # stored twice; 30s makes that rarer.
         timeout: 30s
         retry_on_failure:
           enabled: true
@@ -557,7 +557,6 @@ opentelemetry-collector:
 # logs.collection.
 # Requires opentelemetry-collector.enabled: true (the exporter targets the gateway Service).
 otel-log-agent:
-  # Upgrading an existing otel_logs, first-start gap, duplicates: runner/docs/logs-operations.md
   # Upgrading from 0.1.27: upgrade with this unchanged, wait for the runner log "otel_logs ready", then enable it.
   enabled: false
   mode: daemonset
@@ -625,7 +624,7 @@ otel-log-agent:
             value: ${env:K8S_NODE_NAME}
             action: insert
       # Must be unconditional: k8s_attributes already sets service.name from
-      # app.kubernetes.io labels/annotations, but the row contract requires the
+      # app.kubernetes.io labels/annotations, but otel_logs needs the
       # top-level owner's name. Last matching statement wins (priority order).
       transform/service_name:
         error_mode: ignore

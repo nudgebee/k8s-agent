@@ -6,9 +6,7 @@ package clickhouse
 // so this package owns the table. The exporter's own schema (v0.157) sorts by
 // (toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp), so a query by
 // namespace or pod reads every row in its time range; ours materializes the
-// Kubernetes labels and sorts by them. The row contract the collectors must
-// meet is in runner/docs/logs-row-contract.md; upgrades and retention are in
-// runner/docs/logs-operations.md.
+// Kubernetes labels and sorts by them.
 
 import (
 	"context"
@@ -290,12 +288,14 @@ func moveEmptyLegacyTable(ctx context.Context, c *Client, logger *slog.Logger) e
 }
 
 func legacyShapeError(database string, missing []string, notMoved error) error {
-	db, tbl := quoteIdent(database), quoteIdent(LogsTable)
+	db, tbl, legacy := quoteIdent(database), quoteIdent(LogsTable), quoteIdent(LogsTable+"_legacy")
+	cols := strings.Join(exporterInsertColumns, ", ")
 	return fmt.Errorf(
 		"%s.%s exists without columns [%s] and was not renamed automatically (%v); "+
 			"run RENAME TABLE %s.%s TO %s.%s and the runner will recreate it; "+
-			"to copy the old rows into the new table, see runner/docs/logs-operations.md",
-		db, tbl, strings.Join(missing, ", "), notMoved, db, tbl, db, quoteIdent(LogsTable+"_legacy"))
+			"to copy the old rows afterwards, run INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
+		db, tbl, strings.Join(missing, ", "), notMoved, db, tbl, db, legacy,
+		db, tbl, cols, cols, db, legacy)
 }
 
 // KeepEnsuringLogsTable calls EnsureLogsTable until the table is ready or ctx

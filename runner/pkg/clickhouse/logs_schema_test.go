@@ -334,7 +334,7 @@ func TestEnsureLogsTable_LegacyShapeNotRenamed(t *testing.T) {
 			if n := tc.stub.renameCount(); n != tc.wantRenames {
 				t.Errorf("want %d RENAME, got %d", tc.wantRenames, n)
 			}
-			for _, w := range []string{"namespace", "RENAME TABLE", "runner/docs/logs-operations.md"} {
+			for _, w := range []string{"namespace", "RENAME TABLE", "INSERT INTO `default`.`otel_logs` (Timestamp, ", "FROM `default`.`otel_logs_legacy`"} {
 				if err == nil || !strings.Contains(err.Error(), w) {
 					t.Errorf("error must contain %q, got %v", w, err)
 				}
