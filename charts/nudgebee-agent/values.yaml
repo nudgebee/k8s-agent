@@ -88,11 +88,11 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-10-02T19-52-51_a218fe2ad2061ec8f3c74af5518026d63936cdb6
+    tag: 2026-10-05T18-41-56_c54355997233265c8a310e8957471ad298fc8ffd
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
-  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:e8fe8d4"
+  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:04f4a18"
   imagePullPolicy: IfNotPresent
   # Expose net/http/pprof on the runner HTTP listener (surfaces as
   # PPROF_ENABLED). Off by default — the endpoints are unauthenticated;
