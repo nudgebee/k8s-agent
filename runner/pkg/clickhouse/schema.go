@@ -59,8 +59,14 @@ var materializedColumns = map[string]string{
 		"SpanAttributes['source.workload_name'] WHEN mapContains(ResourceAttributes, " +
 		"'k8s.deployment.name') THEN ResourceAttributes['k8s.deployment.name'] ELSE ResourceAttributes[" +
 		"'service.name'] END CODEC(ZSTD(1))",
+	// http.url before url.full: the node agent puts the templated path in
+	// http.url so trace groups don't split per ID, and keeps the raw URL in
+	// url.full. OTel SDKs on semconv >= 1.21 send only url.full; without the
+	// last arm their client spans had an empty resource. The query string is
+	// cut so tokens in it are not stored and don't split groups either.
 	"resource": "String MATERIALIZED CASE WHEN mapContains(SpanAttributes, 'db.statement') THEN SpanAttributes[" +
-		"'db.statement'] ELSE SpanAttributes['http.url'] END CODEC(ZSTD(1))",
+		"'db.statement'] WHEN SpanAttributes['http.url'] != '' THEN SpanAttributes['http.url'] ELSE " +
+		"cutQueryStringAndFragment(SpanAttributes['url.full']) END CODEC(ZSTD(1))",
 	"destination_workload_name": "String MATERIALIZED CASE WHEN mapContains(SpanAttributes, " +
 		"'destination.workload_name') THEN SpanAttributes['destination.workload_name'] WHEN " +
 		"mapContains(ResourceAttributes, 'k8s.deployment.name') THEN ResourceAttributes[" +
@@ -154,15 +160,17 @@ func EnsureMaterializedColumns(ctx context.Context, c *Client, logger *slog.Logg
 			adds = append(adds, fmt.Sprintf("ADD COLUMN %s %s", name, def))
 		}
 	}
-	// A trace_source carried over from an install that predates the collector
-	// upgrade still tests only SpanAttributes['otel.scope.name'], which is empty
-	// on every span the new collector writes — it would silently classify all
-	// traffic as 'otel'. Name-presence alone can't catch that, so compare the
-	// stored expression against what this schema should have.
-	if stale, err := traceSourceIsStale(ctx, c, columns); err != nil {
-		logger.Warn("clickhouse: cannot inspect trace_source definition", "err", err)
-	} else if stale {
-		adds = append(adds, fmt.Sprintf("MODIFY COLUMN trace_source %s", required["trace_source"]))
+	// Name-presence alone can't see a column whose definition has since changed,
+	// so compare the stored expressions against what this schema should have.
+	// MODIFY COLUMN on a MATERIALIZED expression is metadata-only: parts already
+	// written keep the values they were inserted with, and new spans get the new
+	// expression.
+	if exprs, err := columnExpressions(ctx, c, "trace_source", "resource"); err != nil {
+		logger.Warn("clickhouse: cannot inspect materialized-column definitions", "err", err)
+	} else {
+		for _, name := range staleColumns(columns, exprs) {
+			adds = append(adds, fmt.Sprintf("MODIFY COLUMN %s %s", name, required[name]))
+		}
 	}
 
 	if len(adds) == 0 {
@@ -231,32 +239,59 @@ func tableColumns(ctx context.Context, c *Client) (map[string]struct{}, error) {
 	return out, nil
 }
 
-// traceSourceIsStale reports whether an existing trace_source column was built
-// without the ScopeName arm on a table that now has ScopeName.
-func traceSourceIsStale(ctx context.Context, c *Client, columns map[string]struct{}) (bool, error) {
-	if _, ok := columns["trace_source"]; !ok {
-		return false, nil
-	}
-	if _, ok := columns[scopeNameColumn]; !ok {
-		// Without the column there is nothing better to migrate to.
-		return false, nil
+// columnExpressions returns the stored default_expression of each named
+// column that exists on otel_traces.
+func columnExpressions(ctx context.Context, c *Client, names ...string) (map[string]string, error) {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = "'" + escapeLiteral(n) + "'"
 	}
 	q := fmt.Sprintf(
-		"SELECT default_expression FROM system.columns WHERE database = '%s' AND table = '%s' AND name = 'trace_source'",
-		escapeLiteral(c.Database), escapeLiteral(TracesTable),
+		"SELECT name, default_expression FROM system.columns WHERE database = '%s' AND table = '%s' AND name IN (%s)",
+		escapeLiteral(c.Database), escapeLiteral(TracesTable), strings.Join(quoted, ", "),
 	)
 	res, err := c.Query(ctx, q, nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if res.Error != nil {
-		return false, fmt.Errorf("%s", *res.Error)
+		return nil, fmt.Errorf("%s", *res.Error)
 	}
-	if len(res.Data) == 0 || len(res.Data[0]) == 0 {
-		return false, nil
+	out := make(map[string]string, len(res.Data))
+	for _, row := range res.Data {
+		if len(row) < 2 {
+			continue
+		}
+		name, _ := row[0].(string)
+		expr, _ := row[1].(string)
+		if name != "" {
+			out[name] = expr
+		}
 	}
-	expr, _ := res.Data[0][0].(string)
-	return !strings.Contains(expr, scopeNameColumn), nil
+	return out, nil
+}
+
+// staleColumns names the existing columns whose stored definition predates the
+// current one, sorted.
+//
+//   - trace_source carried over from an install that predates the collector
+//     upgrade still tests only SpanAttributes['otel.scope.name'], which is
+//     empty on every span the new collector writes — it would silently classify
+//     all traffic as 'otel'. Only stale once the table has ScopeName: without
+//     the column there is nothing better to migrate to.
+//   - resource without the url.full arm leaves OTel SDK client spans with an
+//     empty resource.
+func staleColumns(columns map[string]struct{}, exprs map[string]string) []string {
+	var stale []string
+	if expr, ok := exprs["resource"]; ok && !strings.Contains(expr, "url.full") {
+		stale = append(stale, "resource")
+	}
+	if expr, ok := exprs["trace_source"]; ok {
+		if _, hasScope := columns[scopeNameColumn]; hasScope && !strings.Contains(expr, scopeNameColumn) {
+			stale = append(stale, "trace_source")
+		}
+	}
+	return stale
 }
 
 // escapeLiteral escapes a value for a single-quoted ClickHouse string literal —
