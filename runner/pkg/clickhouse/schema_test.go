@@ -42,7 +42,9 @@ func (s *chStub) server(t *testing.T) *Client {
 				_, _ = w.Write([]byte("Code: 47. DB::Exception: Unknown identifier"))
 				return
 			}
-			_, _ = w.Write([]byte(`{"meta":[],"data":[]}`))
+			// Real ClickHouse answers a successful ALTER with 200 and an
+			// empty body, FORMAT JSONCompact or not.
+			w.WriteHeader(http.StatusOK)
 
 		case strings.Contains(q, "default_expression"):
 			rows := [][]any{}
