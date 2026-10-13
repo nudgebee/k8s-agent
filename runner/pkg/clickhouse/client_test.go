@@ -77,6 +77,54 @@ func TestQuery_HTTPErrorAsResultError(t *testing.T) {
 	}
 }
 
+// A DDL statement answers 200 with an empty body. That must read as success
+// with no rows, not as a JSON parse failure.
+func TestQuery_EmptyBodyIsEmptyResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://"), Database: "d"})
+	res, err := c.Query(context.Background(), "ALTER TABLE t MODIFY COLUMN c String", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != nil {
+		t.Fatalf("error = %q; want nil", *res.Error)
+	}
+	if len(res.Data) != 0 || len(res.Columns) != 0 || len(res.ColumnTypes) != 0 {
+		t.Errorf("unexpected result: %+v", res)
+	}
+}
+
+// A connection dropped before the promised body arrives must not read as an
+// empty, successful result.
+func TestQuery_TruncatedBodyIsResultError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://"), Database: "d"})
+	res, _ := c.Query(context.Background(), "ALTER TABLE t MODIFY COLUMN c String", nil)
+	if res.Error == nil || !strings.Contains(*res.Error, "read body") {
+		t.Fatalf("want a read body error; got %+v", res)
+	}
+}
+
+// A 200 body that is present but not JSON is still a parse failure.
+func TestQuery_MalformedBodyIsResultError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Ok.\n"))
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://"), Database: "d"})
+	res, _ := c.Query(context.Background(), "SELECT 1", nil)
+	if res.Error == nil || !strings.Contains(*res.Error, "parse JSONCompact") {
+		t.Fatalf("want a parse JSONCompact error; got %+v", res)
+	}
+}
+
 func TestNew_NormalizesHostAndPort(t *testing.T) {
 	cases := []struct {
 		host, want string

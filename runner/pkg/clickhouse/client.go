@@ -127,9 +127,20 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 		return errResult(fmt.Sprintf("clickhouse: %v", err)), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		return errResult(fmt.Sprintf("clickhouse: HTTP %d: %s", resp.StatusCode, truncate(string(body), 1024))), nil
+	}
+	// A body cut short reads as empty or truncated; without this check the
+	// empty case below would report it as a successful statement.
+	if readErr != nil {
+		return errResult(fmt.Sprintf("clickhouse: read body: %v", readErr)), nil
+	}
+	// Statements that return no rows (ALTER, CREATE, DROP) answer 200 with an
+	// empty body even with FORMAT JSONCompact appended. That is success, not a
+	// malformed response; a SELECT always carries at least a meta block.
+	if len(bytes.TrimSpace(body)) == 0 {
+		return &QueryResult{Data: [][]any{}, Columns: []string{}, ColumnTypes: []string{}}, nil
 	}
 
 	var raw struct {
