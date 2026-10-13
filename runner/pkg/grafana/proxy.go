@@ -61,6 +61,12 @@ type Proxy struct {
 	// way; without it the `Prometheus` request-type returns 503.
 	PrometheusURL string
 
+	// PrometheusURLFn, when set, takes precedence over PrometheusURL and is
+	// consulted per request. The agent may not know its Prometheus URL at
+	// startup — it keeps looking for one and fills it in later — so a value
+	// captured when this Proxy was built would pin the empty string forever.
+	PrometheusURLFn func() string
+
 	// PrometheusHeaders is the parsed PROMETHEUS_HEADERS env (raw
 	// "Header: value; Header: value" string) — applied to every
 	// Prometheus proxy request so X-Scope-OrgID / tenant headers reach
@@ -99,6 +105,15 @@ func New(grafanaURL, user, pass string, extra []string, promURL string, promHead
 	}
 }
 
+// promBase returns the Prometheus base URL to use for this request,
+// preferring the live lookup over the value captured at construction.
+func (p *Proxy) promBase() string {
+	if p.PrometheusURLFn != nil {
+		return strings.TrimRight(p.PrometheusURLFn(), "/")
+	}
+	return p.PrometheusURL
+}
+
 // HandleGrafana proxies a request to GRAFANA_URL. Returns the upstream
 // response with body base64-encoded. Empty GrafanaURL → 503.
 func (p *Proxy) HandleGrafana(ctx context.Context, req *Request) *Response {
@@ -129,12 +144,13 @@ func (p *Proxy) HandleAPI(ctx context.Context, baseURL string, req *Request) *Re
 // (X-Scope-OrgID etc.) are merged onto the incoming request so tenanted
 // Prometheus deployments work without the caller having to know them.
 func (p *Proxy) HandlePrometheus(ctx context.Context, req *Request) *Response {
-	if p.PrometheusURL == "" {
+	base := p.promBase()
+	if base == "" {
 		return errResp(503, "Prometheus not configured (PROMETHEUS_URL unset)")
 	}
 	enriched := *req
 	enriched.Header = mergeHeaders(req.Header, p.PrometheusHeaders)
-	return p.do(ctx, p.PrometheusURL+req.URL, &enriched)
+	return p.do(ctx, base+req.URL, &enriched)
 }
 
 // mergeHeaders returns a new header map containing every entry from

@@ -25,14 +25,21 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Client is a Prometheus HTTP client. One Client per agent process; concurrent
 // safe (uses an http.Client which is concurrent-safe).
 type Client struct {
-	BaseURL string
-	HTTP    *http.Client
+	// mu guards baseURL, which is not fixed at construction: when the operator
+	// sets no PROMETHEUS_URL, the agent keeps looking for one in the background
+	// and fills it in whenever Prometheus shows up (see svcdiscover.WatchUntilFound).
+	// Use URL() / SetURL() — request goroutines read it while that watcher writes.
+	mu      sync.RWMutex
+	baseURL string
+
+	HTTP *http.Client
 
 	// ExtraHeaders are sent on every request. Used for X-Scope-OrgID
 	// (Cortex/Mimir multi-tenant) and any auth headers the operator
@@ -52,9 +59,27 @@ func New(baseURL string, httpClient *http.Client) *Client {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: strings.TrimRight(baseURL, "/"),
 		HTTP:    httpClient,
 	}
+}
+
+// URL returns the configured base URL, or "" when Prometheus is not
+// configured yet. Callers that gate on availability should test this rather
+// than the client being nil: the client always exists, so its handlers stay
+// registered and start working the moment a URL is found.
+func (c *Client) URL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.baseURL
+}
+
+// SetURL points the client at a Prometheus. Safe to call while requests are
+// in flight; in-flight requests keep the URL they started with.
+func (c *Client) SetURL(u string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.baseURL = strings.TrimRight(u, "/")
 }
 
 // Query runs an instant query (/api/v1/query).
@@ -172,10 +197,11 @@ func (c *Client) Flags(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (c *Client) get(ctx context.Context, path string, params url.Values) (json.RawMessage, error) {
-	if c.BaseURL == "" {
+	base := c.URL()
+	if base == "" {
 		return nil, errors.New("prometheus: base URL not configured")
 	}
-	u := c.BaseURL + path
+	u := base + path
 	if len(params) > 0 {
 		u += "?" + params.Encode()
 	}
