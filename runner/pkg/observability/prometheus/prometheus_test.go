@@ -107,6 +107,43 @@ func TestExtraHeaders_Sent(t *testing.T) {
 	}
 }
 
+// TestURLQueryString_Appended verifies PROMETHEUS_URL_QUERY_STRING is merged
+// into the request query string alongside the query params.
+func TestURLQueryString_Appended(t *testing.T) {
+	var gotRegion, gotQuery string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		gotRegion = r.URL.Query().Get("region")
+		gotQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	defer srv.Close()
+	c.URLQueryString = "?region=us-east" // leading ? tolerated
+
+	if _, err := c.Query(context.Background(), "up", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if gotRegion != "us-east" {
+		t.Errorf("region = %q; want us-east", gotRegion)
+	}
+	if gotQuery != "up" {
+		t.Errorf("query = %q; want up (existing params preserved)", gotQuery)
+	}
+}
+
+func TestAppendQueryString(t *testing.T) {
+	cases := []struct{ url, extra, want string }{
+		{"http://h/api/v1/query?query=up", "region=us", "http://h/api/v1/query?query=up&region=us"},
+		{"http://h/api/v1/labels", "region=us", "http://h/api/v1/labels?region=us"},
+		{"http://h/api/v1/labels", "?region=us", "http://h/api/v1/labels?region=us"},
+		{"http://h/api/v1/labels", "", "http://h/api/v1/labels"},
+	}
+	for _, tc := range cases {
+		if got := appendQueryString(tc.url, tc.extra); got != tc.want {
+			t.Errorf("appendQueryString(%q,%q) = %q; want %q", tc.url, tc.extra, got, tc.want)
+		}
+	}
+}
+
 func TestHandlers_DispatchesViaActionName(t *testing.T) {
 	wantBody := `{"status":"success","data":[]}`
 	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {

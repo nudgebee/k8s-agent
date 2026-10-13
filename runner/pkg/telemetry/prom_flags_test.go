@@ -12,10 +12,11 @@ import (
 
 func TestPrometheusRetention(t *testing.T) {
 	cases := []struct {
-		name string
-		body string
-		code int
-		want string
+		name     string
+		body     string
+		code     int
+		fallback string
+		want     string
 	}{
 		{
 			name: "modern flag name",
@@ -30,15 +31,28 @@ func TestPrometheusRetention(t *testing.T) {
 			want: "10d",
 		},
 		{
-			name: "endpoint missing (vmsingle)",
+			name: "victoriametrics retentionPeriod",
+			body: `{"status":"success","data":{"-retentionPeriod":"12"}}`,
+			code: 200,
+			want: "12",
+		},
+		{
+			name:     "endpoint missing falls back to env",
+			code:     404,
+			fallback: "30d",
+			want:     "30d",
+		},
+		{
+			name: "endpoint missing, no fallback",
 			code: 404,
 			want: "",
 		},
 		{
-			name: "malformed body",
-			body: `not json`,
-			code: 200,
-			want: "",
+			name:     "malformed body falls back to env",
+			body:     `not json`,
+			code:     200,
+			fallback: "7d",
+			want:     "7d",
 		},
 	}
 	for _, tc := range cases {
@@ -56,14 +70,14 @@ func TestPrometheusRetention(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := prometheus.New(srv.URL, nil)
-			if got := PrometheusRetention(context.Background(), c, slog.Default()); got != tc.want {
+			if got := PrometheusRetention(context.Background(), c, tc.fallback, slog.Default()); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}
 
-	// Nil client → empty without panic.
-	if got := PrometheusRetention(context.Background(), nil, slog.Default()); got != "" {
-		t.Errorf("nil client should return empty, got %q", got)
+	// Nil client → fallback without panic.
+	if got := PrometheusRetention(context.Background(), nil, "5d", slog.Default()); got != "5d" {
+		t.Errorf("nil client should return fallback, got %q", got)
 	}
 }
