@@ -97,6 +97,21 @@ func TestQuery_EmptyBodyIsEmptyResult(t *testing.T) {
 	}
 }
 
+// A connection dropped before the promised body arrives must not read as an
+// empty, successful result.
+func TestQuery_TruncatedBodyIsResultError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://"), Database: "d"})
+	res, _ := c.Query(context.Background(), "ALTER TABLE t MODIFY COLUMN c String", nil)
+	if res.Error == nil || !strings.Contains(*res.Error, "read body") {
+		t.Fatalf("want a read body error; got %+v", res)
+	}
+}
+
 // A 200 body that is present but not JSON is still a parse failure.
 func TestQuery_MalformedBodyIsResultError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
