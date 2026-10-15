@@ -83,6 +83,7 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		ClickHouseEnabled: true,
 		ClickHousePort:    8123,
 		ClickHouseDB:      "default",
+		ServiceMapSource:  "prometheus",
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Config\n got:  %+v\n want: %+v", c, want)

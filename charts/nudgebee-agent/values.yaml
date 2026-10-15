@@ -240,6 +240,17 @@ runner:
   relay_address: wss://relay.nudgebee.com/register
   clickhouse_enabled: true
   clickhouse_secret: ""
+  # Where service_map reads the eBPF edge and container metrics:
+  #   prometheus  PromQL only (default).
+  #   shadow      serves the PromQL map; every 15 min per window also builds the
+  #               ClickHouse map and logs how the two differ.
+  #   clickhouse  edges and container health from ClickHouse, pods/services
+  #               still from Prometheus; falls back to Prometheus whenever
+  #               ClickHouse does not cover the requested window.
+  # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
+  # into ClickHouse (cumulative_to_delta applied), and make the runner create a
+  # per-minute rollup table (nb_service_map_v1) plus two materialized views.
+  serviceMapSource: prometheus
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.

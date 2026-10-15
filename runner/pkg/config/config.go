@@ -211,6 +211,13 @@ type Config struct {
 	ClickHousePassword string
 	ClickHouseDB       string
 	ClickHouseSSL      bool
+
+	// ServiceMapSource is where service_map reads the eBPF edge and container
+	// metrics: "prometheus" (default), "clickhouse" (falls back to Prometheus
+	// when ClickHouse cannot serve the window) or "shadow" (serves Prometheus,
+	// logs how the ClickHouse map differs). Needs the collector's node-agent
+	// metrics pipeline writing into ClickHouse.
+	ServiceMapSource string
 }
 
 // FromEnv reads config from env vars and returns it. Missing required fields
@@ -327,6 +334,7 @@ func FromEnv() (*Config, error) {
 		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
+		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
 	}
 	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring
 	// the legacy f-string default (utils.py).
