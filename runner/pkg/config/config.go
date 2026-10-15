@@ -211,6 +211,14 @@ type Config struct {
 	ClickHousePassword string
 	ClickHouseDB       string
 	ClickHouseSSL      bool
+
+	// ServiceMapSource is where service_map reads the eBPF edge and container
+	// metrics: "prometheus" (default), "clickhouse" (falls back to Prometheus
+	// when ClickHouse cannot serve the window) or "shadow" (serves Prometheus,
+	// logs how the ClickHouse map differs). Needs the collector's node-agent
+	// metrics pipeline writing into ClickHouse.
+	ServiceMapSource string
+
 	// Where logs are written in that ClickHouse, for the logs health check. The
 	// chart sets these from the bundled collector's exporter config. Unset (the
 	// collector off, or an external writer), they fall back to otel_logs in
@@ -333,6 +341,7 @@ func FromEnv() (*Config, error) {
 		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
+		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
 		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
 	}
 	c.ClickHouseLogsDatabase = cmp(os.Getenv("CLICKHOUSE_LOGS_DATABASE"), c.ClickHouseDB)

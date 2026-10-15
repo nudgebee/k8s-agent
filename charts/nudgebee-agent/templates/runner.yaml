@@ -243,3 +243,6 @@ stringData:
   {{- if .Values.runner.trace_table }}
   TRACE_TABLE: {{ .Values.runner.trace_table }}
   {{- end }}
+  {{- if .Values.runner.serviceMapSource }}
+  SERVICE_MAP_SOURCE: {{ .Values.runner.serviceMapSource | quote }}
+  {{- end }}
