@@ -443,11 +443,20 @@ opentelemetry-collector:
   fullnameOverride: ""
   resources:
     limits:
-      memory: 1024Mi
+      # Also scrapes every node agent's /metrics (metrics/node_agent pipeline).
+      memory: 2048Mi
     requests:
       cpu: 250m
       memory: 512Mi
   mode: deployment
+  # The prometheus/node_agent receiver discovers node agent pods through the
+  # Kubernetes API.
+  clusterRole:
+    create: true
+    rules:
+      - apiGroups: [""]
+        resources: ["pods"]
+        verbs: ["get", "list", "watch"]
   extraEnvs:
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
@@ -464,7 +473,43 @@ opentelemetry-collector:
     zipkin:
       enabled: false
   config:
+    receivers:
+      # Reads node agent /metrics, the same scrape the Prometheus static job
+      # does (kube-prometheus-stack-values.yaml), so the service map can be
+      # built from ClickHouse. This is the collector's scraper, not a
+      # Prometheus server.
+      prometheus/node_agent:
+        config:
+          scrape_configs:
+            - job_name: nudgebee-node-agent
+              scrape_interval: 15s
+              scrape_timeout: 10s
+              honor_labels: true
+              kubernetes_sd_configs:
+                - role: pod
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_label_app]
+                  regex: nudgebee-node-agent
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_container_port_name]
+                  regex: http
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_phase]
+                  regex: Pending|Succeeded|Failed|Completed
+                  action: drop
     processors:
+      # Keep only what the service map reads (k8s-agent runner/pkg/servicemap/
+      # queries.go): request counters and latency histograms for every L7
+      # protocol, TCP connects/bytes, and container health.
+      filter/node_agent:
+        error_mode: ignore
+        metrics:
+          metric:
+            - 'not IsMatch(name, "^container_(net_tcp_(successful_connects|bytes_sent|bytes_received)|(http_requests|postgres_queries|mysql_queries|mongo_queries|redis_queries|memcached_queries|cassandra_queries|clickhouse_queries|foundationdb_requests|zookeeper_requests|kafka_requests|rabbitmq_messages|nats_messages|dubbo_requests|dns_requests)|oom_kills|restarts|resources_cpu_throttled_seconds|resources_disk_(size|used)_bytes)")'
+      # Store per-scrape amounts instead of running totals, so SUM(Value) in
+      # ClickHouse is correct. Keeps per-series state in memory, so it needs
+      # the single collector replica this chart runs.
+      cumulative_to_delta/node_agent: {}
       probabilistic_sampler:
         sampling_percentage: 10
       filter/drop_namespaces:
@@ -528,6 +573,11 @@ opentelemetry-collector:
           processors: [memory_limiter, batch]
           exporters: [clickhouse]
           receivers: [otlp]
+        # Separate from `metrics` so the filter never touches OTLP metrics.
+        metrics/node_agent:
+          receivers: [prometheus/node_agent]
+          processors: [memory_limiter, filter/node_agent, cumulative_to_delta/node_agent, batch]
+          exporters: [clickhouse]
 clickhouse:
   enabled: true
   image:
