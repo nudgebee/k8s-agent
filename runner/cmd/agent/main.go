@@ -1097,6 +1097,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				chLogsPresent, chLogsErr, chLogsTable := clickhouseLogsStatus(probeCtx, ch, cfg.ClickHouseLogsDatabase, cfg.ClickHouseLogsTable)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              promClient.URL(),
@@ -1122,6 +1123,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseStatus:           clickhouseStatus,
 					ClickHouseURL:              clickhouseHost,
 					ClickHouseError:            clickhouseErr,
+					ClickHouseLogsTablePresent: chLogsPresent,
+					ClickHouseLogsTableError:   chLogsErr,
+					ClickHouseLogsTable:        chLogsTable,
 					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
@@ -1445,6 +1449,28 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
 	}
 	return true, ""
+}
+
+// clickhouseLogsStatus is the ClickHouse logs health the agent reports beside
+// its logs provider: ClickHouse answers and database.table, where logs are
+// written, is present. It reads system.tables through the query_data client,
+// never the logs, so it does not say whether logs are arriving. checked is the
+// `database.table` looked at, empty without a client.
+func clickhouseLogsStatus(ctx context.Context, ch *chclient.Client, database, table string) (present bool, reason, checked string) {
+	if ch == nil {
+		return false, "ClickHouse is not configured (CLICKHOUSE_HOST is empty or CLICKHOUSE_ENABLED is false)", ""
+	}
+	checked = database + "." + table
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	present, err := chclient.LogsTablePresent(ctx, ch, database, table)
+	switch {
+	case err != nil:
+		return false, "ClickHouse logs table check failed: " + err.Error(), checked
+	case !present:
+		return false, fmt.Sprintf("ClickHouse logs table %s is not present: nothing writes logs to it", checked), checked
+	}
+	return true, "", checked
 }
 
 // traceColumnsReady latches the materialized-column check. The columns are

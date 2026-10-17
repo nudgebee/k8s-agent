@@ -211,6 +211,12 @@ type Config struct {
 	ClickHousePassword string
 	ClickHouseDB       string
 	ClickHouseSSL      bool
+	// Where logs are written in that ClickHouse, for the logs health check. The
+	// chart sets these from the bundled collector's exporter config. Unset (the
+	// collector off, or an external writer), they fall back to otel_logs in
+	// ClickHouseDB.
+	ClickHouseLogsDatabase string
+	ClickHouseLogsTable    string
 }
 
 // FromEnv reads config from env vars and returns it. Missing required fields
@@ -327,7 +333,9 @@ func FromEnv() (*Config, error) {
 		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
+		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
 	}
+	c.ClickHouseLogsDatabase = cmp(os.Getenv("CLICKHOUSE_LOGS_DATABASE"), c.ClickHouseDB)
 	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring
 	// the legacy f-string default (utils.py).
 	if c.AzureTokenEndpoint == "" {
