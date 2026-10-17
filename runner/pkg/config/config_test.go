@@ -83,6 +83,9 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		ClickHouseEnabled: true,
 		ClickHousePort:    8123,
 		ClickHouseDB:      "default",
+		// The logs check falls back to otel_logs in that database.
+		ClickHouseLogsDatabase: "default",
+		ClickHouseLogsTable:    "otel_logs",
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Config\n got:  %+v\n want: %+v", c, want)
@@ -289,5 +292,34 @@ func TestFromEnv_TriggerRateLimitsDefaultsEmpty(t *testing.T) {
 	}
 	if len(cfg.TriggerRateLimits) != 0 {
 		t.Errorf("TriggerRateLimits = %v; want empty so matchers keep their compiled windows", cfg.TriggerRateLimits)
+	}
+}
+
+// With nothing set (bundled collector off, or an external writer), the logs
+// check falls back to otel_logs in CLICKHOUSE_DB rather than reporting no table.
+func TestFromEnv_ClickHouseLogsTableFallsBack(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("CLICKHOUSE_DB", "telemetry")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseLogsDatabase != "telemetry" || c.ClickHouseLogsTable != "otel_logs" {
+		t.Errorf("logs table = %q.%q; want telemetry.otel_logs", c.ClickHouseLogsDatabase, c.ClickHouseLogsTable)
+	}
+}
+
+func TestFromEnv_ClickHouseLogsTableFromEnv(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("CLICKHOUSE_LOGS_DATABASE", "logs_db")
+	t.Setenv("CLICKHOUSE_LOGS_TABLE", "app_logs")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseLogsDatabase != "logs_db" || c.ClickHouseLogsTable != "app_logs" {
+		t.Errorf("logs table = %q.%q; want logs_db.app_logs", c.ClickHouseLogsDatabase, c.ClickHouseLogsTable)
 	}
 }

@@ -191,6 +191,33 @@ jobs:
           assert 'storageClassName:""' --set global.storageClass=- --set clickhouse.persistence.storageClass=ci-local
           echo 'ok: storageClass precedence and "-" handling intact'
 
+      # The runner's ClickHouse logs check must look where the bundled exporter
+      # writes. With the collector off nothing is set and the runner falls back
+      # to otel_logs in CLICKHOUSE_DB; an operator's own env var wins.
+      - name: Assert the runner's ClickHouse logs table follows the exporter
+        run: |
+          assert() { # <expected-env-lines> <helm-args...>
+            expected="$1"; shift
+            if ! rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@")"; then
+              echo "helm template $*: render failed"
+              exit 1
+            fi
+            actual="$(printf '%s\n' "$rendered" | grep -A1 'name: CLICKHOUSE_LOGS_' | grep -v '^--$' | tr -d ' ' | paste -sd' ' -)"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: expected [$expected], got [$actual]"
+              exit 1
+            fi
+          }
+          assert '-name:CLICKHOUSE_LOGS_DATABASE value:"default" -name:CLICKHOUSE_LOGS_TABLE value:"otel_logs"'
+          assert '-name:CLICKHOUSE_LOGS_DATABASE value:"telemetry" -name:CLICKHOUSE_LOGS_TABLE value:"app_logs"' \
+            --set opentelemetry-collector.config.exporters.clickhouse.database=telemetry \
+            --set opentelemetry-collector.config.exporters.clickhouse.logs_table_name=app_logs
+          assert '' --set opentelemetry-collector.enabled=false
+          assert '-name:CLICKHOUSE_LOGS_DATABASE value:"default" -name:CLICKHOUSE_LOGS_TABLE value:mine' \
+            --set 'runner.additional_env_vars[0].name=CLICKHOUSE_LOGS_TABLE' \
+            --set 'runner.additional_env_vars[0].value=mine'
+          echo 'ok: CLICKHOUSE_LOGS_DATABASE / CLICKHOUSE_LOGS_TABLE follow the exporter config'
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
