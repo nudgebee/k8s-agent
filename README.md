@@ -93,6 +93,21 @@ hardcoded UID so OpenShift can assign one. `installation.sh -o` sets the same
 values. To run without any privileged workload, also pass
 `--set openshift.createPrivilegedScc=false --set nodeAgent.enabled=false`.
 
+### Node-agent metrics in ClickHouse (opt-in)
+
+[`node-agent-metrics-values.yaml`](node-agent-metrics-values.yaml) makes the
+bundled OpenTelemetry collector also scrape the node-agent's `/metrics` and
+write the service-map metrics into ClickHouse (`otel_metrics_*` tables). It is
+off by default and does not change Prometheus scraping:
+
+```bash
+helm upgrade nudgebee-agent nudgebee-agent/nudgebee-agent -n nudgebee-agent \
+  --reuse-values \
+  -f https://raw.githubusercontent.com/nudgebee/k8s-agent/main/node-agent-metrics-values.yaml
+```
+
+To turn it off, upgrade without this file and without `--reuse-values`.
+
 ## Configuration
 
 All configurable values live in [`charts/nudgebee-agent/values.yaml`](charts/nudgebee-agent/values.yaml). Common overrides:
