@@ -76,9 +76,9 @@ func TestLogsTablePresent_ServerErrorIsError(t *testing.T) {
 	}
 }
 
-// The client sends the password in the query string, and a connection error
-// repeats the URL. The reason reaches the backend and the UI, so it must not
-// carry the password.
+// A connection error repeats the URL. The reason reaches the backend and the
+// UI, so it must not carry the password; the client keeps credentials out of
+// the URL.
 func TestLogsTablePresent_ConnectionErrorHidesPassword(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -92,9 +92,6 @@ func TestLogsTablePresent_ConnectionErrorHidesPassword(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "s3cr3t-pw") {
 		t.Errorf("error leaks the password: %v", err)
-	}
-	if !strings.Contains(err.Error(), "password=REDACTED") {
-		t.Errorf("error = %v; want the password replaced, not the whole URL dropped", err)
 	}
 }
 

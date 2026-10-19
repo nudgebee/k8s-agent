@@ -225,6 +225,12 @@ type Config struct {
 	// ClickHouseDB.
 	ClickHouseLogsDatabase string
 	ClickHouseLogsTable    string
+
+	// ClickHouseReaderUser is a read-only ClickHouse user with query limits, which
+	// the chart creates in the bundled ClickHouse with the admin's password.
+	// query_data and the logs table check use it; schema changes keep
+	// ClickHouseUser. Empty: everything uses ClickHouseUser.
+	ClickHouseReaderUser string
 }
 
 // FromEnv reads config from env vars and returns it. Missing required fields
@@ -343,6 +349,7 @@ func FromEnv() (*Config, error) {
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
 		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
 		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
+		ClickHouseReaderUser:       os.Getenv("CLICKHOUSE_READER_USER"),
 	}
 	c.ClickHouseLogsDatabase = cmp(os.Getenv("CLICKHOUSE_LOGS_DATABASE"), c.ClickHouseDB)
 	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring

@@ -1,0 +1,54 @@
+{{- /*
+The read-only ClickHouse user the runner's query_data uses (clickhouse.reader in
+values.yaml), mounted into the bundled ClickHouse's users.d through
+clickhouse.extraVolumes. Rendered only where that mount exists (see
+nudgebee-agent.clickhouseReader), which is also when the runner names the user.
+Limits apply when a query sets none; constraints keep a query between 1 and the
+ceiling, so it can lower a limit but neither raise it nor set 0 (unlimited).
+readonly only stops writes: the grants also take away table functions that reach
+out of ClickHouse (url, s3, remote, mysql, postgresql, ...), which a user defined
+here would otherwise have.
+The users file is copied in when ClickHouse starts: changed limits apply after
+its pod restarts.
+*/}}
+{{- if include "nudgebee-agent.clickhouseReader" . }}
+{{- $r := .Values.clickhouse.reader }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nudgebee-agent.clickhouse.servicename" . }}-reader-users
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+data:
+  nudgebee-reader.xml: |
+    <clickhouse>
+      <profiles>
+        <nudgebee_reader>
+          <readonly>2</readonly>
+          <max_execution_time>{{ int64 $r.maxExecutionTime }}</max_execution_time>
+          <max_rows_to_read>{{ int64 $r.maxRowsToRead }}</max_rows_to_read>
+          <max_memory_usage>{{ int64 $r.maxMemoryUsage }}</max_memory_usage>
+          <max_bytes_before_external_sort>{{ int64 $r.maxBytesBeforeSpill }}</max_bytes_before_external_sort>
+          <max_bytes_before_external_group_by>{{ int64 $r.maxBytesBeforeSpill }}</max_bytes_before_external_group_by>
+          <constraints>
+            <max_execution_time><min>1</min><max>{{ int64 $r.maxExecutionTimeCeiling }}</max></max_execution_time>
+            <max_rows_to_read><min>1</min><max>{{ int64 $r.maxRowsToRead }}</max></max_rows_to_read>
+            <max_memory_usage><min>1</min><max>{{ int64 $r.maxMemoryUsage }}</max></max_memory_usage>
+          </constraints>
+        </nudgebee_reader>
+      </profiles>
+      <users>
+        <nudgebee_reader>
+          <password from_env="CLICKHOUSE_ADMIN_PASSWORD"/>
+          <profile>nudgebee_reader</profile>
+          <quota>default</quota>
+          <grants>
+            <query>GRANT SELECT, SHOW ON *.*</query>
+          </grants>
+          <networks>
+            <ip>::/0</ip>
+          </networks>
+        </nudgebee_reader>
+      </users>
+    </clickhouse>
+{{- end }}

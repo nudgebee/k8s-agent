@@ -218,6 +218,46 @@ jobs:
             --set 'runner.additional_env_vars[0].value=mine'
           echo 'ok: CLICKHOUSE_LOGS_DATABASE / CLICKHOUSE_LOGS_TABLE follow the exporter config'
 
+      # query_data reads through a read-only user with query limits. The user
+      # exists only in the bundled ClickHouse, so the runner names it only when
+      # that is where it connects, and the users file is mounted where the
+      # image copies users.d overrides from.
+      - name: Assert the read-only ClickHouse user for query_data
+        run: |
+          render() { helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@"; }
+          reader_env() { printf '%s\n' "$1" | grep -A1 'name: CLICKHOUSE_READER_USER' | grep -v '^--$' | tr -d ' ' | paste -sd' ' -; }
+          fail() { echo "$*"; exit 1; }
+
+          out="$(render)"
+          [ "$(reader_env "$out")" = '-name:CLICKHOUSE_READER_USER value:nudgebee_reader' ] || fail "default: runner lacks CLICKHOUSE_READER_USER"
+          printf '%s\n' "$out" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          cm = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nudgebee-agent-clickhouse-reader-users")
+          xml = cm["data"]["nudgebee-reader.xml"]
+          for want in ("<readonly>2</readonly>", "<password from_env=\"CLICKHOUSE_ADMIN_PASSWORD\"/>", "<max_execution_time><min>1</min><max>600</max></max_execution_time>", "<profile>nudgebee_reader</profile>", "<query>GRANT SELECT, SHOW ON *.*</query>", "<max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>"):
+              assert want in xml, want
+          sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"].startswith("nudgebee-agent-clickhouse-shard"))
+          pod = sts["spec"]["template"]["spec"]
+          vol = next(v for v in pod["volumes"] if v["name"] == "nudgebee-reader-users")
+          assert vol["configMap"]["name"] == cm["metadata"]["name"], vol
+          mounts = [m for c in pod["containers"] for m in c.get("volumeMounts") or [] if m["name"] == "nudgebee-reader-users"]
+          assert [m["mountPath"] for m in mounts] == ["/bitnami/clickhouse/etc/users.d/nudgebee-reader"], mounts
+          '
+
+          [ -z "$(reader_env "$(render --set clickhouse.reader.enabled=false)")" ] || fail "reader disabled: runner still names it"
+          [ -z "$(reader_env "$(render --set opentelemetry-collector.enabled=false)")" ] || fail "no bundled ClickHouse: runner still names the reader"
+          [ -z "$(reader_env "$(render --set 'runner.additional_env_vars[0].name=CLICKHOUSE_HOST' --set 'runner.additional_env_vars[0].value=ch.example')")" ] \
+            || fail "external CLICKHOUSE_HOST: runner still names the reader"
+          # --reuse-values from a release without clickhouse.reader, or a custom
+          # clickhouse.extraVolumes without the reader mount: no user, no ConfigMap.
+          for args in '--set clickhouse.reader=null' '--set clickhouse.extraVolumes[0].name=certs --set clickhouse.extraVolumes[0].emptyDir.medium=Memory'; do
+            out="$(render $args)" || fail "$args: render failed"
+            [ -z "$(reader_env "$out")" ] || fail "$args: runner names the reader without its mount"
+            if printf '%s\n' "$out" | grep -q 'name: nudgebee-agent-clickhouse-reader-users'; then fail "$args: reader ConfigMap rendered"; fi
+          done
+          echo 'ok: query_data reads through the read-only ClickHouse user'
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz

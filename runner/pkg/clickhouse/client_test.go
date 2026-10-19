@@ -9,18 +9,21 @@ import (
 )
 
 // TestQuery_HappyPath verifies that the HTTP body is the SQL string with
-// FORMAT JSONCompact appended, query-string carries db/user/password, and
-// the response maps cleanly to QueryResult{data, columns, column_types}.
+// FORMAT JSONCompact appended, the query string carries only the database, the
+// credentials go as Basic auth, and the response maps cleanly to
+// QueryResult{data, columns, column_types}.
 func TestQuery_HappyPath(t *testing.T) {
 	var got struct {
-		body string
-		path string
+		body       string
+		path       string
+		user, pass string
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf := make([]byte, 4096)
 		n, _ := r.Body.Read(buf)
 		got.body = string(buf[:n])
 		got.path = r.URL.RawQuery
+		got.user, got.pass, _ = r.BasicAuth()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"meta":[{"name":"count","type":"UInt64"}],"data":[[42]]}`))
 	}))
@@ -43,8 +46,32 @@ func TestQuery_HappyPath(t *testing.T) {
 	if !strings.Contains(got.body, "FORMAT JSONCompact") {
 		t.Errorf("expected FORMAT JSONCompact appended; body = %q", got.body)
 	}
-	if !strings.Contains(got.path, "database=d") || !strings.Contains(got.path, "user=u") {
-		t.Errorf("query string missing creds: %q", got.path)
+	if got.path != "database=d" {
+		t.Errorf("query string = %q; want only database=d, no credentials", got.path)
+	}
+	if got.user != "u" || got.pass != "p" {
+		t.Errorf("basic auth = %q/%q; want u/p", got.user, got.pass)
+	}
+}
+
+// With no user set, Query authenticates as ClickHouse's "default" user, and a
+// password with characters a header value can't carry still goes through.
+func TestQuery_DefaultUserAndAnyPassword(t *testing.T) {
+	var user, pass string
+	var ok bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok = r.BasicAuth()
+		_, _ = w.Write([]byte(`{"meta":[{"name":"x","type":"UInt8"}],"data":[[1]]}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://"), Password: "p\tw\x01"})
+	res, err := c.Query(context.Background(), "SELECT 1", nil)
+	if err != nil || res.Error != nil {
+		t.Fatalf("Query = %+v, %v; want success", res, err)
+	}
+	if !ok || user != "default" || pass != "p\tw\x01" {
+		t.Errorf("basic auth = %q/%q (ok=%v); want default/the password", user, pass, ok)
 	}
 }
 
@@ -158,9 +185,9 @@ func TestBaseTypeStripsNullable(t *testing.T) {
 	}
 }
 
-// Every Query error quotes the request URL, which carries the password in its
-// query and any userinfo from CLICKHOUSE_HOST. Those errors reach logs, action
-// results and the telemetry report.
+// Every Query error quotes the request URL, which carries any userinfo from
+// CLICKHOUSE_HOST (the password itself goes as Basic auth). Those errors reach
+// logs, action results and the telemetry report.
 func TestQuery_ErrorsHideCredentials(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	addr := strings.TrimPrefix(srv.URL, "http://")
