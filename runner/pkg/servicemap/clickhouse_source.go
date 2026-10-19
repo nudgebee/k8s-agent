@@ -17,7 +17,9 @@ import (
 // The ClickHouse source builds the same map[string][]promResult that the
 // PromQL fetch produces, so build() and render() — and everything downstream
 // of the service_map action — cannot tell the two apart. Only the eBPF edge
-// and container metrics come from here, read straight from the raw
+// and container metrics come from here: edges, latency and coverage from the
+// per-minute summary tables (summary.go), container → workload from the
+// hourly one, container health from the raw
 // otel_metrics_* tables the OTel collector writes (as deltas, via its
 // cumulative_to_delta processor); the kube_* state still comes from
 // Prometheus.
@@ -216,13 +218,18 @@ func fetchClickHouse(ctx context.Context, c *chclient.Client, start, end time.Ti
 	}
 	db := c.Database
 	window := end.Sub(start).Seconds()
-	if window <= 0 {
+	// The summary tables hold whole minutes: edges and latency read the
+	// minutes in [from, to), and their rates divide by that span.
+	from, to := start.Truncate(time.Minute), end.Truncate(time.Minute)
+	minuteWindow := to.Sub(from).Seconds()
+	if window <= 0 || minuteWindow <= 0 {
 		return nil, errors.New("servicemap: empty window")
 	}
 	where := fmt.Sprintf("TimeUnix > toDateTime64(%d, 9) AND TimeUnix <= toDateTime64(%d, 9)", start.Unix(), end.Unix())
+	minutes := fmt.Sprintf("minute >= toDateTime(%d) AND minute < toDateTime(%d)", from.Unix(), to.Unix())
 	by := strings.Join(edgeLabels, ", ")
 
-	if err := checkCoverage(ctx, c, start, end, nodeAgents); err != nil {
+	if err := checkCoverage(ctx, c, from, to, nodeAgents); err != nil {
 		return nil, err
 	}
 
@@ -249,11 +256,11 @@ func fetchClickHouse(ctx context.Context, c *chclient.Client, start, end time.Ti
 
 	// 1. Edge traffic: requests by status and TCP, as rates over the window —
 	// sum by (edge, status) (rate(...)) > 0 in PromQL.
-	rows, err := chRows(ctx, c, fmt.Sprintf(`SELECT MetricName, %s, Attributes['status'] AS status, sum(Value)
-		FROM %s WHERE MetricName IN (%s) AND %s AND %s%s
+	rows, err := chRows(ctx, c, fmt.Sprintf(`SELECT MetricName, %s, status, sum(value)
+		FROM %s WHERE MetricName IN (%s) AND %s%s
 		GROUP BY MetricName, %s, status
-		HAVING sum(Value) > 0 %s`,
-		attrColumns(), table(db, rawSumTable), sqlList(counterMetrics()), deltaCounters, where, filterSQL(p), by, querySettings(ctx)))
+		HAVING sum(value) > 0 %s`,
+		by, table(db, summaryEdgesTable), sqlList(counterMetrics()), minutes, filterSQL(p), by, querySettings(ctx)))
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +269,7 @@ func fetchClickHouse(ctx context.Context, c *chclient.Client, start, end time.Ti
 			continue
 		}
 		metric, labels := text(r[0]), edgeRow(r)
-		rate := num(r[len(r)-1]) / window
+		rate := num(r[len(r)-1]) / minuteWindow
 		switch {
 		case requestKey[metric] != "":
 			labels["status"] = text(r[1+len(edgeLabels)])
@@ -274,17 +281,18 @@ func fetchClickHouse(ctx context.Context, c *chclient.Client, start, end time.Ti
 
 	// 2. Latency: each series' mean, then the slowest series per edge — the
 	// same max by (edge) (rate(_sum) / rate(_count)) PromQL computes. A series
-	// is one label set from one node agent.
+	// is one label set from one node agent; the summary keeps one row per
+	// series and minute for exactly this.
 	rows, err = chRows(ctx, c, fmt.Sprintf(`SELECT MetricName, %s, max(series_mean)
 		FROM (
-		  SELECT MetricName, %s, sum(Sum) / sum(Count) AS series_mean
-		  FROM %s WHERE MetricName IN (%s) AND %s AND %s%s
-		  GROUP BY MetricName, Attributes, ResourceAttributes['service.instance.id']
-		  HAVING sum(Count) > 0
+		  SELECT MetricName, %s, sum(total) / sum(samples) AS series_mean
+		  FROM %s WHERE MetricName IN (%s) AND %s%s
+		  GROUP BY MetricName, %s, series
+		  HAVING sum(samples) > 0
 		)
 		GROUP BY MetricName, %s
 		HAVING max(series_mean) > 0 %s`,
-		by, attrColumns(), table(db, rawHistogramTable), sqlList(latencyMetrics()), deltaHistograms, where, filterSQL(p), by, querySettings(ctx)))
+		by, by, table(db, summaryLatencyTable), sqlList(latencyMetrics()), minutes, filterSQL(p), by, by, querySettings(ctx)))
 	if err != nil {
 		return nil, err
 	}
@@ -318,14 +326,13 @@ func fetchClickHouse(ctx context.Context, c *chclient.Client, start, end time.Ti
 		WHERE MetricName IN ('container_resources_disk_size_bytes', 'container_resources_disk_used_bytes') AND %s
 		GROUP BY MetricName, Attributes
 		UNION ALL
-		SELECT 'pod_workload', Attributes['container_id'] AS container_id, Attributes['src_workload_kind'] AS src_workload_kind,
-		       Attributes['src_workload_name'] AS src_workload_name, Attributes['src_workload_namespace'] AS src_workload_namespace, 1
+		SELECT 'pod_workload', container_id, src_workload_kind, src_workload_name, src_workload_namespace, 1
 		FROM %s
-		WHERE MetricName = 'container_net_tcp_bytes_sent_total' AND %s AND %s
+		WHERE hour >= toStartOfHour(toDateTime(%d)) AND hour < toDateTime(%d)
 		GROUP BY container_id, src_workload_kind, src_workload_name, src_workload_namespace
 		) %s`,
 		window, table(db, rawSumTable), deltaCounters, where, table(db, rawGaugeTable), where,
-		table(db, rawSumTable), deltaCounters, where, querySettings(ctx)))
+		table(db, summaryPodsTable), from.Unix(), to.Unix(), querySettings(ctx)))
 	if err != nil {
 		return nil, err
 	}
@@ -351,20 +358,71 @@ func fetchClickHouse(ctx context.Context, c *chclient.Client, start, end time.Ti
 // before the given time — the agents the collector should be scraping.
 type NodeAgentCounter func(ctx context.Context, startedBefore time.Time) (int, error)
 
-// checkCoverage passes only when ClickHouse holds node-agent rows for every
+// checkCoverage passes only when every summary table and MV exists and the
+// newest was created before the window (its first minute is partial; a
+// recreated table lost everything before it), no MV run failed while the
+// window's rows were being inserted (each MV fails on its own under
+// materialized_views_ignore_errors, losing only its own table's rows; an MV
+// whose table is missing never runs and logs nothing, which the existence
+// check covers), the agents summary holds node-agent rows for every
 // coverageBucket fully inside the window (no collector outage), every node
 // agent has rows in every bucket from its first to its last (none stopped
 // being scraped mid-window, while one whose node left or joined is fine), and
 // — when nodeAgents is set — the last bucket holds every node agent that was
 // already running (none never scraped, or stopped and still running).
 func checkCoverage(ctx context.Context, c *chclient.Client, start, end time.Time, nodeAgents NodeAgentCounter) error {
-	rows, err := chRows(ctx, c, fmt.Sprintf(`SELECT ResourceAttributes['service.instance.id'] AS agent,
-		       groupUniqArray(toUnixTimestamp(toStartOfInterval(TimeUnix, INTERVAL %d SECOND))) AS buckets
+	views := summaryViews()
+	objects := append(summaryTables(), views...)
+	rows, err := chRows(ctx, c, fmt.Sprintf(`SELECT count(), toUnixTimestamp(max(metadata_modification_time))
+		FROM system.tables WHERE database = %s AND name IN (%s) %s`,
+		sqlString(c.Database), sqlList(objects), querySettings(ctx)))
+	if err != nil {
+		return err
+	}
+	if len(rows) != 1 || len(rows[0]) != 2 {
+		return fmt.Errorf("%w: unreadable summary tables", errNotCovered)
+	}
+	if n := num(rows[0][0]); n != float64(len(objects)) {
+		return fmt.Errorf("%w: %v of %d summary tables and views exist", errNotCovered, n, len(objects))
+	}
+	created := num(rows[0][1])
+	if math.IsNaN(created) {
+		return fmt.Errorf("%w: unreadable summary start", errNotCovered)
+	}
+	if first := time.Unix(int64(created), 0).Truncate(time.Minute); start.Before(first.Add(time.Minute)) {
+		return fmt.Errorf("%w: summary starts at %s, after the window does", errNotCovered, first.UTC().Format(time.RFC3339))
+	}
+
+	// A minute's rows are inserted up to coverageSlack after it, so failures
+	// logged that long past the window's end still count. The log is flushed
+	// every few seconds; a failure in the last seconds lands in the window's
+	// tail, which may still be in flight anyway.
+	qualified := make([]string, len(views))
+	for i, v := range views {
+		qualified[i] = c.Database + "." + v
+	}
+	rows, err = chRows(ctx, c, fmt.Sprintf(`SELECT view_name, count() FROM system.query_views_log
+		WHERE event_date >= toDate(toDateTime(%d)) AND event_time >= toDateTime(%d) AND event_time < toDateTime(%d)
+		  AND view_name IN (%s) AND status != 'QueryFinish'
+		GROUP BY view_name %s`,
+		start.Unix(), start.Unix(), end.Add(coverageSlack).Unix(), sqlList(qualified), querySettings(ctx)))
+	if err != nil {
+		return fmt.Errorf("servicemap: read summary view failures: %w", err)
+	}
+	if len(rows) > 0 && len(rows[0]) == 2 {
+		return fmt.Errorf("%w: summary view %s failed %v times in the window", errNotCovered, text(rows[0][0]), num(rows[0][1]))
+	}
+	if len(rows) > 0 {
+		return fmt.Errorf("%w: unreadable summary view failures", errNotCovered)
+	}
+
+	agentsTable := table(c.Database, summaryAgentsTable)
+	rows, err = chRows(ctx, c, fmt.Sprintf(`SELECT agent,
+		       groupUniqArray(toUnixTimestamp(toStartOfInterval(minute, INTERVAL %d SECOND))) AS buckets
 		FROM %s
-		WHERE MetricName = %s AND %s AND TimeUnix > toDateTime64(%d, 9) AND TimeUnix <= toDateTime64(%d, 9)
+		WHERE minute >= toDateTime(%d) AND minute < toDateTime(%d)
 		GROUP BY agent %s`,
-		int(coverageBucket.Seconds()), table(c.Database, rawSumTable), sqlString(coverageMetric), deltaCounters,
-		start.Unix(), end.Unix(), querySettings(ctx)))
+		int(coverageBucket.Seconds()), agentsTable, start.Unix(), end.Unix(), querySettings(ctx)))
 	if err != nil {
 		return err
 	}

@@ -31,6 +31,8 @@ type Service struct {
 	// that every running node agent is being scraped into ClickHouse.
 	NodeAgentCount NodeAgentCounter
 
+	summaryReady atomic.Bool // set by StartSummary once the tables exist
+
 	shadowMu   sync.Mutex
 	lastShadow map[string]time.Time
 	shadowBusy atomic.Bool // one shadow build at a time
@@ -211,7 +213,7 @@ func (s *Service) clickhouseMetrics(ctx context.Context, start, end time.Time, w
 	go func() { kubeCh <- fetch(ctx, kube) }()
 
 	chCtx, cancel := clickhouseBudget(ctx)
-	chMetrics, err := fetchClickHouse(chCtx, s.CH, start, end, p, s.NodeAgentCount)
+	chMetrics, err := s.fetchSummary(chCtx, start, end, p)
 	cancel()
 	metrics := <-kubeCh
 	if err == nil {
@@ -228,6 +230,15 @@ func (s *Service) clickhouseMetrics(ctx context.Context, start, end time.Time, w
 	}
 	maps.Copy(metrics, fetch(ctx, rest))
 	return metrics
+}
+
+// fetchSummary reads the window from ClickHouse once StartSummary has created
+// the summary tables.
+func (s *Service) fetchSummary(ctx context.Context, start, end time.Time, p FilterParams) (map[string][]promResult, error) {
+	if !s.summaryReady.Load() {
+		return nil, errSummaryNotReady
+	}
+	return fetchClickHouse(ctx, s.CH, start, end, p, s.NodeAgentCount)
 }
 
 // fetchProm runs the given queries in parallel, at most MaxParallel at a time.
@@ -311,8 +322,8 @@ func (s *Service) logger() *slog.Logger {
 }
 
 // UseClickHouse attaches the ClickHouse client and the source to read from.
-// It creates nothing in ClickHouse: the source reads the raw otel_metrics_*
-// tables the collector writes. Call it once, at startup.
+// It creates nothing in ClickHouse; StartSummary does. Call it once, at
+// startup, before StartSummary.
 func (s *Service) UseClickHouse(c *chclient.Client, src Source, logger *slog.Logger) {
 	s.CH, s.Source, s.Logger = c, src, logger
 }
@@ -346,7 +357,7 @@ func (s *Service) maybeShadow(start, end time.Time, window time.Duration, p Filt
 		ctx, cancel := context.WithTimeout(context.Background(), clickhouseMaxBudget)
 		defer cancel()
 		t0 := time.Now()
-		chMetrics, err := fetchClickHouse(ctx, s.CH, start, end, p, s.NodeAgentCount)
+		chMetrics, err := s.fetchSummary(ctx, start, end, p)
 		chTook := time.Since(t0)
 		if err != nil {
 			s.logger().Info("service map shadow: clickhouse build skipped", "reason", err, "window", window.String())
