@@ -254,6 +254,23 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
     {{- end }}
     {{- /*
+    Where the bundled collector writes logs, for the runner's ClickHouse logs
+    check. Read from the exporter config, as clickhouse-schema-upgrade-job.yaml
+    does. With the collector off (or an external writer) these stay unset and
+    the runner falls back to otel_logs in CLICKHOUSE_DB.
+    */}}
+    {{- if $otelEnabled }}
+    {{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
+    {{- if not (has "CLICKHOUSE_LOGS_DATABASE" $envVarNames) }}
+    - name: CLICKHOUSE_LOGS_DATABASE
+      value: {{ default "default" (get $chExporter "database") | quote }}
+    {{- end }}
+    {{- if not (has "CLICKHOUSE_LOGS_TABLE" $envVarNames) }}
+    - name: CLICKHOUSE_LOGS_TABLE
+      value: {{ default "otel_logs" (get $chExporter "logs_table_name") | quote }}
+    {{- end }}
+    {{- end }}
+    {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in
     the runner Secret), runner.clickhouse_secret (operator-provisioned), then the
     subchart Secret — the last only when the subchart is actually installed.

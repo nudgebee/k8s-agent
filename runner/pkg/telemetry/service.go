@@ -89,6 +89,17 @@ type ActivityStats struct {
 	// it in the DB forever.
 	TracesConnectionError string `json:"tracesConnectionError"`
 
+	// ClickHouse logs, reported beside the logs provider above rather than in
+	// its place, so a cluster can read logs from ClickHouse without the agent
+	// dropping its Loki. ClickhouseLogsConnection means ClickHouse answers and
+	// the logs table is present — not that logs are arriving. Table is the
+	// checked `database.table`, empty when the agent has no ClickHouse client.
+	// No omitempty, for the same jsonb-merge reason as tracesConnectionError:
+	// a false or "" must overwrite a stale true or reason.
+	ClickhouseLogsConnection      bool   `json:"clickhouseLogsConnection"`
+	ClickhouseLogsConnectionError string `json:"clickhouseLogsConnectionError"`
+	ClickhouseLogsTable           string `json:"clickhouseLogsTable"`
+
 	// Alert-rule write capabilities, read by api-server before it offers an edit
 	// or disable of a Prometheus rule. No omitempty: a false must overwrite a
 	// stale true in connection_status (same jsonb merge as above).
@@ -193,6 +204,13 @@ type Datasources struct {
 	// by the caller. Empty when ClickHouse is healthy or was never probed
 	// (unconfigured / disabled). Surfaced as tracesConnectionError.
 	ClickHouseError string
+	// ClickHouse logs table check, computed by the caller (this package stays
+	// free of a ClickHouse dependency). TablePresent is the clickhouseLogsConnection
+	// flag, TableError its reason (credentials already stripped), Table the
+	// `database.table` that was checked.
+	ClickHouseLogsTablePresent bool
+	ClickHouseLogsTableError   string
+	ClickHouseLogsTable        string
 	// HasMaterializedColumns reports whether otel_traces carries the
 	// agent-added materialized columns (workload_name, trace_source, …).
 	// Reported to the backend as traceProviderConfig.hasMaterializedColumn,
@@ -446,6 +464,11 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	// verbatim, so installs that did have the columns were told they didn't
 	// and were forced onto the recompute-from-attributes query shape.
 	out.TraceProviderConfig = map[string]any{"hasMaterializedColumn": ds.HasMaterializedColumns}
+
+	// ClickHouse logs table: checked by the caller, reported as found.
+	out.ClickhouseLogsConnection = ds.ClickHouseLogsTablePresent
+	out.ClickhouseLogsConnectionError = ds.ClickHouseLogsTableError
+	out.ClickhouseLogsTable = ds.ClickHouseLogsTable
 
 	return out
 }

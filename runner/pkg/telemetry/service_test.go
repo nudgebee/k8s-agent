@@ -532,3 +532,41 @@ func TestProbe_AlertRuleWriteCapabilities(t *testing.T) {
 		}
 	}
 }
+
+// The ClickHouse logs fields are reported as the caller found them, beside the
+// logs provider rather than in its place: Loki stays the reported provider.
+func TestProbe_ClickhouseLogsFieldsFromCaller(t *testing.T) {
+	s := &Service{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ds := Datasources{
+		LogsProvider:               "loki",
+		LogsProviderStatus:         true,
+		ClickHouseLogsTablePresent: false,
+		ClickHouseLogsTableError:   "table default.otel_logs is not present",
+		ClickHouseLogsTable:        "default.otel_logs",
+	}
+
+	got := s.probe(context.Background(), ds)
+
+	if got.LogsConnectionProvider != "loki" || !got.LogsConnection {
+		t.Errorf("logs provider = %q/%v; want loki/true untouched", got.LogsConnectionProvider, got.LogsConnection)
+	}
+	if got.ClickhouseLogsConnection || got.ClickhouseLogsConnectionError != ds.ClickHouseLogsTableError || got.ClickhouseLogsTable != "default.otel_logs" {
+		t.Errorf("clickhouse logs = %v/%q/%q; want false/%q/default.otel_logs",
+			got.ClickhouseLogsConnection, got.ClickhouseLogsConnectionError, got.ClickhouseLogsTable, ds.ClickHouseLogsTableError)
+	}
+}
+
+// All three ClickHouse logs keys must be in every post, false and "" included:
+// the collector merges the payload into what it stored before, so a missing key
+// would leave a stale "true" or reason behind.
+func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
+	buf, err := json.Marshal(ActivityStats{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"clickhouseLogsConnection":false`, `"clickhouseLogsConnectionError":""`, `"clickhouseLogsTable":""`} {
+		if !strings.Contains(string(buf), key) {
+			t.Errorf("marshalled ActivityStats lacks %s: %s", key, buf)
+		}
+	}
+}
