@@ -153,12 +153,17 @@ func keepBuckets(bs []int64, keep func(time.Time) bool) []int64 {
 
 // fakeClickHouse answers the runner's ClickHouse queries in JSONCompact.
 type fakeClickHouse struct {
-	buckets    map[string][]int64 // coverage: node agent → bucket starts
-	nanBuckets bool               // coverage rows come back unreadable
-	delay      time.Duration      // every query takes this long
-	block      chan struct{}      // when set, the coverage query waits for it
-	edgeCalls  atomic.Int64
-	coverCalls atomic.Int64
+	buckets     map[string][]int64 // coverage: node agent → bucket starts
+	nanBuckets  bool               // coverage rows come back unreadable
+	since       time.Time          // newest summary view's creation; zero: two hours before testEnd
+	missingView bool               // one of the summary tables or views does not exist
+	viewFailed  bool               // a summary view run failed in the window
+	noRawTables bool               // the collector has not created otel_metrics_* yet
+	delay       time.Duration      // every query takes this long
+	block       chan struct{}      // when set, the coverage query waits for it
+	edgeCalls   atomic.Int64
+	coverCalls  atomic.Int64
+	ddlCalls    atomic.Int64
 
 	mu   sync.Mutex
 	sqls []string
@@ -186,6 +191,30 @@ func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var data [][]any
 	switch {
+	case strings.HasPrefix(strings.TrimSpace(sql), "CREATE "):
+		f.ddlCalls.Add(1)
+	case strings.Contains(sql, "metadata_modification_time"):
+		since := f.since
+		if since.IsZero() {
+			since = testEnd.Add(-2 * time.Hour)
+		}
+		n := float64(len(summaryTables()) + len(summaryViews()))
+		if f.missingView {
+			n--
+		}
+		data = [][]any{{n, float64(since.Unix())}}
+	case strings.Contains(sql, "system.query_views_log"):
+		if f.viewFailed {
+			data = [][]any{{"default." + summaryEdgesTable + summaryMVSuffix, "3"}}
+		}
+	case strings.Contains(sql, "system.tables"):
+		n := 2.0
+		f.mu.Lock()
+		if f.noRawTables {
+			n = 0
+		}
+		f.mu.Unlock()
+		data = [][]any{{n}}
 	case strings.Contains(sql, "toStartOfInterval"):
 		f.coverCalls.Add(1)
 		if f.block != nil {
@@ -202,7 +231,7 @@ func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			data = append(data, []any{agent, arr})
 		}
-	case strings.Contains(sql, "HAVING sum(Value) > 0"):
+	case strings.Contains(sql, "HAVING sum(value) > 0"):
 		f.edgeCalls.Add(1)
 		row := func(metric, status string, value float64) []any {
 			return []any{metric, "Deployment", "", "frontend", "shop", "Deployment", "backend", "shop", "", status, value}
@@ -249,6 +278,7 @@ func newTestService(t *testing.T, ch *fakeClickHouse, src Source) (*Service, *at
 	s := New(prometheus.New(prom.URL, &http.Client{Timeout: 5 * time.Second}), "")
 	s.CH = chclient.New(chclient.Config{Host: chSrv.URL})
 	s.Source = src
+	s.summaryReady.Store(true)
 	return s, &promCalls
 }
 
@@ -285,24 +315,33 @@ func TestBuild_ClickHouseSource(t *testing.T) {
 	}
 }
 
-// Cumulative rows must never be summed, and the union's limits must bind to
-// the whole query.
-func TestClickHouseQueriesReadDeltasOnly(t *testing.T) {
+// Edges, latency, coverage and container → workload come from the summary
+// tables; the raw tables are read only for container health, and the union's
+// limits must bind to the whole query.
+func TestClickHouseQueriesReadSummary(t *testing.T) {
 	ch := &fakeClickHouse{buckets: fullBuckets(testEnd, 3)}
 	if _, err := fetchClickHouse(context.Background(), newTestClient(t, ch), testEnd.Add(-time.Hour), testEnd, FilterParams{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	for name, sql := range map[string]string{
-		"coverage": ch.sql("toStartOfInterval"), "edges": ch.sql("HAVING sum(Value) > 0"), "health": ch.sql("UNION ALL"),
+	for name, tc := range map[string]struct{ sql, table string }{
+		"coverage": {ch.sql("toStartOfInterval"), summaryAgentsTable},
+		"start":    {ch.sql("metadata_modification_time"), summaryPodsTable + summaryMVSuffix},
+		"tables":   {ch.sql("metadata_modification_time"), sqlString(summaryEdgesTable)},
+		"failures": {ch.sql("query_views_log"), summaryLatencyTable + summaryMVSuffix},
+		"edges":    {ch.sql("HAVING sum(value) > 0"), summaryEdgesTable},
+		"latency":  {ch.sql("series_mean"), summaryLatencyTable},
 	} {
-		if !strings.Contains(sql, deltaCounters) {
-			t.Errorf("%s query does not filter on %q:\n%s", name, deltaCounters, sql)
+		if !strings.Contains(tc.sql, tc.table) {
+			t.Errorf("%s query does not read %s:\n%s", name, tc.table, tc.sql)
 		}
 	}
-	if !strings.Contains(ch.sql("series_mean"), deltaHistograms) {
-		t.Errorf("latency query does not filter on %q", deltaHistograms)
-	}
 	health := strings.TrimSpace(ch.sql("UNION ALL"))
+	if !strings.Contains(health, summaryPodsTable) {
+		t.Errorf("container → workload is not read from %s:\n%s", summaryPodsTable, health)
+	}
+	if !strings.Contains(health, deltaCounters) {
+		t.Errorf("health query does not filter on %q:\n%s", deltaCounters, health)
+	}
 	if !strings.HasPrefix(health, "SELECT * FROM (") || !strings.Contains(health, ") SETTINGS") {
 		t.Errorf("health union is not wrapped under one SETTINGS:\n%s", health)
 	}
@@ -362,6 +401,14 @@ func TestCheckCoverage(t *testing.T) {
 		{"an agent never scraped", &fakeClickHouse{buckets: fullBuckets(testEnd, 3)}, agents(4, nil), false},
 		{"cannot count agents", &fakeClickHouse{buckets: fullBuckets(testEnd, 3)}, agents(0, errors.New("forbidden")), false},
 		{"unreadable rows", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), nanBuckets: true}, nil, false},
+		{"summary started before the window", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), since: testEnd.Add(-61 * time.Minute)}, nil, true},
+		// The MV was created mid-way through its first minute.
+		{"summary started in the window's first minute", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), since: testEnd.Add(-60 * time.Minute)}, nil, false},
+		{"summary started mid-window", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), since: testEnd.Add(-30 * time.Minute)}, nil, false},
+		// The agents view kept writing, so its buckets are full, but another
+		// view lost rows (or was never created): the map would undercount.
+		{"a summary view failed", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), viewFailed: true}, agents(3, nil), false},
+		{"a summary table or view is missing", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), missingView: true}, agents(3, nil), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkCoverage(context.Background(), newTestClient(t, tc.ch), testEnd.Add(-time.Hour), testEnd, tc.agents)
@@ -390,6 +437,28 @@ func TestBuild_ClickHouseNotCoveredFallsBack(t *testing.T) {
 	}
 	if ch.edgeCalls.Load() != 0 {
 		t.Error("edges read from ClickHouse for an uncovered window")
+	}
+	if l := frontendLink(t, apps); l.RequestCount != 7 {
+		t.Errorf("request rate = %v; want the PromQL 7", l.RequestCount)
+	}
+}
+
+// Until StartSummary has created the tables, the map comes from Prometheus
+// and ClickHouse is not queried.
+func TestBuild_SummaryNotReadyFallsBack(t *testing.T) {
+	ch := &fakeClickHouse{buckets: fullBuckets(testEnd, 3)}
+	s, promCalls := newTestService(t, ch, SourceClickHouse)
+	s.summaryReady.Store(false)
+
+	apps, err := s.Build(context.Background(), testParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := promCalls.Load(); got != int64(len(Queries)) {
+		t.Errorf("prometheus queries = %d; want all %d", got, len(Queries))
+	}
+	if ch.coverCalls.Load() != 0 || ch.edgeCalls.Load() != 0 {
+		t.Error("clickhouse queried before the summary tables exist")
 	}
 	if l := frontendLink(t, apps); l.RequestCount != 7 {
 		t.Errorf("request rate = %v; want the PromQL 7", l.RequestCount)

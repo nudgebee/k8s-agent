@@ -518,6 +518,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		smSvc.NodeAgentCount = nodeAgentCounter(typedKube)
 	}
 	smSvc.UseClickHouse(ch, smSource, logger)
+	smSvc.StartSummary(ctx)
 	logger.Info("service map source", "source", string(smSource), "clickhouse", ch != nil)
 
 	// api_traces_enricher_v2: OTel traces query against the same ClickHouse.
