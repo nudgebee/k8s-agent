@@ -505,6 +505,22 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	handlers["query_data"] = enrichers.QueryData(ch)
 	lightActions["query_data"] = struct{}{}
 
+	// The service map can read its eBPF metrics from the same ClickHouse; the
+	// source stays prometheus unless SERVICE_MAP_SOURCE says otherwise.
+	smSource, ok := servicemap.ParseSource(cfg.ServiceMapSource)
+	if !ok {
+		logger.Warn("unknown SERVICE_MAP_SOURCE; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if smSource != servicemap.SourcePrometheus && ch == nil {
+		logger.Warn("SERVICE_MAP_SOURCE needs ClickHouse, which is not configured; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if typedKube != nil {
+		smSvc.NodeAgentCount = nodeAgentCounter(typedKube)
+	}
+	smSvc.UseClickHouse(ch, smSource, logger)
+	smSvc.StartSummary(ctx)
+	logger.Info("service map source", "source", string(smSource), "clickhouse", ch != nil)
+
 	// api_traces_enricher_v2: OTel traces query against the same ClickHouse.
 	// Same registration semantics as query_data — register unconditionally so
 	// callers see an empty result instead of "auth rejected" when CH is off.

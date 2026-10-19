@@ -83,6 +83,7 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		ClickHouseEnabled: true,
 		ClickHousePort:    8123,
 		ClickHouseDB:      "default",
+		ServiceMapSource:  "prometheus",
 		// The logs check falls back to otel_logs in that database.
 		ClickHouseLogsDatabase: "default",
 		ClickHouseLogsTable:    "otel_logs",

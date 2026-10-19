@@ -240,6 +240,21 @@ runner:
   relay_address: wss://relay.nudgebee.com/register
   clickhouse_enabled: true
   clickhouse_secret: ""
+  # Where service_map reads the eBPF edge and container metrics:
+  #   prometheus  PromQL only (default).
+  #   shadow      serves the PromQL map; every 15 min per window also builds the
+  #               ClickHouse map and logs how the two differ.
+  #   clickhouse  edges and container health from ClickHouse, pods/services
+  #               still from Prometheus; falls back to Prometheus whenever
+  #               ClickHouse does not cover the requested window.
+  # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
+  # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
+  # holds this cluster's metrics only (the bundled one does). They create
+  # per-minute summary tables (nb_service_map_*_v1) fed by materialized views
+  # on otel_metrics_sum/_histogram, kept 7 days; the ClickHouse user needs DDL
+  # rights. A window from before the tables existed falls back to Prometheus.
+  # The prometheus default creates nothing.
+  serviceMapSource: prometheus
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.
@@ -496,7 +511,14 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
+        # materialized_views_ignore_errors: a broken service-map summary view
+        # must lose only its own rows, never fail the metric insert. Keep it
+        # when overriding the endpoint. It applies to every insert on this
+        # connection — logs, traces and metrics — so a failure in the
+        # exporter's own otel_traces_trace_id_ts_mv also drops only that
+        # view's rows instead of failing the trace insert. Failed view runs
+        # stay visible in system.query_views_log.
+        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4&materialized_views_ignore_errors=1" # Default endpoint, can be overridden
         database: default
         ttl: 168h
         username: default
