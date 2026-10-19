@@ -367,6 +367,20 @@ runner:
     relay_signing_public_key: ''
   serviceAccount:
     annotations: {}
+# Where this cluster's container logs are collected. One mode per cluster:
+#   none        Not collected by this chart (default). Logs come from your own
+#               provider (Loki, Elasticsearch, ...), as before.
+#   node-agent  The node-agent ships every container's stdout/stderr through the
+#               bundled OpenTelemetry collector into ClickHouse, and the agent
+#               reports that its logs are collected there, so NudgeBee can read
+#               them. Needs opentelemetry-collector.enabled and nodeAgent.enabled;
+#               leave nodeAgent.logsEndpoint empty. Logs share ClickHouse's disk
+#               and retention with traces. Logs from kube-system and the agent's
+#               own namespace are dropped (filter/drop_log_namespaces under
+#               opentelemetry-collector.config.processors).
+# Loki or another provider keeps working alongside either mode.
+logs:
+  collection: none
 nodeAgent:
   enabled: true
   podmonitor:
@@ -487,6 +501,16 @@ opentelemetry-collector:
         traces:
           span:
             - attributes["k8s.namespace.name"] == "kube-system"
+      # Drops container logs (logs.collection=node-agent) from kube-system and the
+      # agent's own namespace before ClickHouse, whose disk they share with traces.
+      # An override replaces the whole list. The subchart fills in
+      # {{ .Release.Namespace }}.
+      filter/drop_log_namespaces:
+        error_mode: ignore
+        logs:
+          log_record:
+            - resource.attributes["k8s.namespace.name"] == "kube-system"
+            - resource.attributes["k8s.namespace.name"] == "{{ .Release.Namespace }}"
       filter/drop_health_check:
         error_mode: ignore
         traces:
@@ -543,7 +567,7 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
-          processors: [memory_limiter, batch]
+          processors: [memory_limiter, filter/drop_log_namespaces, batch]
           exporters: [clickhouse]
           receivers: [otlp]
         metrics:

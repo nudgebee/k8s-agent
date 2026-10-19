@@ -344,3 +344,23 @@ func TestFromEnv_ClickHouseReaderUser(t *testing.T) {
 		t.Errorf("ClickHouseReaderUser = %q; want nudgebee_reader", c.ClickHouseReaderUser)
 	}
 }
+
+// Off unless the chart's logs.collection switch sets it.
+func TestFromEnv_ClickHouseLogsCollected(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseLogsCollected {
+		t.Error("ClickHouseLogsCollected = true with CLICKHOUSE_LOGS_COLLECTED unset")
+	}
+	t.Setenv("CLICKHOUSE_LOGS_COLLECTED", "true")
+	if c, err = FromEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.ClickHouseLogsCollected {
+		t.Error("ClickHouseLogsCollected = false with CLICKHOUSE_LOGS_COLLECTED=true")
+	}
+}

@@ -101,6 +101,11 @@ type ActivityStats struct {
 	ClickhouseLogsConnection      bool   `json:"clickhouseLogsConnection"`
 	ClickhouseLogsConnectionError string `json:"clickhouseLogsConnectionError"`
 	ClickhouseLogsTable           string `json:"clickhouseLogsTable"`
+	// ClickhouseLogsCollected: the chart's logs.collection ships this cluster's
+	// container logs into that ClickHouse. Without it the logs table holds at
+	// most OTLP logs from instrumented apps, so the backend doesn't offer it as
+	// the cluster's logs provider. No omitempty: false must overwrite a stale true.
+	ClickhouseLogsCollected bool `json:"clickhouseLogsCollected"`
 
 	// Alert-rule write capabilities, read by api-server before it offers an edit
 	// or disable of a Prometheus rule. No omitempty: a false must overwrite a
@@ -213,6 +218,9 @@ type Datasources struct {
 	ClickHouseLogsTablePresent bool
 	ClickHouseLogsTableError   string
 	ClickHouseLogsTable        string
+	// ClickHouseLogsCollected is the chart's logs-collection switch, reported as
+	// clickhouseLogsCollected.
+	ClickHouseLogsCollected bool
 	// HasMaterializedColumns reports whether otel_traces carries the
 	// agent-added materialized columns (workload_name, trace_source, …).
 	// Reported to the backend as traceProviderConfig.hasMaterializedColumn,
@@ -471,6 +479,7 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	out.ClickhouseLogsConnection = ds.ClickHouseLogsTablePresent
 	out.ClickhouseLogsConnectionError = ds.ClickHouseLogsTableError
 	out.ClickhouseLogsTable = ds.ClickHouseLogsTable
+	out.ClickhouseLogsCollected = ds.ClickHouseLogsCollected
 
 	redactReportedURLs(&out, ds)
 	return out

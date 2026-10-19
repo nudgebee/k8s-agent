@@ -557,17 +557,24 @@ func TestProbe_ClickhouseLogsFieldsFromCaller(t *testing.T) {
 		t.Errorf("clickhouse logs = %v/%q/%q; want false/%q/default.otel_logs",
 			got.ClickhouseLogsConnection, got.ClickhouseLogsConnectionError, got.ClickhouseLogsTable, ds.ClickHouseLogsTableError)
 	}
+	if got.ClickhouseLogsCollected {
+		t.Error("clickhouseLogsCollected = true; the switch is off")
+	}
+	ds.ClickHouseLogsCollected = true
+	if got = s.probe(context.Background(), ds); !got.ClickhouseLogsCollected {
+		t.Error("clickhouseLogsCollected = false; the switch is on")
+	}
 }
 
-// All three ClickHouse logs keys must be in every post, false and "" included:
-// the collector merges the payload into what it stored before, so a missing key
+// All ClickHouse logs keys must be in every post, false and "" included: the
+// collector merges the payload into what it stored before, so a missing key
 // would leave a stale "true" or reason behind.
 func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
 	buf, err := json.Marshal(ActivityStats{})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, key := range []string{`"clickhouseLogsConnection":false`, `"clickhouseLogsConnectionError":""`, `"clickhouseLogsTable":""`} {
+	for _, key := range []string{`"clickhouseLogsConnection":false`, `"clickhouseLogsConnectionError":""`, `"clickhouseLogsTable":""`, `"clickhouseLogsCollected":false`} {
 		if !strings.Contains(string(buf), key) {
 			t.Errorf("marshalled ActivityStats lacks %s: %s", key, buf)
 		}

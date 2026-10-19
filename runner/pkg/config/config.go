@@ -225,6 +225,10 @@ type Config struct {
 	// ClickHouseDB.
 	ClickHouseLogsDatabase string
 	ClickHouseLogsTable    string
+	// ClickHouseLogsCollected: the chart's logs.collection ships this cluster's
+	// container logs into that ClickHouse. Set by the chart from that switch
+	// only (CLICKHOUSE_LOGS_COLLECTED), and reported as clickhouseLogsCollected.
+	ClickHouseLogsCollected bool
 
 	// ClickHouseReaderUser is a read-only ClickHouse user with query limits, which
 	// the chart creates in the bundled ClickHouse with the admin's password.
@@ -349,6 +353,7 @@ func FromEnv() (*Config, error) {
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
 		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
 		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
+		ClickHouseLogsCollected:    envBool("CLICKHOUSE_LOGS_COLLECTED", false),
 		ClickHouseReaderUser:       os.Getenv("CLICKHOUSE_READER_USER"),
 	}
 	c.ClickHouseLogsDatabase = cmp(os.Getenv("CLICKHOUSE_LOGS_DATABASE"), c.ClickHouseDB)
