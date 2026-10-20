@@ -158,6 +158,9 @@ type fakeClickHouse struct {
 	since       time.Time          // newest summary view's creation; zero: two hours before testEnd
 	missingView bool               // one of the summary tables or views does not exist
 	viewFailed  bool               // a summary view run failed in the window
+	noViewsLog  bool               // system.query_views_log is disabled
+	logSince    time.Time          // system.query_views_log's creation; zero: a day before testEnd
+	logEngine   string             // system.query_views_log's engine_full; empty: no TTL
 	noRawTables bool               // the collector has not created otel_metrics_* yet
 	delay       time.Duration      // every query takes this long
 	block       chan struct{}      // when set, the coverage query waits for it
@@ -193,6 +196,18 @@ func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(strings.TrimSpace(sql), "CREATE "):
 		f.ddlCalls.Add(1)
+	case strings.Contains(sql, "'query_views_log'"):
+		if !f.noViewsLog {
+			since := f.logSince
+			if since.IsZero() {
+				since = testEnd.Add(-24 * time.Hour)
+			}
+			engine := f.logEngine
+			if engine == "" {
+				engine = "MergeTree PARTITION BY toYYYYMMDD(event_date) ORDER BY (event_date, event_time)"
+			}
+			data = [][]any{{engine, float64(since.Unix())}}
+		}
 	case strings.Contains(sql, "metadata_modification_time"):
 		since := f.since
 		if since.IsZero() {
@@ -327,7 +342,8 @@ func TestClickHouseQueriesReadSummary(t *testing.T) {
 		"coverage": {ch.sql("toStartOfInterval"), summaryAgentsTable},
 		"start":    {ch.sql("metadata_modification_time"), summaryPodsTable + summaryMVSuffix},
 		"tables":   {ch.sql("metadata_modification_time"), sqlString(summaryEdgesTable)},
-		"failures": {ch.sql("query_views_log"), summaryLatencyTable + summaryMVSuffix},
+		"failures": {ch.sql("FROM system.query_views_log"), summaryLatencyTable + summaryMVSuffix},
+		"log ttl":  {ch.sql("'query_views_log'"), "engine_full"},
 		"edges":    {ch.sql("HAVING sum(value) > 0"), summaryEdgesTable},
 		"latency":  {ch.sql("series_mean"), summaryLatencyTable},
 	} {
@@ -409,6 +425,12 @@ func TestCheckCoverage(t *testing.T) {
 		// view lost rows (or was never created): the map would undercount.
 		{"a summary view failed", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), viewFailed: true}, agents(3, nil), false},
 		{"a summary table or view is missing", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), missingView: true}, agents(3, nil), false},
+		// Failures are only visible while system.query_views_log holds them.
+		{"views log disabled", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), noViewsLog: true}, agents(3, nil), false},
+		{"views log created mid-window", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logSince: testEnd.Add(-30 * time.Minute)}, agents(3, nil), false},
+		{"views log expired the window's start", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL event_time + toIntervalHour(1) SETTINGS index_granularity = 8192"}, agents(3, nil), false},
+		{"views log keeps the window", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL event_time + toIntervalYear(100) SETTINGS index_granularity = 8192"}, agents(3, nil), true},
+		{"views log TTL unreadable", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL event_time + INTERVAL 8 DAY + toIntervalHour(1)"}, agents(3, nil), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkCoverage(context.Background(), newTestClient(t, tc.ch), testEnd.Add(-time.Hour), testEnd, tc.agents)
@@ -419,6 +441,27 @@ func TestCheckCoverage(t *testing.T) {
 				t.Errorf("err = %v; want errNotCovered", err)
 			}
 		})
+	}
+}
+
+func TestViewsLogRetention(t *testing.T) {
+	for _, tc := range []struct {
+		engine string
+		keep   time.Duration
+		ok     bool
+	}{
+		{"MergeTree PARTITION BY toYYYYMMDD(event_date) ORDER BY (event_date, event_time) TTL event_time + toIntervalDay(8) SETTINGS ttl_only_drop_parts = 1, index_granularity = 8192", 8 * 24 * time.Hour, true},
+		// event_date expires the whole day at midnight: 1 day keeps 0 to 24h.
+		{"MergeTree ORDER BY (event_date, event_time) TTL event_date + toIntervalDay(2) SETTINGS index_granularity = 8192", 24 * time.Hour, true},
+		{"MergeTree ORDER BY (event_date, event_time) TTL event_date + toIntervalDay(1) SETTINGS index_granularity = 8192", 0, false},
+		{"MergeTree ORDER BY (event_date, event_time) TTL event_time + toIntervalMonth(1)", 28 * 24 * time.Hour, true},
+		{"MergeTree ORDER BY (event_date, event_time) SETTINGS index_granularity = 8192", 0, true},
+		{"MergeTree ORDER BY (event_date, event_time) TTL toDateTime(event_date) + toIntervalDay(8)", 0, false},
+	} {
+		keep, ok := viewsLogRetention(tc.engine)
+		if keep != tc.keep || ok != tc.ok {
+			t.Errorf("viewsLogRetention(%q) = %v, %v; want %v, %v", tc.engine, keep, ok, tc.keep, tc.ok)
+		}
 	}
 }
 
