@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // ActivityStats is the activity-stats payload. Pydantic on the legacy side
@@ -470,6 +472,77 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	out.ClickhouseLogsConnectionError = ds.ClickHouseLogsTableError
 	out.ClickhouseLogsTable = ds.ClickHouseLogsTable
 
+	redactReportedURLs(&out, ds)
+	return out
+}
+
+// redactReportedURLs strips credentials from everything in the report that
+// can carry a datasource URL. Operators commonly configure basic auth inline
+// (https://user:pass@host); the probes above need it, but activity_stats is
+// stored as the agent's connection status and rendered verbatim in the UI, so
+// the userinfo must not leave the cluster.
+//
+// TestRedactReportedURLs_CoversEveryField fails when a URL or error field is
+// added to ActivityStats without being listed here.
+func redactReportedURLs(out *ActivityStats, ds Datasources) {
+	for _, f := range []*string{
+		&out.PrometheusURL,
+		&out.AlertManagerURL,
+		&out.LogProviderURL,
+		&out.OpencostURL,
+		&out.TracesURL,
+		&out.AgentURL,
+	} {
+		*f = redact.URL(*f)
+	}
+	for _, f := range []*string{
+		&out.PrometheusConnectionError,
+		&out.AlertManagerConnectionError,
+		&out.LogsConnectionError,
+		&out.OpencostConnectionError,
+		&out.TracesConnectionError,
+		&out.ClickhouseLogsConnectionError,
+	} {
+		*f = redact.Text(*f)
+	}
+	// A URL whose credentials the client misread fails with an error that can
+	// quote fragments of them outside any URL. Report the cause instead.
+	for _, p := range []struct {
+		url string
+		err *string
+	}{
+		{ds.PrometheusURL, &out.PrometheusConnectionError},
+		{ds.AlertManagerURL, &out.AlertManagerConnectionError},
+		{ds.LogsProviderURL, &out.LogsConnectionError},
+		{ds.OpencostURL, &out.OpencostConnectionError},
+		{ds.ClickHouseURL, &out.TracesConnectionError},
+		{ds.ClickHouseURL, &out.ClickhouseLogsConnectionError},
+	} {
+		if *p.err != "" && redact.Misparsed(p.url) {
+			*p.err = redact.MisparsedMessage
+		}
+	}
+	for i, e := range out.Errors {
+		out.Errors[i] = redact.Text(e)
+	}
+	out.LogProviderConfig = redactConfigURLs(out.LogProviderConfig)
+	out.TraceProviderConfig = redactConfigURLs(out.TraceProviderConfig)
+}
+
+// redactConfigURLs returns a copy of a provider config map with every string
+// value passed through redact.URL — any of them may be an endpoint. It copies
+// rather than mutates because the map comes from the caller's Datasources.
+func redactConfigURLs(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]any, len(cfg))
+	for k, v := range cfg {
+		if s, ok := v.(string); ok {
+			v = redact.URL(s)
+		}
+		out[k] = v
+	}
 	return out
 }
 

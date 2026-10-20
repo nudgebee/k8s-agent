@@ -8,10 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // TestService_PostsActivityStatsWithProbedStatus stands up fake datasources
@@ -568,5 +571,101 @@ func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
 		if !strings.Contains(string(buf), key) {
 			t.Errorf("marshalled ActivityStats lacks %s: %s", key, buf)
 		}
+	}
+}
+
+// TestRedactReportedURLs_CoversEveryField is the guard for redactReportedURLs'
+// explicit field lists: it fills every URL-, error- or config-shaped field of
+// ActivityStats with a credential-bearing URL, so a field added later without
+// being redacted fails here instead of shipping credentials to the UI.
+func TestRedactReportedURLs_CoversEveryField(t *testing.T) {
+	const leaky = "https://user:pw@host.example.com/x"
+	var stats ActivityStats
+	v := reflect.ValueOf(&stats).Elem()
+	var filled []string
+	for i := 0; i < v.NumField(); i++ {
+		name := strings.ToLower(strings.Split(v.Type().Field(i).Tag.Get("json"), ",")[0])
+		f := v.Field(i)
+		switch {
+		case f.Kind() == reflect.String && (strings.Contains(name, "url") || strings.Contains(name, "error")):
+			f.SetString(leaky)
+		case f.Type() == reflect.TypeOf([]string{}) && strings.Contains(name, "error"):
+			f.Set(reflect.ValueOf([]string{leaky}))
+		case f.Type() == reflect.TypeOf(map[string]any{}):
+			f.Set(reflect.ValueOf(map[string]any{"endpoint": leaky}))
+		default:
+			continue
+		}
+		filled = append(filled, name)
+	}
+	if len(filled) < 10 {
+		t.Fatalf("filled only %v; the field filter no longer matches ActivityStats", filled)
+	}
+
+	redactReportedURLs(&stats, Datasources{})
+
+	v = reflect.ValueOf(stats)
+	for i := 0; i < v.NumField(); i++ {
+		if b, _ := json.Marshal(v.Field(i).Interface()); strings.Contains(string(b), "pw") {
+			t.Errorf("%s still carries credentials after redaction: %s — add it to redactReportedURLs",
+				v.Type().Field(i).Name, b)
+		}
+	}
+}
+
+// A misread URL's error can name the username as a host ("lookup user: no
+// such host") or quote a password fragment as a port — neither inside a URL.
+func TestProbe_MisparsedURLErrorReplaced(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	got := s.probe(context.Background(), Datasources{
+		PrometheusURL:            "https://admin:12?secret@prom.example.com",
+		PrometheusConnectedError: `Get "https://prom.example.com/api/v1/query": dial tcp: lookup admin: no such host`,
+		ClickHouseStatus:         false,
+		ClickHouseURL:            "admin:se/cret@clickhouse.example.com",
+		ClickHouseError:          `ClickHouse ping failed: invalid port ":se" after host`,
+	})
+	for name, e := range map[string]string{
+		"prometheus": got.PrometheusConnectionError,
+		"traces":     got.TracesConnectionError,
+	} {
+		if e != redact.MisparsedMessage {
+			t.Errorf("%s error = %q, want the misparsed-credentials message", name, e)
+		}
+	}
+}
+
+func TestProbe_RedactsURLCredentials(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	logCfg := map[string]any{"url": "https://user:secret@loki.example.com"}
+	ds := Datasources{
+		PrometheusURL:     "https://user:secret@prom.example.com",
+		LogsProvider:      "loki",
+		LogsProviderURL:   "https://user:secret@loki.example.com",
+		LogProviderConfig: logCfg,
+		ClickHouseStatus:  true,
+		ClickHouseURL:     "default:secret@clickhouse.example.com",
+		// net/http masks only the password; the username must go too.
+		PrometheusConnectedError: `Get "https://user:***@prom.example.com/api/v1/query": EOF`,
+		LogsProviderError:        `Get "https://secret@loki.example.com/ready": EOF`,
+	}
+	body, err := json.Marshal(s.probe(context.Background(), ds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "secret") || strings.Contains(string(body), "user") {
+		t.Fatalf("credentials leaked into the report: %s", body)
+	}
+	for _, want := range []string{"https://prom.example.com", "https://loki.example.com", "clickhouse.example.com"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("report missing %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{`Get \"https://prom.example.com/api/v1/query\": EOF`, `Get \"https://loki.example.com/ready\": EOF`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("report missing redacted error %q: %s", want, body)
+		}
+	}
+	if logCfg["url"] != "https://user:secret@loki.example.com" {
+		t.Errorf("caller's LogProviderConfig was mutated: %v", logCfg["url"])
 	}
 }

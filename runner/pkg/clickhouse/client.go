@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // Client is a ClickHouse HTTP client. Concurrency-safe via the underlying http.Client.
@@ -114,9 +117,12 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 	}
 	endpoint := c.BaseURL + "/?" + v.Encode()
 
+	// Errors below quote the request URL, which carries the password in its
+	// query (and CLICKHOUSE_HOST may carry userinfo). They reach logs, action
+	// results and the telemetry report, so scrub them here, once.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(q))
 	if err != nil {
-		return nil, err
+		return nil, errors.New(redact.Text(err.Error()))
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 
@@ -124,7 +130,7 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 	if err != nil {
 		// Connection-level errors surface as a result.error so callers see a
 		// uniform shape even when the host is unreachable.
-		return errResult(fmt.Sprintf("clickhouse: %v", err)), nil
+		return errResult("clickhouse: " + redact.Text(err.Error())), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, readErr := io.ReadAll(resp.Body)

@@ -253,20 +253,3 @@ func TestProbeClickhouse_UnconfiguredExplainsItself(t *testing.T) {
 		t.Errorf("reason = %q; want it to name the missing env var", reason)
 	}
 }
-
-// The reason string ships to the backend and renders in the UI, so a URL-form
-// CLICKHOUSE_HOST must not leak its credentials into it.
-func TestRedactUserinfo(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"clickhouse.svc:8123", "clickhouse.svc:8123"},
-		{"https://otel.last9.io:443", "https://otel.last9.io:443"},
-		{"https://admin:hunter2@otel.last9.io:443", "https://otel.last9.io:443"},
-		{"admin:hunter2@clickhouse.svc:8123", "clickhouse.svc:8123"},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		if got := redactUserinfo(tc.in); got != tc.want {
-			t.Errorf("redactUserinfo(%q) = %q; want %q", tc.in, got, tc.want)
-		}
-	}
-}
