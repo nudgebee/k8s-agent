@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -173,6 +174,74 @@ func text(v any) string {
 // agent. Serving a map built from part of the data would make the knowledge
 // graph retire edges that still exist.
 var errNotCovered = errors.New("servicemap: clickhouse does not hold node-agent metrics for the whole window")
+
+// viewsLogTTLRe reads the retention out of system.query_views_log's
+// engine_full, e.g. "TTL event_time + toIntervalDay(8)".
+var viewsLogTTLRe = regexp.MustCompile(`\bTTL event_(date|time) \+ toInterval(Second|Minute|Hour|Day|Week|Month|Quarter|Year)\((\d+)\)`)
+
+// viewsLogRetention is how far back system.query_views_log is sure to still
+// hold rows, from its engine_full: 0 with ok for no TTL (kept forever), ok
+// false for a TTL it cannot read. Months and years count at their shortest;
+// a TTL on event_date expires a whole day at once, so it keeps a day less.
+func viewsLogRetention(engineFull string) (keep time.Duration, ok bool) {
+	if !strings.Contains(engineFull, " TTL ") {
+		return 0, true
+	}
+	m := viewsLogTTLRe.FindStringSubmatch(engineFull)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[3])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	unit := map[string]time.Duration{
+		"Second": time.Second, "Minute": time.Minute, "Hour": time.Hour, "Day": 24 * time.Hour,
+		"Week": 7 * 24 * time.Hour, "Month": 28 * 24 * time.Hour, "Quarter": 89 * 24 * time.Hour, "Year": 365 * 24 * time.Hour,
+	}[m[2]]
+	keep = time.Duration(n) * unit
+	if m[1] == "date" {
+		keep -= 24 * time.Hour
+	}
+	if keep <= 0 {
+		return 0, false
+	}
+	return keep, true
+}
+
+// checkViewsLog passes only when system.query_views_log can show every
+// summary view failure since start: the log exists (the chart keeps it; an
+// operator's own clickhouse.extraOverrides or ClickHouse may not), already
+// existed at start (a recreated log lost the failures before it), and its TTL
+// has not expired rows from start yet.
+func checkViewsLog(ctx context.Context, c *chclient.Client, start time.Time) error {
+	rows, err := chRows(ctx, c, fmt.Sprintf(`SELECT engine_full, toUnixTimestamp(metadata_modification_time)
+		FROM system.tables WHERE database = 'system' AND name = 'query_views_log' %s`, querySettings(ctx)))
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("%w: system.query_views_log is disabled, so summary view failures cannot be checked", errNotCovered)
+	}
+	if len(rows[0]) != 2 {
+		return fmt.Errorf("%w: unreadable system.query_views_log", errNotCovered)
+	}
+	created := num(rows[0][1])
+	if math.IsNaN(created) {
+		return fmt.Errorf("%w: unreadable system.query_views_log", errNotCovered)
+	}
+	if since := time.Unix(int64(created), 0); start.Before(since) {
+		return fmt.Errorf("%w: system.query_views_log starts at %s, after the window does", errNotCovered, since.UTC().Format(time.RFC3339))
+	}
+	keep, ok := viewsLogRetention(text(rows[0][0]))
+	if !ok {
+		return fmt.Errorf("%w: cannot read the TTL of system.query_views_log", errNotCovered)
+	}
+	if keep > 0 && start.Before(time.Now().Add(-keep)) {
+		return fmt.Errorf("%w: system.query_views_log keeps %s, less than the window goes back", errNotCovered, keep)
+	}
+	return nil
+}
 
 // filterSQL is the ClickHouse form of the src/dst filters Build passes to
 // ApplicationQueries: the same label → value maps, matched as anchored RE2
@@ -364,7 +433,7 @@ type NodeAgentCounter func(ctx context.Context, startedBefore time.Time) (int, e
 // window's rows were being inserted (each MV fails on its own under
 // materialized_views_ignore_errors, losing only its own table's rows; an MV
 // whose table is missing never runs and logs nothing, which the existence
-// check covers), the agents summary holds node-agent rows for every
+// check covers; checkViewsLog makes sure the log can show it), the agents summary holds node-agent rows for every
 // coverageBucket fully inside the window (no collector outage), every node
 // agent has rows in every bucket from its first to its last (none stopped
 // being scraped mid-window, while one whose node left or joined is fine), and
@@ -391,6 +460,10 @@ func checkCoverage(ctx context.Context, c *chclient.Client, start, end time.Time
 	}
 	if first := time.Unix(int64(created), 0).Truncate(time.Minute); start.Before(first.Add(time.Minute)) {
 		return fmt.Errorf("%w: summary starts at %s, after the window does", errNotCovered, first.UTC().Format(time.RFC3339))
+	}
+
+	if err := checkViewsLog(ctx, c, start); err != nil {
+		return err
 	}
 
 	// A minute's rows are inserted up to coverageSlack after it, so failures

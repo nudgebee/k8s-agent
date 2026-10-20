@@ -575,7 +575,12 @@ clickhouse:
     # key `admin-password`). To pin a value, set it here or pass via
     # `--set clickhouse.auth.password=...`.
     password: ""
-  extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log remove=\"1\" />\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  # Most system logs are off to save disk. query_views_log stays: the runner's
+  # ClickHouse service map reads failed summary-view runs from it, and serves
+  # only windows it still covers (without it every map read falls back to
+  # Prometheus). It keeps 8 days, longer than the summary tables' 7, in daily
+  # partitions dropped whole once expired.
+  extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
   resources:
     requests:
       cpu: 100m
