@@ -581,6 +581,41 @@ clickhouse:
   # Prometheus). It keeps 8 days, longer than the summary tables' 7, in daily
   # partitions dropped whole once expired.
   extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  # A read-only user for the runner's query_data action, which runs SQL the
+  # NudgeBee backend sends (log and trace reads, LLM-written log queries
+  # included). It can read and set query settings (readonly=2) but not write
+  # or change the schema, and it is granted only SELECT and SHOW, so the SQL
+  # can't use table functions that reach the network (url, s3, remote, ...).
+  # Its limits stop a runaway query: the defaults apply when a query sets
+  # nothing, and a query can lower but not raise them past the ceilings, or
+  # set them to 0. It shares the admin password (the
+  # runner holds that one anyway); schema changes and the collector's inserts
+  # keep the admin user. Defined in templates/clickhouse-reader-users.yaml and
+  # mounted by the extraVolumes / extraVolumeMounts entries below. If you set
+  # your own lists, keep both nudgebee-reader-users entries or drop both (a
+  # mount without its volume fails the StatefulSet); without them query_data
+  # uses the admin user. Changed limits apply after the ClickHouse pod restarts.
+  reader:
+    enabled: true
+    maxExecutionTime: 60        # seconds, when a query sets none
+    maxExecutionTimeCeiling: 600
+    maxRowsToRead: 2000000000
+    # Bytes per query. The pod's limit is 2000Mi, so ClickHouse allows about
+    # 1.8GB in all; this leaves room for inserts and merges. Raise both together.
+    maxMemoryUsage: 1500000000
+    # A sort or GROUP BY past this many bytes spills to disk rather than
+    # reaching maxMemoryUsage.
+    maxBytesBeforeSpill: 500000000
+  extraVolumes:
+    - name: nudgebee-reader-users
+      configMap:
+        name: '{{ include "common.names.fullname" . }}-reader-users'
+        optional: true
+  extraVolumeMounts:
+    - name: nudgebee-reader-users
+      # The image copies files under /bitnami/clickhouse/etc/users.d/*/ into
+      # ClickHouse's users.d.
+      mountPath: /bitnami/clickhouse/etc/users.d/nudgebee-reader
   resources:
     requests:
       cpu: 100m

@@ -101,6 +101,29 @@ override with an explicit value and skip the derivation entirely.
 {{- end -}}
 
 {{/*
+"true" when the bundled ClickHouse gets the read-only user query_data uses
+(templates/clickhouse-reader-users.yaml): the ClickHouse subchart is installed,
+clickhouse.reader.enabled, and the subchart mounts the users file. An operator's
+own clickhouse.extraVolumes / extraVolumeMounts replace the chart's lists, and an
+upgrade with --reuse-values keeps a release's old values, which have neither the
+reader nor the mount; in both cases the user doesn't exist, so nothing names it.
+*/}}
+{{- define "nudgebee-agent.clickhouseReader" -}}
+{{- $ch := default (dict) .Values.clickhouse -}}
+{{- $otelEnabled := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}
+{{- $volume := false -}}
+{{- range (default (list) $ch.extraVolumes) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "nudgebee-reader-users") -}}{{- $volume = true -}}{{- end -}}
+{{- end -}}
+{{- $mount := false -}}
+{{- range (default (list) $ch.extraVolumeMounts) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "nudgebee-reader-users") -}}{{- $mount = true -}}{{- end -}}
+{{- end -}}
+{{- $reader := $ch.reader -}}
+{{- if and $otelEnabled (kindIs "map" $reader) (get $reader "enabled") $volume $mount -}}true{{- end -}}
+{{- end -}}
+
+{{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
@@ -268,6 +291,15 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- if not (has "CLICKHOUSE_LOGS_TABLE" $envVarNames) }}
     - name: CLICKHOUSE_LOGS_TABLE
       value: {{ default "otel_logs" (get $chExporter "logs_table_name") | quote }}
+    {{- end }}
+    {{- /*
+    query_data reads through the read-only user templates/clickhouse-reader-users.yaml
+    creates, which exists only where the bundled ClickHouse mounts it: not when an
+    operator points CLICKHOUSE_HOST elsewhere.
+    */}}
+    {{- if and (include "nudgebee-agent.clickhouseReader" .) (not (has "CLICKHOUSE_HOST" $envVarNames)) (not (has "CLICKHOUSE_READER_USER" $envVarNames)) }}
+    - name: CLICKHOUSE_READER_USER
+      value: nudgebee_reader
     {{- end }}
     {{- end }}
     {{- /*

@@ -517,7 +517,23 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	} else {
 		logger.Info("query_data registered without ClickHouse — returns empty result")
 	}
-	handlers["query_data"] = enrichers.QueryData(ch)
+	// query_data runs SQL the backend sends, LLM-written log queries included, so
+	// it goes through the read-only user with query limits when the chart
+	// provides one. Schema changes, the trace enricher and the service map keep
+	// the admin client.
+	queryCh := ch
+	if ch != nil && cfg.ClickHouseReaderUser != "" {
+		queryCh = chclient.New(chclient.Config{
+			Host:       cfg.ClickHouseHost,
+			Port:       cfg.ClickHousePort,
+			User:       cfg.ClickHouseReaderUser,
+			Password:   cfg.ClickHousePassword,
+			Database:   cfg.ClickHouseDB,
+			SSLEnabled: cfg.ClickHouseSSL,
+		})
+		logger.Info("query_data uses the read-only ClickHouse user", "user", cfg.ClickHouseReaderUser)
+	}
+	handlers["query_data"] = enrichers.QueryData(queryCh)
 	lightActions["query_data"] = struct{}{}
 
 	// The service map can read its eBPF metrics from the same ClickHouse; the
@@ -1128,7 +1144,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
-				chLogsPresent, chLogsErr, chLogsTable := clickhouseLogsStatus(probeCtx, ch, cfg.ClickHouseLogsDatabase, cfg.ClickHouseLogsTable)
+				chLogsPresent, chLogsErr, chLogsTable := clickhouseLogsStatus(probeCtx, queryCh, cfg.ClickHouseLogsDatabase, cfg.ClickHouseLogsTable)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              promClient.URL(),
@@ -1499,7 +1515,7 @@ func clickhouseLogsStatus(ctx context.Context, ch *chclient.Client, database, ta
 	case err != nil:
 		return false, "ClickHouse logs table check failed: " + err.Error(), checked
 	case !present:
-		return false, fmt.Sprintf("ClickHouse logs table %s is not present: nothing writes logs to it", checked), checked
+		return false, fmt.Sprintf("ClickHouse logs table %s is not present, or not visible to this ClickHouse user", checked), checked
 	}
 	return true, "", checked
 }

@@ -81,7 +81,10 @@ type QueryResult struct {
 	Error       *string  `json:"error"`
 }
 
-// Query runs the SQL via /?database=...&user=...&password=... POST. The
+// Query runs the SQL via a POST to /?database=..., with the credentials as HTTP
+// Basic auth rather than URL parameters: a connection error repeats the URL, and
+// errors are reported to the backend and shown in the UI. With no user set it
+// sends ClickHouse's "default". The
 // legacy equivalent is db.run_query(query, values). `values` (positional
 // bind params) are spliced into the query the same way clickhouse-connect
 // does — we accept them but rely on ClickHouse's parameterized-query
@@ -109,22 +112,21 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 
 	v := url.Values{}
 	v.Set("database", c.Database)
-	if c.User != "" {
-		v.Set("user", c.User)
-	}
-	if c.Password != "" {
-		v.Set("password", c.Password)
-	}
 	endpoint := c.BaseURL + "/?" + v.Encode()
 
-	// Errors below quote the request URL, which carries the password in its
-	// query (and CLICKHOUSE_HOST may carry userinfo). They reach logs, action
-	// results and the telemetry report, so scrub them here, once.
+	// Errors below quote the request URL. The password isn't in it (it goes as
+	// Basic auth), but CLICKHOUSE_HOST may carry userinfo. They reach logs,
+	// action results and the telemetry report, so scrub them here, once.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(q))
 	if err != nil {
 		return nil, errors.New(redact.Text(err.Error()))
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	user := c.User
+	if user == "" {
+		user = "default"
+	}
+	req.SetBasicAuth(user, c.Password)
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
