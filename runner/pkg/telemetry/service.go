@@ -547,11 +547,16 @@ func redactURL(raw string) string {
 	if i := strings.Index(raw, "://"); i >= 0 {
 		prefix, rest = raw[:i+3], raw[i+3:]
 	}
-	// Everything up to the last '@' is userinfo unless that '@' sits in the
-	// query — a password may itself contain '/', so the path boundary can't
-	// be trusted here, and over-trimming beats leaking the credential.
-	at := strings.LastIndex(rest, "@")
-	if q := strings.Index(rest, "?"); q >= 0 && q < at {
+	// Userinfo ends at the last '@' ahead of the query — a password may itself
+	// contain '/', so the path boundary can't be trusted here, and
+	// over-trimming beats leaking the credential. An '@' inside the query
+	// belongs to the query, not the userinfo.
+	head := rest
+	if q := strings.Index(rest, "?"); q >= 0 {
+		head = rest[:q]
+	}
+	at := strings.LastIndex(head, "@")
+	if at < 0 {
 		return raw
 	}
 	return prefix + rest[at+1:]

@@ -573,15 +573,18 @@ func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
 
 func TestRedactURL(t *testing.T) {
 	cases := map[string]string{
-		"":                                       "",
-		"http://prometheus.monitoring.svc:9090":  "http://prometheus.monitoring.svc:9090",
-		"https://user:secret@example.com/prom":   "https://example.com/prom",
-		"https://user@example.com:8443/loki":     "https://example.com:8443/loki",
-		"https://u:p%40ss@example.com/x?q=a@b":   "https://example.com/x?q=a@b",
-		"https://user:pa/ss#1@example.com/loki":  "https://example.com/loki",
-		"default:secret@clickhouse.example.com":  "clickhouse.example.com",
-		"clickhouse.example.com":                 "clickhouse.example.com",
-		"http://example.com/path?email=a@b.test": "http://example.com/path?email=a@b.test",
+		"":                                                       "",
+		"http://prometheus.monitoring.svc:9090":                  "http://prometheus.monitoring.svc:9090",
+		"https://user:secret@example.com/prom":                   "https://example.com/prom",
+		"https://user@example.com:8443/loki":                     "https://example.com:8443/loki",
+		"https://u:p%40ss@example.com/x?q=a@b":                   "https://example.com/x?q=a@b",
+		"https://user:pa/ss#1@example.com/loki":                  "https://example.com/loki",
+		"default:secret@clickhouse.example.com":                  "clickhouse.example.com",
+		"clickhouse.example.com":                                 "clickhouse.example.com",
+		"http://example.com/path?email=a@b.test":                 "http://example.com/path?email=a@b.test",
+		"default:secret@clickhouse.example.com/db?user=a@b.test": "clickhouse.example.com/db?user=a@b.test",
+		"https://user:pa/ss@example.com/x?email=a@b.test":        "https://example.com/x?email=a@b.test",
+		"clickhouse.example.com/db?user=a@b.test":                "clickhouse.example.com/db?user=a@b.test",
 	}
 	for in, want := range cases {
 		if got := redactURL(in); got != want {
