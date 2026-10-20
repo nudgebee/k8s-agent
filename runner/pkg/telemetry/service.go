@@ -23,10 +23,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // ActivityStats is the activity-stats payload. Pydantic on the legacy side
@@ -472,16 +472,19 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	out.ClickhouseLogsConnectionError = ds.ClickHouseLogsTableError
 	out.ClickhouseLogsTable = ds.ClickHouseLogsTable
 
-	redactReportedURLs(&out)
+	redactReportedURLs(&out, ds)
 	return out
 }
 
-// redactReportedURLs strips credentials from every datasource URL in the
-// report. Operators commonly configure basic auth inline
+// redactReportedURLs strips credentials from everything in the report that
+// can carry a datasource URL. Operators commonly configure basic auth inline
 // (https://user:pass@host); the probes above need it, but activity_stats is
 // stored as the agent's connection status and rendered verbatim in the UI, so
 // the userinfo must not leave the cluster.
-func redactReportedURLs(out *ActivityStats) {
+//
+// TestRedactReportedURLs_CoversEveryField fails when a URL or error field is
+// added to ActivityStats without being listed here.
+func redactReportedURLs(out *ActivityStats, ds Datasources) {
 	for _, f := range []*string{
 		&out.PrometheusURL,
 		&out.AlertManagerURL,
@@ -490,10 +493,8 @@ func redactReportedURLs(out *ActivityStats) {
 		&out.TracesURL,
 		&out.AgentURL,
 	} {
-		*f = redactURL(*f)
+		*f = redact.URL(*f)
 	}
-	// Probe failures quote the URL they hit. net/http masks the password as
-	// "***" but keeps the username, and other clients may not mask at all.
 	for _, f := range []*string{
 		&out.PrometheusConnectionError,
 		&out.AlertManagerConnectionError,
@@ -502,64 +503,47 @@ func redactReportedURLs(out *ActivityStats) {
 		&out.TracesConnectionError,
 		&out.ClickhouseLogsConnectionError,
 	} {
-		*f = redactURLsInText(*f)
+		*f = redact.Text(*f)
 	}
-	if v, ok := out.LogProviderConfig["url"].(string); ok {
-		// Copy rather than mutate: the map comes from the caller's Datasources.
-		cfg := make(map[string]any, len(out.LogProviderConfig))
-		for k, val := range out.LogProviderConfig {
-			cfg[k] = val
+	// A URL whose credentials the client misread fails with an error that can
+	// quote fragments of them outside any URL. Report the cause instead.
+	for _, p := range []struct {
+		url string
+		err *string
+	}{
+		{ds.PrometheusURL, &out.PrometheusConnectionError},
+		{ds.AlertManagerURL, &out.AlertManagerConnectionError},
+		{ds.LogsProviderURL, &out.LogsConnectionError},
+		{ds.OpencostURL, &out.OpencostConnectionError},
+		{ds.ClickHouseURL, &out.TracesConnectionError},
+		{ds.ClickHouseURL, &out.ClickhouseLogsConnectionError},
+	} {
+		if *p.err != "" && redact.Misparsed(p.url) {
+			*p.err = redact.MisparsedMessage
 		}
-		cfg["url"] = redactURL(v)
-		out.LogProviderConfig = cfg
 	}
+	for i, e := range out.Errors {
+		out.Errors[i] = redact.Text(e)
+	}
+	out.LogProviderConfig = redactConfigURLs(out.LogProviderConfig)
+	out.TraceProviderConfig = redactConfigURLs(out.TraceProviderConfig)
 }
 
-// urlUserinfo matches the `user:pass@` part of a URL embedded in free text.
-var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#"'@]+@`)
-
-// redactURLsInText drops userinfo from every URL quoted in s, e.g. an error
-// like `Get "https://user:***@host/-/healthy": dial tcp ...`.
-func redactURLsInText(s string) string {
-	if !strings.Contains(s, "@") {
-		return s
+// redactConfigURLs returns a copy of a provider config map with every string
+// value passed through redact.URL — any of them may be an endpoint. It copies
+// rather than mutates because the map comes from the caller's Datasources.
+func redactConfigURLs(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
 	}
-	return urlUserinfo.ReplaceAllString(s, "$1")
-}
-
-// redactURL drops the `user:pass@` userinfo from a URL, leaving the rest
-// intact. Handles both full URLs and the scheme-less `user:pass@host[:port]`
-// form CLICKHOUSE_HOST accepts. Values without userinfo are returned as-is.
-func redactURL(raw string) string {
-	if !strings.Contains(raw, "@") {
-		return raw
-	}
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
-		if u.User == nil {
-			return raw
+	out := make(map[string]any, len(cfg))
+	for k, v := range cfg {
+		if s, ok := v.(string); ok {
+			v = redact.URL(s)
 		}
-		u.User = nil
-		return u.String()
+		out[k] = v
 	}
-	// Unparseable (e.g. an unescaped reserved char in the password) or
-	// scheme-less: cut the userinfo out of the authority by hand.
-	prefix, rest := "", raw
-	if i := strings.Index(raw, "://"); i >= 0 {
-		prefix, rest = raw[:i+3], raw[i+3:]
-	}
-	// Userinfo ends at the last '@' ahead of the query — a password may itself
-	// contain '/', so the path boundary can't be trusted here, and
-	// over-trimming beats leaking the credential. An '@' inside the query
-	// belongs to the query, not the userinfo.
-	head := rest
-	if q := strings.Index(rest, "?"); q >= 0 {
-		head = rest[:q]
-	}
-	at := strings.LastIndex(head, "@")
-	if at < 0 {
-		return raw
-	}
-	return prefix + rest[at+1:]
+	return out
 }
 
 // traceStatus mirrors get_trace_status.

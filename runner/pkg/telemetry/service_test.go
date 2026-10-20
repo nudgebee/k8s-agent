@@ -8,10 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // TestService_PostsActivityStatsWithProbedStatus stands up fake datasources
@@ -571,39 +574,62 @@ func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
 	}
 }
 
-func TestRedactURL(t *testing.T) {
-	cases := map[string]string{
-		"":                                                       "",
-		"http://prometheus.monitoring.svc:9090":                  "http://prometheus.monitoring.svc:9090",
-		"https://user:secret@example.com/prom":                   "https://example.com/prom",
-		"https://user@example.com:8443/loki":                     "https://example.com:8443/loki",
-		"https://u:p%40ss@example.com/x?q=a@b":                   "https://example.com/x?q=a@b",
-		"https://user:pa/ss#1@example.com/loki":                  "https://example.com/loki",
-		"default:secret@clickhouse.example.com":                  "clickhouse.example.com",
-		"clickhouse.example.com":                                 "clickhouse.example.com",
-		"http://example.com/path?email=a@b.test":                 "http://example.com/path?email=a@b.test",
-		"default:secret@clickhouse.example.com/db?user=a@b.test": "clickhouse.example.com/db?user=a@b.test",
-		"https://user:pa/ss@example.com/x?email=a@b.test":        "https://example.com/x?email=a@b.test",
-		"clickhouse.example.com/db?user=a@b.test":                "clickhouse.example.com/db?user=a@b.test",
+// TestRedactReportedURLs_CoversEveryField is the guard for redactReportedURLs'
+// explicit field lists: it fills every URL-, error- or config-shaped field of
+// ActivityStats with a credential-bearing URL, so a field added later without
+// being redacted fails here instead of shipping credentials to the UI.
+func TestRedactReportedURLs_CoversEveryField(t *testing.T) {
+	const leaky = "https://user:pw@host.example.com/x"
+	var stats ActivityStats
+	v := reflect.ValueOf(&stats).Elem()
+	var filled []string
+	for i := 0; i < v.NumField(); i++ {
+		name := strings.ToLower(strings.Split(v.Type().Field(i).Tag.Get("json"), ",")[0])
+		f := v.Field(i)
+		switch {
+		case f.Kind() == reflect.String && (strings.Contains(name, "url") || strings.Contains(name, "error")):
+			f.SetString(leaky)
+		case f.Type() == reflect.TypeOf([]string{}) && strings.Contains(name, "error"):
+			f.Set(reflect.ValueOf([]string{leaky}))
+		case f.Type() == reflect.TypeOf(map[string]any{}):
+			f.Set(reflect.ValueOf(map[string]any{"endpoint": leaky}))
+		default:
+			continue
+		}
+		filled = append(filled, name)
 	}
-	for in, want := range cases {
-		if got := redactURL(in); got != want {
-			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
+	if len(filled) < 10 {
+		t.Fatalf("filled only %v; the field filter no longer matches ActivityStats", filled)
+	}
+
+	redactReportedURLs(&stats, Datasources{})
+
+	v = reflect.ValueOf(stats)
+	for i := 0; i < v.NumField(); i++ {
+		if b, _ := json.Marshal(v.Field(i).Interface()); strings.Contains(string(b), "pw") {
+			t.Errorf("%s still carries credentials after redaction: %s — add it to redactReportedURLs",
+				v.Type().Field(i).Name, b)
 		}
 	}
 }
 
-func TestRedactURLsInText(t *testing.T) {
-	cases := map[string]string{
-		"":         "",
-		"HTTP 401": "HTTP 401",
-		`prometheus get /api/v1/query: Get "https://user:***@prom.example.com/api/v1/query": dial tcp 192.0.2.1:443: i/o timeout`: `prometheus get /api/v1/query: Get "https://prom.example.com/api/v1/query": dial tcp 192.0.2.1:443: i/o timeout`,
-		"a http://u:p@a.example.com and https://b.example.com/x@y":                                                                "a http://a.example.com and https://b.example.com/x@y",
-		"contact admin@example.com": "contact admin@example.com",
-	}
-	for in, want := range cases {
-		if got := redactURLsInText(in); got != want {
-			t.Errorf("redactURLsInText(%q) = %q, want %q", in, got, want)
+// A misread URL's error can name the username as a host ("lookup user: no
+// such host") or quote a password fragment as a port — neither inside a URL.
+func TestProbe_MisparsedURLErrorReplaced(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	got := s.probe(context.Background(), Datasources{
+		PrometheusURL:            "https://admin:12?secret@prom.example.com",
+		PrometheusConnectedError: `Get "https://prom.example.com/api/v1/query": dial tcp: lookup admin: no such host`,
+		ClickHouseStatus:         false,
+		ClickHouseURL:            "admin:se/cret@clickhouse.example.com",
+		ClickHouseError:          `ClickHouse ping failed: invalid port ":se" after host`,
+	})
+	for name, e := range map[string]string{
+		"prometheus": got.PrometheusConnectionError,
+		"traces":     got.TracesConnectionError,
+	} {
+		if e != redact.MisparsedMessage {
+			t.Errorf("%s error = %q, want the misparsed-credentials message", name, e)
 		}
 	}
 }

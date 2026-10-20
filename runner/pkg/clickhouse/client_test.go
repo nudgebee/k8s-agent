@@ -157,3 +157,34 @@ func TestBaseTypeStripsNullable(t *testing.T) {
 		t.Error("baseType modified bare type")
 	}
 }
+
+// Every Query error quotes the request URL, which carries the password in its
+// query and any userinfo from CLICKHOUSE_HOST. Those errors reach logs, action
+// results and the telemetry report.
+func TestQuery_ErrorsHideCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	for _, host := range []string{
+		addr,                              // connection refused
+		"http://hostuser:hostpw@" + addr,  // userinfo in the host URL
+		"http://hostuser:ho/stpw@" + addr, // unencoded '/': fails to parse
+	} {
+		c := New(Config{Host: host, Database: "default", User: "default", Password: "s3cr3t-pw"})
+		res, err := c.Query(context.Background(), "SELECT 1", nil)
+		msg := ""
+		switch {
+		case err != nil:
+			msg = err.Error()
+		case res != nil && res.Error != nil:
+			msg = *res.Error
+		default:
+			t.Fatalf("host %q: Query succeeded against a closed port", host)
+		}
+		for _, secret := range []string{"s3cr3t-pw", "hostpw", "stpw"} {
+			if strings.Contains(msg, secret) {
+				t.Errorf("host %q: error leaks %q: %s", host, secret, msg)
+			}
+		}
+	}
+}

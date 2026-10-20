@@ -57,6 +57,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/podexec"
 	"github.com/nudgebee/nudgebee-agent/pkg/podrunner"
 	"github.com/nudgebee/nudgebee-agent/pkg/podshell"
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 	"github.com/nudgebee/nudgebee-agent/pkg/rightsize"
@@ -217,19 +218,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.PrometheusURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.PrometheusSelectors); u != "" {
 			cfg.PrometheusURL = u
-			logger.Info("prometheus auto-discovered", "url", u)
+			logger.Info("prometheus auto-discovered", "url", redact.URL(u))
 		}
 	}
 	if cfg.LokiURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.LokiSelectors); u != "" {
 			cfg.LokiURL = u
-			logger.Info("loki auto-discovered", "url", u)
+			logger.Info("loki auto-discovered", "url", redact.URL(u))
 		}
 	}
 	if cfg.AlertManagerURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.AlertManagerSelectors); u != "" {
 			cfg.AlertManagerURL = u
-			logger.Info("alertmanager auto-discovered", "url", u)
+			logger.Info("alertmanager auto-discovered", "url", redact.URL(u))
 		}
 	}
 	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
@@ -254,12 +255,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if opencostURL == "" {
 			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
 				opencostURL = u
-				logger.Info("opencost auto-discovered", "url", u)
+				logger.Info("opencost auto-discovered", "url", redact.URL(u))
 			}
 		}
 	} else {
 		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
 	}
+
+	warnMisparsedCredentials(logger, map[string]string{
+		"PROMETHEUS_URL":    cfg.PrometheusURL,
+		"LOKI_URL":          cfg.LokiURL,
+		"LOKI_RULES_URL":    cfg.LokiRulesURL,
+		"ALERTMANAGER_URL":  cfg.AlertManagerURL,
+		"OPENCOST_ENDPOINT": opencostURL,
+		"ELASTICSEARCH_URL": cfg.ElasticsearchURL,
+		"SIGNOZ_URL":        cfg.SignozURL,
+		"JAEGER_URL":        cfg.JaegerURL,
+		"CHRONOSPHERE_URL":  cfg.ChronosphereURL,
+		"PINOT_URL":         cfg.PinotURL,
+		"CLICKHOUSE_HOST":   cfg.ClickHouseHost,
+	})
 
 	// The client is built whether or not we have a URL yet. Its actions stay
 	// registered either way and begin working the moment one is discovered
@@ -300,7 +315,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	for name := range ph {
 		lightActions[name] = struct{}{}
 	}
-	logger.Info("prometheus actions registered", "url", promClient.URL(), "actions", len(ph))
+	logger.Info("prometheus actions registered", "url", redact.URL(promClient.URL()), "actions", len(ph))
 
 	// Enrichers: prometheus_enricher / prometheus_queries_enricher
 	// produce Finding-shaped responses; api-server's relay.ExecuteAndExtractResponse
@@ -381,7 +396,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		for name := range ch {
 			lightActions[name] = struct{}{}
 		}
-		logger.Info("loki enabled", "url", cfg.LokiURL, "actions", len(lh)+len(ch))
+		logger.Info("loki enabled", "url", redact.URL(cfg.LokiURL), "actions", len(lh)+len(ch))
 	}
 
 	esEnabled := cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != ""
@@ -396,7 +411,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	ec.ExtraHeaders = config.ParseHeaders(cfg.ElasticsearchHeaders)
 	registerProxy("elasticsearch", esEnabled, elasticsearch.Handlers(ec))
 	if esEnabled {
-		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL)
+		logger.Info("elasticsearch enabled", "url", redact.URL(cfg.ElasticsearchURL))
 	}
 
 	sc := signoz.New(cfg.SignozURL, nil)
@@ -405,7 +420,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	sc.Password = cfg.SignozPassword
 	registerProxy("signoz", cfg.SignozURL != "", signoz.Handlers(sc))
 	if cfg.SignozURL != "" {
-		logger.Info("signoz enabled", "url", cfg.SignozURL)
+		logger.Info("signoz enabled", "url", redact.URL(cfg.SignozURL))
 	}
 
 	// Log which single logs provider will be reported to the UI and why —
@@ -414,7 +429,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// ELASTICSEARCH_URL hiding SigNoz). Making the winner explicit turns that
 	// class of "I configured X but see Y" into a one-line grep.
 	if provider, url := selectedLogsProvider(cfg); provider != "" {
-		logger.Info("logs provider selected", "provider", provider, "url", url)
+		logger.Info("logs provider selected", "provider", provider, "url", redact.URL(url))
 	} else {
 		logger.Info("logs provider: none configured")
 	}
@@ -423,14 +438,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	jc.Token = cfg.JaegerToken
 	registerProxy("jaeger", cfg.JaegerURL != "", jaeger.Handlers(jc))
 	if cfg.JaegerURL != "" {
-		logger.Info("jaeger enabled", "url", cfg.JaegerURL)
+		logger.Info("jaeger enabled", "url", redact.URL(cfg.JaegerURL))
 	}
 
 	cc := chronosphere.New(cfg.ChronosphereURL, nil)
 	cc.APIKey = cfg.ChronosphereAPIKey
 	registerProxy("chronosphere", cfg.ChronosphereURL != "", chronosphere.Handlers(cc))
 	if cfg.ChronosphereURL != "" {
-		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL)
+		logger.Info("chronosphere enabled", "url", redact.URL(cfg.ChronosphereURL))
 	}
 
 	pc := pinot.New(cfg.PinotURL, nil)
@@ -439,7 +454,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	pc.Password = cfg.PinotPassword
 	registerProxy("pinot", cfg.PinotURL != "", pinot.Handlers(pc))
 	if cfg.PinotURL != "" {
-		logger.Info("pinot enabled", "url", cfg.PinotURL)
+		logger.Info("pinot enabled", "url", redact.URL(cfg.PinotURL))
 	}
 
 	targets := config.ParseTargets(cfg.HTTPProxyTargets)
@@ -498,7 +513,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			Database:   cfg.ClickHouseDB,
 			SSLEnabled: cfg.ClickHouseSSL,
 		})
-		logger.Info("query_data enabled", "host", cfg.ClickHouseHost, "port", cfg.ClickHousePort, "db", cfg.ClickHouseDB)
+		logger.Info("query_data enabled", "host", redact.URL(cfg.ClickHouseHost), "port", cfg.ClickHousePort, "db", cfg.ClickHouseDB)
 	} else {
 		logger.Info("query_data registered without ClickHouse — returns empty result")
 	}
@@ -817,7 +832,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		gp.PrometheusURLFn = promClient.URL
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
-			logger.Info("grafana proxy enabled", "url", grafanaURL)
+			logger.Info("grafana proxy enabled", "url", redact.URL(grafanaURL))
 		} else {
 			logger.Info("api proxy enabled (grafana unset; APIProxy still routed via X-API-Base-URL)")
 		}
@@ -857,7 +872,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		g.Go(func() error {
 			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
 				promClient.SetURL(u)
-				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", u)
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", redact.URL(u))
 			})
 			return nil
 		})
@@ -1462,7 +1477,7 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, "CLICKHOUSE_HOST is not set: no traces backend is configured"
 	}
 	if err := httpProbeErr(ctx, c, fmt.Sprintf("http://%s:%s/ping", host, port)); err != nil {
-		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
+		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redact.URL(host), port, probeCause(err))
 	}
 	return true, ""
 }
@@ -1542,19 +1557,17 @@ func probeCause(err error) error {
 	return err
 }
 
-// redactUserinfo strips a `user:pass@` prefix from a host. CLICKHOUSE_HOST may
-// be a full URL rather than a bare host (pkg/clickhouse normalizes both forms),
-// and the reason string built above lands in the agent's connection_status
-// JSON, which the UI renders as-is — credentials must not ride along.
-func redactUserinfo(host string) string {
-	at := strings.LastIndex(host, "@")
-	if at < 0 {
-		return host
+// warnMisparsedCredentials flags datasource URLs whose inline credentials the
+// HTTP client will misread (see redact.Misparsed). Such a datasource cannot
+// connect, and the misread is otherwise visible only through confusing errors
+// like "lookup <username>: no such host".
+func warnMisparsedCredentials(logger *slog.Logger, urls map[string]string) {
+	for env, u := range urls {
+		if redact.Misparsed(u) {
+			logger.Warn("datasource URL credentials are not percent-encoded and will not be sent as credentials",
+				"env", env, "url", redact.URL(u))
+		}
 	}
-	if scheme := strings.Index(host, "://"); scheme >= 0 && scheme+3 <= at {
-		return host[:scheme+3] + host[at+1:]
-	}
-	return host[at+1:]
 }
 
 // fetchSignozVersion GETs Signoz's /api/v1/version and returns the reported
