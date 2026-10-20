@@ -570,3 +570,73 @@ func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactURL(t *testing.T) {
+	cases := map[string]string{
+		"":                                       "",
+		"http://prometheus.monitoring.svc:9090":  "http://prometheus.monitoring.svc:9090",
+		"https://user:secret@example.com/prom":   "https://example.com/prom",
+		"https://user@example.com:8443/loki":     "https://example.com:8443/loki",
+		"https://u:p%40ss@example.com/x?q=a@b":   "https://example.com/x?q=a@b",
+		"https://user:pa/ss#1@example.com/loki":  "https://example.com/loki",
+		"default:secret@clickhouse.example.com":  "clickhouse.example.com",
+		"clickhouse.example.com":                 "clickhouse.example.com",
+		"http://example.com/path?email=a@b.test": "http://example.com/path?email=a@b.test",
+	}
+	for in, want := range cases {
+		if got := redactURL(in); got != want {
+			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRedactURLsInText(t *testing.T) {
+	cases := map[string]string{
+		"":         "",
+		"HTTP 401": "HTTP 401",
+		`prometheus get /api/v1/query: Get "https://user:***@prom.example.com/api/v1/query": dial tcp 192.0.2.1:443: i/o timeout`: `prometheus get /api/v1/query: Get "https://prom.example.com/api/v1/query": dial tcp 192.0.2.1:443: i/o timeout`,
+		"a http://u:p@a.example.com and https://b.example.com/x@y":                                                                "a http://a.example.com and https://b.example.com/x@y",
+		"contact admin@example.com": "contact admin@example.com",
+	}
+	for in, want := range cases {
+		if got := redactURLsInText(in); got != want {
+			t.Errorf("redactURLsInText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProbe_RedactsURLCredentials(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	logCfg := map[string]any{"url": "https://user:secret@loki.example.com"}
+	ds := Datasources{
+		PrometheusURL:     "https://user:secret@prom.example.com",
+		LogsProvider:      "loki",
+		LogsProviderURL:   "https://user:secret@loki.example.com",
+		LogProviderConfig: logCfg,
+		ClickHouseStatus:  true,
+		ClickHouseURL:     "default:secret@clickhouse.example.com",
+		// net/http masks only the password; the username must go too.
+		PrometheusConnectedError: `Get "https://user:***@prom.example.com/api/v1/query": EOF`,
+		LogsProviderError:        `Get "https://secret@loki.example.com/ready": EOF`,
+	}
+	body, err := json.Marshal(s.probe(context.Background(), ds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "secret") || strings.Contains(string(body), "user") {
+		t.Fatalf("credentials leaked into the report: %s", body)
+	}
+	for _, want := range []string{"https://prom.example.com", "https://loki.example.com", "clickhouse.example.com"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("report missing %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{`Get \"https://prom.example.com/api/v1/query\": EOF`, `Get \"https://loki.example.com/ready\": EOF`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("report missing redacted error %q: %s", want, body)
+		}
+	}
+	if logCfg["url"] != "https://user:secret@loki.example.com" {
+		t.Errorf("caller's LogProviderConfig was mutated: %v", logCfg["url"])
+	}
+}

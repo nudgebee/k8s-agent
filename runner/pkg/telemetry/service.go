@@ -23,6 +23,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -470,7 +472,89 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	out.ClickhouseLogsConnectionError = ds.ClickHouseLogsTableError
 	out.ClickhouseLogsTable = ds.ClickHouseLogsTable
 
+	redactReportedURLs(&out)
 	return out
+}
+
+// redactReportedURLs strips credentials from every datasource URL in the
+// report. Operators commonly configure basic auth inline
+// (https://user:pass@host); the probes above need it, but activity_stats is
+// stored as the agent's connection status and rendered verbatim in the UI, so
+// the userinfo must not leave the cluster.
+func redactReportedURLs(out *ActivityStats) {
+	for _, f := range []*string{
+		&out.PrometheusURL,
+		&out.AlertManagerURL,
+		&out.LogProviderURL,
+		&out.OpencostURL,
+		&out.TracesURL,
+		&out.AgentURL,
+	} {
+		*f = redactURL(*f)
+	}
+	// Probe failures quote the URL they hit. net/http masks the password as
+	// "***" but keeps the username, and other clients may not mask at all.
+	for _, f := range []*string{
+		&out.PrometheusConnectionError,
+		&out.AlertManagerConnectionError,
+		&out.LogsConnectionError,
+		&out.OpencostConnectionError,
+		&out.TracesConnectionError,
+		&out.ClickhouseLogsConnectionError,
+	} {
+		*f = redactURLsInText(*f)
+	}
+	if v, ok := out.LogProviderConfig["url"].(string); ok {
+		// Copy rather than mutate: the map comes from the caller's Datasources.
+		cfg := make(map[string]any, len(out.LogProviderConfig))
+		for k, val := range out.LogProviderConfig {
+			cfg[k] = val
+		}
+		cfg["url"] = redactURL(v)
+		out.LogProviderConfig = cfg
+	}
+}
+
+// urlUserinfo matches the `user:pass@` part of a URL embedded in free text.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#"'@]+@`)
+
+// redactURLsInText drops userinfo from every URL quoted in s, e.g. an error
+// like `Get "https://user:***@host/-/healthy": dial tcp ...`.
+func redactURLsInText(s string) string {
+	if !strings.Contains(s, "@") {
+		return s
+	}
+	return urlUserinfo.ReplaceAllString(s, "$1")
+}
+
+// redactURL drops the `user:pass@` userinfo from a URL, leaving the rest
+// intact. Handles both full URLs and the scheme-less `user:pass@host[:port]`
+// form CLICKHOUSE_HOST accepts. Values without userinfo are returned as-is.
+func redactURL(raw string) string {
+	if !strings.Contains(raw, "@") {
+		return raw
+	}
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		if u.User == nil {
+			return raw
+		}
+		u.User = nil
+		return u.String()
+	}
+	// Unparseable (e.g. an unescaped reserved char in the password) or
+	// scheme-less: cut the userinfo out of the authority by hand.
+	prefix, rest := "", raw
+	if i := strings.Index(raw, "://"); i >= 0 {
+		prefix, rest = raw[:i+3], raw[i+3:]
+	}
+	// Everything up to the last '@' is userinfo unless that '@' sits in the
+	// query — a password may itself contain '/', so the path boundary can't
+	// be trusted here, and over-trimming beats leaking the credential.
+	at := strings.LastIndex(rest, "@")
+	if q := strings.Index(rest, "?"); q >= 0 && q < at {
+		return raw
+	}
+	return prefix + rest[at+1:]
 }
 
 // traceStatus mirrors get_trace_status.
