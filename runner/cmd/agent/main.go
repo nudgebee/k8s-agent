@@ -1173,6 +1173,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseLogsTablePresent: chLogsPresent,
 					ClickHouseLogsTableError:   chLogsErr,
 					ClickHouseLogsTable:        chLogsTable,
+					ClickHouseLogsCollected:    cfg.ClickHouseLogsCollected,
 					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),

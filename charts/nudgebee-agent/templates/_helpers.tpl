@@ -124,9 +124,41 @@ reader nor the mount; in both cases the user doesn't exist, so nothing names it.
 {{- end -}}
 
 {{/*
+The cluster's container-log collection mode (logs.collection), validated:
+"none" (default) or "node-agent". One mode per cluster, so no second source
+double-ingests. The runner reports clickhouseLogsCollected from it, so the
+report can't disagree with what the chart deploys.
+*/}}
+{{- define "nudgebee-agent.logsCollection" -}}
+{{- $mode := dig "collection" "none" (default (dict) .Values.logs) | default "none" -}}
+{{- if eq $mode "node-agent" -}}
+{{- if not (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") -}}
+{{- fail "logs.collection=node-agent sends container logs to ClickHouse through the bundled OpenTelemetry collector: set opentelemetry-collector.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.nodeAgent.enabled -}}
+{{- fail "logs.collection=node-agent needs nodeAgent.enabled=true" -}}
+{{- end -}}
+{{- if .Values.nodeAgent.logsEndpoint -}}
+{{- fail "logs.collection=node-agent sets the node-agent's logs endpoint itself: unset nodeAgent.logsEndpoint" -}}
+{{- end -}}
+{{- range (default (list) .Values.nodeAgent.env) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "LOGS_ENDPOINT") -}}
+{{- fail "logs.collection=node-agent sets the node-agent's logs endpoint itself: remove LOGS_ENDPOINT from nodeAgent.env" -}}
+{{- end -}}
+{{- end -}}
+{{- else if eq $mode "otel-daemonset" -}}
+{{- fail "logs.collection=otel-daemonset is not available yet: use node-agent or none" -}}
+{{- else if ne $mode "none" -}}
+{{- fail (printf "logs.collection must be none or node-agent, not %q" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
+{{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
+{{- $logsCollection := include "nudgebee-agent.logsCollection" . }}
 - name: runner
   image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
   imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
@@ -300,6 +332,11 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- if and (include "nudgebee-agent.clickhouseReader" .) (not (has "CLICKHOUSE_HOST" $envVarNames)) (not (has "CLICKHOUSE_READER_USER" $envVarNames)) }}
     - name: CLICKHOUSE_READER_USER
       value: nudgebee_reader
+    {{- end }}
+    {{- /* Reported as clickhouseLogsCollected; set only by the switch. */}}
+    {{- if eq $logsCollection "node-agent" }}
+    - name: CLICKHOUSE_LOGS_COLLECTED
+      value: "true"
     {{- end }}
     {{- end }}
     {{- /*

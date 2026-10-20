@@ -258,6 +258,59 @@ jobs:
           done
           echo 'ok: query_data reads through the read-only ClickHouse user'
 
+      # logs.collection is the one switch for where container logs go. node-agent
+      # points the node-agent's log push at the bundled collector and is the only
+      # thing that makes the runner report clickhouseLogsCollected. A value it
+      # can't honour fails the render instead of reporting logs nobody collects.
+      # NODE_NAME is set in node-agent mode only, so other modes keep the
+      # node-agent pod spec as it was. The collector's logs pipeline drops
+      # kube-system and the release namespace.
+      - name: Assert the logs collection switch
+        run: |
+          assert() { # <expected-env-lines> <helm-args...>
+            expected="$1"; shift
+            if ! rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@")"; then
+              echo "helm template $*: render failed"
+              exit 1
+            fi
+            actual="$(printf '%s\n' "$rendered" | grep -A1 -e 'name: LOGS_ENDPOINT' -e 'name: NODE_NAME' -e 'name: CLICKHOUSE_LOGS_COLLECTED' | grep -v '^--$' | tr -d ' ' | paste -sd' ' -)"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: expected [$expected], got [$actual]"
+              exit 1
+            fi
+          }
+          refuses() { # <message-fragment> <helm-args...>
+            want="$1"; shift
+            if out="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@" 2>&1)"; then
+              echo "helm template $*: rendered; expected it to fail with [$want]"
+              exit 1
+            fi
+            case "$out" in *"$want"*) ;; *) echo "helm template $*: failed with [$out], expected [$want]"; exit 1 ;; esac
+          }
+          assert ''
+          assert '' --set logs.collection=
+          assert '' --set logs.collection=none
+          assert '-name:LOGS_ENDPOINT value:"http://nudgebee-agent-opentelemetry-collector:4318/v1/logs" -name:NODE_NAME valueFrom: -name:CLICKHOUSE_LOGS_COLLECTED value:"true"' \
+            --set logs.collection=node-agent
+          # An operator's own endpoint is theirs: nothing claims the logs reach ClickHouse.
+          assert '-name:LOGS_ENDPOINT value:"http://loki:3100/otlp/v1/logs"' --set nodeAgent.logsEndpoint=http://loki:3100/otlp/v1/logs
+          refuses 'set opentelemetry-collector.enabled=true' --set logs.collection=node-agent --set opentelemetry-collector.enabled=false
+          refuses 'needs nodeAgent.enabled=true' --set logs.collection=node-agent --set nodeAgent.enabled=false
+          refuses 'unset nodeAgent.logsEndpoint' --set logs.collection=node-agent --set nodeAgent.logsEndpoint=http://x:4318/v1/logs
+          refuses 'remove LOGS_ENDPOINT from nodeAgent.env' --set logs.collection=node-agent \
+            --set 'nodeAgent.env[0].name=LOGS_ENDPOINT' --set 'nodeAgent.env[0].value=http://loki:3100/otlp/v1/logs'
+          refuses 'otel-daemonset is not available yet' --set logs.collection=otel-daemonset
+          refuses 'must be none or node-agent' --set logs.collection=loki
+          printf '%s\n' "$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent --set logs.collection=node-agent)" | grep -A3 'name: NODE_NAME' | grep -q 'fieldPath: spec.nodeName' \
+            || { echo 'node-agent NODE_NAME is not spec.nodeName'; exit 1; }
+          # The subchart runs tpl over its config, which fills in the release namespace.
+          rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace ci-logs --set logs.collection=node-agent)"
+          printf '%s\n' "$rendered" | grep -qF 'resource.attributes["k8s.namespace.name"] == "ci-logs"' \
+            || { echo 'filter/drop_log_namespaces does not drop the release namespace'; exit 1; }
+          printf '%s\n' "$rendered" | grep -q -- '- filter/drop_log_namespaces$' \
+            || { echo 'filter/drop_log_namespaces is not in the logs pipeline'; exit 1; }
+          echo 'ok: logs.collection sets the node-agent endpoint, NODE_NAME and clickhouseLogsCollected together'
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz

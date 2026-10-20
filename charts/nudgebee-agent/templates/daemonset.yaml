@@ -49,7 +49,22 @@ spec:
             - name: TRACES_ENDPOINT
               value: "http://{{ include "nudgebee-agent.otelcollector.servicename" . }}:4318/v1/traces"
           {{- end }}
-          {{- if .Values.nodeAgent.logsEndpoint }}
+          {{- if eq (include "nudgebee-agent.logsCollection" .) "node-agent" }}
+            - name: LOGS_ENDPOINT
+              value: "http://{{ include "nudgebee-agent.otelcollector.servicename" . }}:4318/v1/logs"
+          {{- /* Only the log push reads NODE_NAME; in other modes it would change the pod spec and restart every node-agent. */}}
+          {{- $envNames := list }}
+          {{- range (default (list) .Values.nodeAgent.env) }}
+          {{- if kindIs "map" . }}{{ $envNames = append $envNames (get . "name") }}{{ end }}
+          {{- end }}
+          {{- if not (has "NODE_NAME" $envNames) }}
+            # Set on exported log records as k8s.node.name.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          {{- end }}
+          {{- else if .Values.nodeAgent.logsEndpoint }}
             - name: LOGS_ENDPOINT
               value: "{{ .Values.nodeAgent.logsEndpoint }}"
           {{- end }}
