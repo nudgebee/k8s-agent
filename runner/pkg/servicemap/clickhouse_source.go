@@ -407,7 +407,7 @@ func checkCoverage(ctx context.Context, c *chclient.Client, start, end time.Time
 		GROUP BY view_name %s`,
 		start.Unix(), start.Unix(), end.Add(coverageSlack).Unix(), sqlList(qualified), querySettings(ctx)))
 	if err != nil {
-		return fmt.Errorf("servicemap: read summary view failures: %w", err)
+		return fmt.Errorf("servicemap: read summary view failures (needs system.query_views_log enabled): %w", err)
 	}
 	if len(rows) > 0 && len(rows[0]) == 2 {
 		return fmt.Errorf("%w: summary view %s failed %v times in the window", errNotCovered, text(rows[0][0]), num(rows[0][1]))
