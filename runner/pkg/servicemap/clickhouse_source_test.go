@@ -430,7 +430,7 @@ func TestCheckCoverage(t *testing.T) {
 		{"views log created mid-window", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logSince: testEnd.Add(-30 * time.Minute)}, agents(3, nil), false},
 		{"views log expired the window's start", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL event_time + toIntervalHour(1) SETTINGS index_granularity = 8192"}, agents(3, nil), false},
 		{"views log keeps the window", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL event_time + toIntervalYear(100) SETTINGS index_granularity = 8192"}, agents(3, nil), true},
-		{"views log TTL unreadable", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL event_time + INTERVAL 8 DAY + toIntervalHour(1)"}, agents(3, nil), false},
+		{"views log TTL unreadable", &fakeClickHouse{buckets: fullBuckets(testEnd, 3), logEngine: "MergeTree ORDER BY (event_date, event_time) TTL (event_time + toIntervalDay(8)) - toIntervalDay(7) SETTINGS index_granularity = 8192"}, agents(3, nil), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkCoverage(context.Background(), newTestClient(t, tc.ch), testEnd.Add(-time.Hour), testEnd, tc.agents)
@@ -457,6 +457,13 @@ func TestViewsLogRetention(t *testing.T) {
 		{"MergeTree ORDER BY (event_date, event_time) TTL event_time + toIntervalMonth(1)", 28 * 24 * time.Hour, true},
 		{"MergeTree ORDER BY (event_date, event_time) SETTINGS index_granularity = 8192", 0, true},
 		{"MergeTree ORDER BY (event_date, event_time) TTL toDateTime(event_date) + toIntervalDay(8)", 0, false},
+		{"MergeTree ORDER BY (event_date, event_time) TTL event_date + toIntervalWeek(2) SETTINGS index_granularity = 8192", 13 * 24 * time.Hour, true},
+		// As ClickHouse 24.12 renders them. Only a single plain delete rule is
+		// read: a move rule or an unconditional rule can come before the rule
+		// that deletes failure rows sooner.
+		{"MergeTree PARTITION BY toYYYYMMDD(event_date) ORDER BY (event_date, event_time) TTL event_time + toIntervalDay(30) TO VOLUME 'cold', event_time + toIntervalDay(1) SETTINGS storage_policy = 'tiered', index_granularity = 8192", 0, false},
+		{"MergeTree PARTITION BY toYYYYMMDD(event_date) ORDER BY (event_date, event_time) TTL event_time + toIntervalDay(30), event_time + toIntervalDay(1) WHERE status != 'QueryFinish' SETTINGS index_granularity = 8192", 0, false},
+		{"MergeTree PARTITION BY toYYYYMMDD(event_date) ORDER BY (event_date, event_time) TTL (event_time + toIntervalDay(8)) - toIntervalDay(7) SETTINGS index_granularity = 8192", 0, false},
 	} {
 		keep, ok := viewsLogRetention(tc.engine)
 		if keep != tc.keep || ok != tc.ok {

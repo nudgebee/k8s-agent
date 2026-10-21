@@ -175,19 +175,26 @@ func text(v any) string {
 // graph retire edges that still exist.
 var errNotCovered = errors.New("servicemap: clickhouse does not hold node-agent metrics for the whole window")
 
-// viewsLogTTLRe reads the retention out of system.query_views_log's
-// engine_full, e.g. "TTL event_time + toIntervalDay(8)".
-var viewsLogTTLRe = regexp.MustCompile(`\bTTL event_(date|time) \+ toInterval(Second|Minute|Hour|Day|Week|Month|Quarter|Year)\((\d+)\)`)
+// viewsLogTTLRe reads the retention out of the TTL clause of
+// system.query_views_log's engine_full, e.g. "event_time + toIntervalDay(8)".
+// It must match the whole clause: in "event_time + toIntervalDay(30) TO VOLUME
+// 'cold', event_time + toIntervalDay(1)" the first rule only moves rows, and
+// the rule that deletes them comes later.
+var viewsLogTTLRe = regexp.MustCompile(`^event_(date|time) \+ toInterval(Second|Minute|Hour|Day|Week|Month|Quarter|Year)\((\d+)\)$`)
 
 // viewsLogRetention is how far back system.query_views_log is sure to still
 // hold rows, from its engine_full: 0 with ok for no TTL (kept forever), ok
-// false for a TTL it cannot read. Months and years count at their shortest;
-// a TTL on event_date expires a whole day at once, so it keeps a day less.
+// false for a TTL it cannot read: anything but one plain delete rule, since a
+// move or conditional rule may sit before the rule that deletes failure rows.
+// Months and years count at their shortest; a TTL on event_date expires a
+// whole day at once, so it keeps a day less.
 func viewsLogRetention(engineFull string) (keep time.Duration, ok bool) {
-	if !strings.Contains(engineFull, " TTL ") {
+	_, ttl, found := strings.Cut(engineFull, " TTL ")
+	if !found {
 		return 0, true
 	}
-	m := viewsLogTTLRe.FindStringSubmatch(engineFull)
+	ttl, _, _ = strings.Cut(ttl, " SETTINGS ")
+	m := viewsLogTTLRe.FindStringSubmatch(ttl)
 	if m == nil {
 		return 0, false
 	}
