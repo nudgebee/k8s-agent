@@ -1,0 +1,37 @@
+{{- /*
+The ClickHouse alert rules (clickhouse.metrics.prometheusRule.rules), rendered here
+because the Bitnami subchart has no PrometheusRule template: before this file the
+rules in values.yaml were never applied. Gated like the chart's other monitoring
+CRs: the PrometheusRule CRD is registered, or enablePrometheusStack asserts it for
+offline render. Without the gate a cluster with no Prometheus operator fails the
+install on an unregistered CRD. Also needs a ClickHouse ServiceMonitor: with no
+scrape target, ClickHouseInstanceDown would fire forever.
+
+Each rule's expr goes through tpl, so it can match this release's scrape target
+with nudgebee-agent.clickhouse.target. Annotations are left alone, so Prometheus
+templates such as {{ $value }} work there unescaped.
+*/ -}}
+{{- $ch := .Values.clickhouse -}}
+{{- $otel := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}
+{{- $scraped := or (and .Values.enableServiceMonitors $ch.nudgebeeServiceMonitor.enabled) $ch.metrics.serviceMonitor.enabled -}}
+{{- if and $ch.enabled $otel $ch.metrics.enabled $scraped $ch.metrics.prometheusRule.enabled $ch.metrics.prometheusRule.rules (or .Values.enablePrometheusStack (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule")) }}
+{{- $rules := list }}
+{{- range deepCopy $ch.metrics.prometheusRule.rules }}
+{{- $_ := set . "expr" (tpl .expr $) }}
+{{- $rules = append $rules . }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+    {{- include "nudgebee-agent.prometheusSelectorLabels" . | nindent 4 }}
+    component: clickhouse
+spec:
+  groups:
+    - name: clickhouse
+      rules:
+        {{- toYaml $rules | nindent 8 }}
+{{- end }}

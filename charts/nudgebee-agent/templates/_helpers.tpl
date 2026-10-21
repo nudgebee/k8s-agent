@@ -549,6 +549,16 @@ ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse s
 {{- end -}}
 
 {{/*
+PromQL label matchers for this release's ClickHouse scrape target. The Prometheus
+operator labels every ServiceMonitor target with the Service's namespace and name;
+job is the Service name too, unless serviceMonitor.jobLabel renames it.
+*/}}
+{{- define "nudgebee-agent.clickhouse.target" -}}
+{{- $ns := default .Release.Namespace .Values.clickhouse.namespaceOverride | trunc 63 | trimSuffix "-" -}}
+{{- printf "namespace=%q,service=%q" $ns (include "nudgebee-agent.clickhouse.servicename" .) -}}
+{{- end -}}
+
+{{/*
 OpenTelemetry Collector service name - handles fullnameOverride/nameOverride for otel subchart
 */}}
 {{- define "nudgebee-agent.otelcollector.servicename" -}}

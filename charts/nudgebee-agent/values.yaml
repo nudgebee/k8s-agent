@@ -604,7 +604,14 @@ clickhouse:
   # only windows it still covers (without it every map read falls back to
   # Prometheus). It keeps 8 days, longer than the summary tables' 7, in daily
   # partitions dropped whole once expired.
-  extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  #
+  # merge_tree.min_free_disk_ratio_to_perform_insert: inserts into any table stop
+  # while less than 5% of the disk is free, so a filling disk stops ingestion
+  # with room left for merges, TTL part drops and queries, instead of filling up
+  # and failing everything. The ClickHouseDisk* alerts below fire before that.
+  # Refused inserts are retried by the collector for retry_on_failure's
+  # max_elapsed_time, then dropped.
+  extraOverrides: "<clickhouse>\n  <merge_tree>\n    <min_free_disk_ratio_to_perform_insert>0.05</min_free_disk_ratio_to_perform_insert>\n  </merge_tree>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
   # A read-only user for the runner's query_data action, which runs SQL the
   # NudgeBee backend sends (log and trace reads, LLM-written log queries
   # included). It can read and set query settings (readonly=2) but not write
@@ -665,27 +672,51 @@ clickhouse:
       enabled: false
       interval: 30s
       scrapeTimeout: 10s
+    # Rendered by this chart (templates/clickhouse-prometheusrule.yaml), not by
+    # the Bitnami subchart, which has no PrometheusRule template. Each expr goes
+    # through tpl: nudgebee-agent.clickhouse.target expands to this release's
+    # scrape target (namespace="...",service="..."), so the rules never match
+    # another release's ClickHouse in the same Prometheus.
     prometheusRule:
       enabled: true
       rules:
+        # Fires on a failed scrape (up == 0) and when the target is gone
+        # altogether (absent), e.g. the pod cannot be scheduled.
         - alert: ClickHouseInstanceDown
-          expr: up{job="clickhouse"} == 0
+          expr: up{ {{- include "nudgebee-agent.clickhouse.target" . -}} } == 0 or absent(up{ {{- include "nudgebee-agent.clickhouse.target" . -}} })
           for: 2m
           labels:
             severity: critical
           annotations:
             summary: "ClickHouse instance is down"
-            description: "ClickHouse node is not responding for more than 2 minutes."
-        - alert: ClickHouseHighLatency
-          # Divide only where queries ran: with none, rate(_count) is 0 and a
-          # float wobble in _sum turns the ratio into +Inf, firing falsely.
-          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / (rate(clickhouse_query_duration_seconds_count[5m]) > 0) > 1
-          for: 5m
+            description: "Prometheus has not scraped ClickHouse for more than 2 minutes."
+        # Logs, traces and metrics share the ClickHouse disk, and its TTL drops
+        # data by age, not size. Inserts stop at 95% full
+        # (min_free_disk_ratio_to_perform_insert in extraOverrides). ClickHouse
+        # puts the disk name in the metric name (DiskAvailable_<disk>), so
+        # label_replace moves it to a disk label and every disk is covered.
+        - alert: ClickHouseDiskFilling
+          expr: |-
+            1 - label_replace({__name__=~"ClickHouseAsyncMetrics_DiskAvailable_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskAvailable_(.+)")
+              / label_replace({__name__=~"ClickHouseAsyncMetrics_DiskTotal_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskTotal_(.+)")
+              > 0.8
+          for: 10m
           labels:
             severity: warning
           annotations:
-            summary: "High query latency detected on ClickHouse"
-            description: "Average query duration is above 1 second over last 5 minutes."
+            summary: "ClickHouse disk {{ $labels.disk }} is over 80% full"
+            description: "ClickHouse stops accepting logs, traces and metrics at 95%. Enlarge the volume or shorten the retention."
+        - alert: ClickHouseDiskAlmostFull
+          expr: |-
+            1 - label_replace({__name__=~"ClickHouseAsyncMetrics_DiskAvailable_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskAvailable_(.+)")
+              / label_replace({__name__=~"ClickHouseAsyncMetrics_DiskTotal_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskTotal_(.+)")
+              > 0.9
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ClickHouse disk {{ $labels.disk }} is over 90% full"
+            description: "ClickHouse stops accepting logs, traces and metrics at 95%. Enlarge the volume or shorten the retention."
 alertmanager:
   create_nb_default_rules: true
   # --------------------------------------------------------------------------
