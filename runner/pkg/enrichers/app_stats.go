@@ -388,13 +388,8 @@ func extractMetricStats(metrics map[string][]metricSeries) []*applicationStats {
 
 	for queryName, seriesList := range metrics {
 		for _, m := range seriesList {
-			labels := m.labels
-			if !hasAnyKey(labels, "pod", "namespace", "container_id",
-				"actual_destination_workload_namespace", "deployment", "destination_workload_namespace") {
-				continue
-			}
-			ownerName, namespace, container := resolveOwner(labels)
-			if namespace == "" {
+			ownerName, namespace, container, ok := workloadOf(m.labels)
+			if !ok {
 				continue
 			}
 			appID := ownerName + "/" + namespace
@@ -459,6 +454,17 @@ func extractMetricStats(metrics map[string][]metricSeries) []*applicationStats {
 		out = append(out, a)
 	}
 	return out
+}
+
+// workloadOf resolves a series' labels to the workload it belongs to. ok is
+// false when the labels carry no workload identity.
+func workloadOf(labels map[string]string) (owner, namespace, container string, ok bool) {
+	if !hasAnyKey(labels, "pod", "namespace", "container_id",
+		"actual_destination_workload_namespace", "deployment", "destination_workload_namespace") {
+		return "", "", "", false
+	}
+	owner, namespace, container = resolveOwner(labels)
+	return owner, namespace, container, namespace != ""
 }
 
 // resolveOwner picks the owner name + namespace + container per a
