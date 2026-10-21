@@ -559,6 +559,16 @@ job is the Service name too, unless serviceMonitor.jobLabel renames it.
 {{- end -}}
 
 {{/*
+A value copied into the collector config by a {{ }} reference in its values (the
+clickhouse/logs exporter). The collector chart renders its config with
+tpl (toYaml ...), which leaves the reference inside single quotes, so a ' in the
+value is doubled to keep the rendered YAML valid.
+*/}}
+{{- define "nudgebee-agent.collectorQuoted" -}}
+{{- replace "'" "''" (toString .) -}}
+{{- end -}}
+
+{{/*
 OpenTelemetry Collector service name - handles fullnameOverride/nameOverride for otel subchart
 */}}
 {{- define "nudgebee-agent.otelcollector.servicename" -}}
