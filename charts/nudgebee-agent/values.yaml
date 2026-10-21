@@ -403,7 +403,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.10
+    tag: 0.1.11
   resources:
     requests:
       cpu: "100m"
