@@ -546,7 +546,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Warn("SERVICE_MAP_SOURCE needs ClickHouse, which is not configured; using prometheus", "value", cfg.ServiceMapSource)
 	}
 	if typedKube != nil {
-		smSvc.NodeAgentCount = nodeAgentCounter(typedKube)
+		smSvc.NodeAgentCount = nodeAgentCounter(typedKube, installNamespace(cfg))
 	}
 	smSvc.UseClickHouse(ch, smSource, logger)
 	smSvc.StartSummary(ctx)
@@ -676,14 +676,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if kubeRestCfg != nil {
 			mut.SetExec(podexec.New(typedKube, kubeRestCfg))
 		}
-		// INSTALLATION_NAMESPACE is set by the chart via the downward API.
-		// Required by the legacy alert-rule path; falls back to the scanner
-		// namespace (also chart-set) so a hand-rolled deployment without
-		// INSTALLATION_NAMESPACE still resolves to the right namespace.
-		installNs := os.Getenv("INSTALLATION_NAMESPACE")
-		if installNs == "" {
-			installNs = cfg.ScannerNamespace
-		}
+		// Required by the legacy alert-rule path.
+		installNs := installNamespace(cfg)
 		if installNs == "" {
 			logger.Warn("install namespace is empty (neither INSTALLATION_NAMESPACE nor SCANNER_NAMESPACE set) — legacy alert-rule actions will error at request time")
 		}
@@ -1747,4 +1741,15 @@ func handleHealth(_ map[string]any) (any, error) {
 		"go":         runtime.Version(),
 		"goroutines": runtime.NumGoroutine(),
 	}, nil
+}
+
+// installNamespace is the release namespace the agent runs in.
+// INSTALLATION_NAMESPACE is set by the chart via the downward API; it falls
+// back to the scanner namespace (also chart-set) so a hand-rolled deployment
+// without INSTALLATION_NAMESPACE still resolves to the right namespace.
+func installNamespace(cfg *config.Config) string {
+	if ns := os.Getenv("INSTALLATION_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return cfg.ScannerNamespace
 }

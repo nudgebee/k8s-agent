@@ -43,6 +43,11 @@ opentelemetry-collector:
               honor_labels: true
               kubernetes_sd_configs:
                 - role: pod
+                  # Only this release's node agents: another agent install on
+                  # the cluster runs its own, and scraping both would count
+                  # every request twice. The runner counts the same namespace.
+                  namespaces:
+                    own_namespace: true
               relabel_configs:
                 - source_labels: [__meta_kubernetes_pod_label_app]
                   regex: nudgebee-node-agent
