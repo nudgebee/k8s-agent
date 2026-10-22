@@ -13,11 +13,14 @@ import (
 // map builds do not each send a cluster-wide pod LIST to the API server.
 const nodeAgentCountTTL = time.Minute
 
-// nodeAgentCounter counts the running node-agent pods that started before a
-// given time — the pods the OTel collector scrapes into ClickHouse (same
-// label, any namespace) — so the service map's ClickHouse source can tell
-// when some of them are missing.
-func nodeAgentCounter(cs kubernetes.Interface) func(context.Context, time.Time) (int, error) {
+// nodeAgentCounter counts the running node-agent pods in namespace that
+// started before a given time — the pods the OTel collector scrapes into
+// ClickHouse — so the service map's ClickHouse source can tell when some of
+// them are missing. The collector scrapes only its own release's node agents
+// (another agent install on the cluster runs its own, and scraping both would
+// count every request twice), so counting any other namespace's node agents
+// would make every window look incomplete. An empty namespace counts all.
+func nodeAgentCounter(cs kubernetes.Interface, namespace string) func(context.Context, time.Time) (int, error) {
 	var (
 		mu      sync.Mutex
 		started []time.Time
@@ -27,7 +30,7 @@ func nodeAgentCounter(cs kubernetes.Interface) func(context.Context, time.Time) 
 		mu.Lock()
 		defer mu.Unlock()
 		if listed.IsZero() || time.Since(listed) >= nodeAgentCountTTL {
-			pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+			pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 				LabelSelector: "app=nudgebee-node-agent",
 				FieldSelector: "status.phase=Running",
 			})
