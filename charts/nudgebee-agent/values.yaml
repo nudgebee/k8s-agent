@@ -378,6 +378,18 @@ runner:
 #               and retention with traces. Logs from kube-system and the agent's
 #               own namespace are dropped (filter/drop_log_namespaces under
 #               opentelemetry-collector.config.processors).
+#               Delivery is at least once: each node-agent saves how far every
+#               file was delivered under /var/lib/nudgebee-node-agent on the node
+#               and resumes there after a restart, and while the collector or
+#               ClickHouse is down or slow, unsent lines wait in the node's log
+#               files rather than being dropped. A paused node-agent finishes
+#               the file it has open after the kubelet rotates it, but not files
+#               rotated away in between (the kubelet compresses them), so an
+#               outage loses nothing while each container writes less than
+#               about one log file (containerLogMaxSize, 10 MiB by default).
+#               The positions stay on the node after helm uninstall, in
+#               /var/lib/nudgebee-node-agent/<namespace>-<release> on every
+#               node; remove that directory by hand once the agent is gone.
 # Loki or another provider keeps working alongside either mode.
 logs:
   collection: none
@@ -555,6 +567,46 @@ opentelemetry-collector:
           initial_interval: 5s
           max_interval: 30s
           max_elapsed_time: 300s
+      # Container logs (logs.collection=node-agent) get their own exporter, with
+      # the connection settings of `clickhouse` above (the collector chart fills
+      # in the {{ }} references, so an override of `clickhouse` applies here
+      # too; nudgebee-agent.collectorQuoted keeps a ' in a value from breaking
+      # the rendered config), so that a ClickHouse outage or a full disk holds
+      # them back instead of dropping them:
+      # - it retries without a time limit (max_elapsed_time: 0);
+      # - it batches from its own queue, and the logs pipeline has no batch
+      #   processor, which would accept records and drop them later: when the
+      #   queue is full the receiver waits (block_on_overflow), so node-agents
+      #   keep unsent lines in the node's log files and send them once
+      #   ClickHouse is back.
+      # The queue holds up to queue_size records, about 1-2 KiB each in memory
+      # (100-200 MiB here), within resources.limits.memory; memory_limiter,
+      # first in the pipeline, refuses records (HTTP 503, which node-agents
+      # retry) before memory runs out. Records in the queue are still lost if
+      # the collector itself restarts or is OOM-killed while ClickHouse is down
+      # (the queue is in memory). Traces and metrics keep `clickhouse` above.
+      clickhouse/logs:
+        endpoint: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.endpoint }}'
+        database: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.database }}'
+        ttl: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.ttl }}'
+        username: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.username }}'
+        password: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.password }}'
+        logs_table_name: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.logs_table_name }}'
+        timeout: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.timeout }}'
+        sending_queue:
+          enabled: true
+          sizer: items
+          queue_size: 100000
+          block_on_overflow: true
+          batch:
+            flush_timeout: 5s
+            min_size: 20000
+            max_size: 25000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 0
     service:
       # memory_limiter must stay FIRST in every pipeline. The subchart defines the
       # processor (sized off resources.limits.memory) and puts it first in its own
@@ -567,8 +619,9 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
-          processors: [memory_limiter, filter/drop_log_namespaces, batch]
-          exporters: [clickhouse]
+          # No batch processor: clickhouse/logs batches (see above).
+          processors: [memory_limiter, filter/drop_log_namespaces]
+          exporters: [clickhouse/logs]
           receivers: [otlp]
         metrics:
           processors: [memory_limiter, batch]
@@ -609,8 +662,9 @@ clickhouse:
   # while less than 5% of the disk is free, so a filling disk stops ingestion
   # with room left for merges, TTL part drops and queries, instead of filling up
   # and failing everything. The ClickHouseDisk* alerts below fire before that.
-  # Refused inserts are retried by the collector for retry_on_failure's
-  # max_elapsed_time, then dropped.
+  # Refused trace and metric inserts are retried by the collector for
+  # retry_on_failure's max_elapsed_time, then dropped; container logs are held
+  # back until inserts resume (the clickhouse/logs exporter).
   extraOverrides: "<clickhouse>\n  <merge_tree>\n    <min_free_disk_ratio_to_perform_insert>0.05</min_free_disk_ratio_to_perform_insert>\n  </merge_tree>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
   # A read-only user for the runner's query_data action, which runs SQL the
   # NudgeBee backend sends (log and trace reads, LLM-written log queries
