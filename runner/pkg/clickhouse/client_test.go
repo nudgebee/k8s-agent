@@ -54,6 +54,47 @@ func TestQuery_HappyPath(t *testing.T) {
 	}
 }
 
+// Query appends FORMAT JSONCompact unless the statement ends with a FORMAT clause
+// of its own. "FORMAT " elsewhere, such as in a filter on span text, is not one.
+func TestQuery_AppendsFormatUnlessStatementEndsWithOne(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 4096)
+		n, _ := r.Body.Read(buf)
+		body = string(buf[:n])
+		_, _ = w.Write([]byte(`{"meta":[{"name":"x","type":"UInt8"}],"data":[[1]]}`))
+	}))
+	defer srv.Close()
+	c := New(Config{Host: strings.TrimPrefix(srv.URL, "http://")})
+
+	for query, want := range map[string]string{
+		"SELECT 1 FROM t WHERE SpanName = 'invalid format string'":            "SELECT 1 FROM t WHERE SpanName = 'invalid format string' FORMAT JSONCompact",
+		"SELECT 1 FROM t WHERE positionCaseInsensitive(Body, 'FORMAT x') > 0": "SELECT 1 FROM t WHERE positionCaseInsensitive(Body, 'FORMAT x') > 0 FORMAT JSONCompact",
+		"SELECT 1 SETTINGS max_execution_time = 5 FORMAT JSONCompact":         "SELECT 1 SETTINGS max_execution_time = 5 FORMAT JSONCompact",
+		"select 1 format JSONEachRow;":                                        "select 1 format JSONEachRow;",
+		"SELECT 1 FORMAT JSONCompact\n":                                       "SELECT 1 FORMAT JSONCompact",
+		"SELECT 1 FORMAT JSONCompact SETTINGS max_threads = 2, readonly = 1":  "SELECT 1 FORMAT JSONCompact SETTINGS max_threads = 2, readonly = 1",
+		"SELECT 1 FROM t WHERE x = 'FORMAT a SETTINGS b'":                     "SELECT 1 FROM t WHERE x = 'FORMAT a SETTINGS b' FORMAT JSONCompact",
+		// A SETTINGS value may be a quoted string, which can hold a comma, "="
+		// or an escaped quote.
+		"SELECT 1 FORMAT JSONCompact SETTINGS join_algorithm = 'hash'":                                           "SELECT 1 FORMAT JSONCompact SETTINGS join_algorithm = 'hash'",
+		"SELECT 1 FORMAT JSONCompact SETTINGS max_threads = 2, join_algorithm = 'hash', use_query_cache = false": "SELECT 1 FORMAT JSONCompact SETTINGS max_threads = 2, join_algorithm = 'hash', use_query_cache = false",
+		"SELECT 1 FORMAT JSONCompact SETTINGS log_comment = 'a, b = c', max_threads = 1":                         "SELECT 1 FORMAT JSONCompact SETTINGS log_comment = 'a, b = c', max_threads = 1",
+		"SELECT 1 FORMAT JSONCompact SETTINGS log_comment = 'it''s \\'quoted\\''":                                "SELECT 1 FORMAT JSONCompact SETTINGS log_comment = 'it''s \\'quoted\\''",
+		// A string literal that ends the statement and only contains such a
+		// clause is not one.
+		"SELECT 'FORMAT x SETTINGS y = ''z'''":   "SELECT 'FORMAT x SETTINGS y = ''z''' FORMAT JSONCompact",
+		"SELECT 'FORMAT x SETTINGS y = \\'z\\''": "SELECT 'FORMAT x SETTINGS y = \\'z\\'' FORMAT JSONCompact",
+	} {
+		if res, err := c.Query(context.Background(), query, nil); err != nil || res.Error != nil {
+			t.Fatalf("Query(%q) = %+v, %v", query, res, err)
+		}
+		if body != want {
+			t.Errorf("Query(%q) sent %q; want %q", query, body, want)
+		}
+	}
+}
+
 // With no user set, Query authenticates as ClickHouse's "default" user, and a
 // password with characters a header value can't carry still goes through.
 func TestQuery_DefaultUserAndAnyPassword(t *testing.T) {
