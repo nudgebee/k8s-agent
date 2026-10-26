@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -81,6 +82,17 @@ type QueryResult struct {
 	Error       *string  `json:"error"`
 }
 
+// settingPair is one "name = value" of a SETTINGS clause. The value is a
+// number, identifier or bool, or a single-quoted string whose quotes are
+// escaped by a backslash or by doubling, so a quoted comma or "=" stays inside
+// its value.
+const settingPair = `\w+\s*=\s*(?:'(?:[^'\\]|\\.|'')*'|[\w.+-]+)`
+
+// trailingFormat is a statement's closing FORMAT clause, which ClickHouse also
+// accepts before a SETTINGS clause.
+var trailingFormat = regexp.MustCompile(`(?i)\bFORMAT\s+\w+(?:\s+SETTINGS\s+` +
+	settingPair + `(?:\s*,\s*` + settingPair + `)*)?\s*;?$`)
+
 // Query runs the SQL via a POST to /?database=..., with the credentials as HTTP
 // Basic auth rather than URL parameters: a connection error repeats the URL, and
 // errors are reported to the backend and shown in the UI. With no user set it
@@ -104,9 +116,11 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 	if q == "" {
 		return errResult("clickhouse: empty query"), nil
 	}
-	// Append FORMAT JSONCompact unless the caller already has one. JSONCompact
-	// gives us {meta:[{name,type}], data:[[...]], rows:N} which we map directly.
-	if !strings.Contains(strings.ToUpper(q), "FORMAT ") {
+	// Append FORMAT JSONCompact unless the statement ends with a FORMAT clause of
+	// its own. JSONCompact gives us {meta:[{name,type}], data:[[...]], rows:N}
+	// which we map directly. "FORMAT " elsewhere, such as in a filter on span
+	// text, is not a clause.
+	if !trailingFormat.MatchString(q) {
 		q += " FORMAT JSONCompact"
 	}
 
