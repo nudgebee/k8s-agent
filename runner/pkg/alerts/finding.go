@@ -88,6 +88,18 @@ type Builder struct {
 	Nodes NodeLocator
 }
 
+// findingIDFor returns a random Finding ID, or — when the matcher named
+// the occurrence it reports — a UUIDv5 of (account, aggregation key,
+// occurrence). The server treats a repeat finding_id as the same event, so
+// re-reporting one occurrence (an OOM kill seen again after an agent
+// restart) updates that event rather than opening a second one.
+func (b *Builder) findingIDFor(m MatchedTrigger) string {
+	if m.OccurrenceKey == "" {
+		return uuid.NewString()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(b.AccountID+"|"+m.AggregationKey+"|"+m.OccurrenceKey)).String()
+}
+
 // FromMatchedTrigger wraps a kubewatch K8s-event payload into a Finding
 // envelope when a trigger matcher fired. Differs from FromKubewatchEvent
 // in two important ways:
@@ -109,7 +121,7 @@ func (b *Builder) FromMatchedTrigger(matchSpec MatchedTrigger, rawData []byte) (
 	}
 	now := time.Now().UTC()
 	startsAt := utcDBStr(now)
-	id := uuid.NewString()
+	id := b.findingIDFor(matchSpec)
 	serviceKey := matchSpec.SubjectNamespace + "/" + matchSpec.SubjectName
 
 	// Owner-aware subject — the UI groups findings by service_key, which
@@ -159,10 +171,13 @@ func (b *Builder) FromMatchedTrigger(matchSpec MatchedTrigger, rawData []byte) (
 // preserves the layering: triggers → alerts → finding builder, never
 // the other way.
 type MatchedTrigger struct {
-	AggregationKey   string
-	Priority         string
-	FindingType      string
-	Fingerprint      string
+	AggregationKey string
+	Priority       string
+	FindingType    string
+	Fingerprint    string
+	// OccurrenceKey, when set, makes the Finding ID deterministic (see
+	// findingIDFor). Empty → a random ID.
+	OccurrenceKey    string
 	Owner            OwnerRef
 	SubjectName      string
 	SubjectNamespace string

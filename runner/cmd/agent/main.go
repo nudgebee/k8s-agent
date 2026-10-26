@@ -94,6 +94,7 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 			Priority:         m.Spec.Priority,
 			FindingType:      m.Spec.FindingType,
 			Fingerprint:      m.Fingerprint,
+			OccurrenceKey:    m.OccurrenceKey,
 			Owner:            alerts.OwnerRef{Name: m.Owner.Name, Kind: m.Owner.Kind},
 			SubjectName:      m.SubjectName,
 			SubjectNamespace: m.SubjectNamespace,

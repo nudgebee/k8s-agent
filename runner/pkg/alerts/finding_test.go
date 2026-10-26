@@ -398,3 +398,38 @@ func TestBuilder_Alert_ExporterPodAlertKeepsThePod(t *testing.T) {
 		t.Errorf("node lookups = %d, want 0 — a kube-state-metrics alert must not reach the locator", locator.podCalls)
 	}
 }
+
+func TestFromMatchedTrigger_FindingIDFromOccurrence(t *testing.T) {
+	// A kill re-reported after an agent restart must reuse the Finding ID
+	// the first report used, so the server updates that event instead of
+	// opening another. No occurrence key keeps the random ID.
+	b := &Builder{AccountID: "acc", Cluster: "c"}
+	m := MatchedTrigger{
+		AggregationKey: "pod_oom_killer_enricher", SubjectName: "web-0", SubjectNamespace: "prod",
+		SubjectKind: "pod", OccurrenceKey: "prod/web-0/app/2026-05-08T02:59:30Z",
+	}
+	id := func(m MatchedTrigger, b *Builder) string {
+		env, err := b.FromMatchedTrigger(m, json.RawMessage(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return env.Finding.ID
+	}
+	first := id(m, b)
+	if again := id(m, b); again != first {
+		t.Errorf("same occurrence got IDs %s and %s; want one", first, again)
+	}
+	other := m
+	other.OccurrenceKey = "prod/web-0/app/2026-05-08T03:10:00Z"
+	if id(other, b) == first {
+		t.Error("a different occurrence must get a different ID")
+	}
+	if id(m, &Builder{AccountID: "acc2", Cluster: "c"}) == first {
+		t.Error("the same occurrence in another account must get a different ID")
+	}
+	none := m
+	none.OccurrenceKey = ""
+	if a, b2 := id(none, b), id(none, b); a == b2 {
+		t.Error("no occurrence key must keep a random ID per Finding")
+	}
+}

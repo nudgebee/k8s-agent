@@ -258,17 +258,38 @@ func markdownBlock(text string) EvidenceBlock {
 
 // ------- Pod OOMKilled -------
 
+// oomFreshWindow is how old an OOM kill may be and still fire. It is
+// tied to the matcher's 1h rate limit: a kill is past this window by the
+// time its owner's suppression expires, so one kill fires once per agent
+// run however many times the Pod is re-observed. (A node clock running
+// ahead of the agent's can let it fire a second time; that repeat carries
+// the same occurrence key, so it updates the existing event.) It also
+// covers agent downtime of up to an hour — a kill that happened while the
+// agent was restarting or being upgraded is still reported once it comes
+// back.
+const oomFreshWindow = time.Hour
+
 // podOOMKilledMatcher implements PodOomKilledTrigger: fires when a
 // container's *most recent* termination was OOMKilled — state.terminated
 // when the container is still down, lastState.terminated once it has
-// restarted. An OOM in lastState that a later non-OOM termination has
-// superseded does not fire (see containerOOMTermination).
-// Same kubewatch oldObj/obj pointer-aliasing problem as pod_crash_loop —
-// the previous transition gate (`prev[name] != obj[name]`) never tripped
-// because oldObj is the same snapshot as obj. We rely on the 1h rate
-// limit + hour-bucket fingerprint to dedupe: at most one Finding per
-// (owner, hour-bucket), so a Pod stuck OOMing produces ~1 fire/hour.
+// restarted — and that kill is recent. An OOM in lastState that a later
+// non-OOM termination has superseded does not fire (see
+// containerOOMTermination).
+//
+// The recency check is what stops an old kill from firing again: the
+// status keeps the OOM in lastState for as long as the container keeps
+// running, and every later Pod update (an eviction, a probe flip, a
+// label change) carries it. Same kubewatch oldObj/obj pointer-aliasing
+// problem as pod_crash_loop, so we can't detect the transition itself.
+//
+// Each fire carries the kill as its occurrence key, so a kill re-reported
+// after an agent restart (the rate limiter is in memory) lands on the
+// event it already created instead of minting a new one.
 func podOOMKilledMatcher() MatcherSpec {
+	return podOOMKilledMatcherAt(time.Now)
+}
+
+func podOOMKilledMatcherAt(now func() time.Time) MatcherSpec {
 	return MatcherSpec{
 		Name:           "pod_oom_killed",
 		Kind:           "Pod",
@@ -285,7 +306,20 @@ func podOOMKilledMatcher() MatcherSpec {
 			// mostRecentOOMKilledContainerStatus applies the same
 			// most-recent-termination rule the enricher uses, so the fire
 			// predicate and the enrichment stay consistent.
-			return mostRecentOOMKilledContainerStatus(obj) != nil
+			cs := mostRecentOOMKilledContainerStatus(obj)
+			if cs == nil {
+				return false
+			}
+			_, ts := containerOOMTermination(cs)
+			finishedAt, err := time.Parse(time.RFC3339, ts)
+			if err != nil {
+				// The kubelet always sets finishedAt on a termination; one
+				// without it is malformed status, not an old kill. Fire —
+				// the rate limit still bounds it.
+				return true
+			}
+			// A finishedAt ahead of our clock is node clock skew, not age.
+			return now().Sub(finishedAt) <= oomFreshWindow
 		},
 		FingerprintFn: func(obj map[string]any) string {
 			ns, name := metaNS(obj), metaName(obj)
@@ -293,18 +327,13 @@ func podOOMKilledMatcher() MatcherSpec {
 			if owner.Name != "" {
 				name = owner.Name
 			}
-			// Hour bucket pairs with the 1h rate limit, and comes from
-			// the OOM's own finishedAt rather than the wall clock: one
-			// kill always lands in one bucket, so re-observing the same
-			// unchanged status can only ever produce the same
-			// fingerprint. A wall-clock bucket rolled every hour, which
-			// let a single OOM mint an unbounded number of Findings for
-			// as long as the container kept running. A genuinely new OOM
-			// carries a later finishedAt, so a Pod stuck OOMing still
-			// produces ~1 fire/hour.
-			return fp("pod_oom_killer_enricher", ns, name, fmt.Sprintf("h%d", oomHourBucket(obj)))
+			// One fingerprint per workload, paired with the 1h rate limit:
+			// a Pod stuck OOMing produces ~1 fire/hour, and each fire is a
+			// new kill because the predicate drops old ones.
+			return fp("pod_oom_killer_enricher", ns, name)
 		},
-		EnrichBlocks: oomKilledEnrichBlocks,
+		OccurrenceKeyFn: oomOccurrenceKey,
+		EnrichBlocks:    oomKilledEnrichBlocks,
 	}
 }
 
@@ -1233,20 +1262,22 @@ func isOOM(terminated map[string]any) bool {
 	return reason == "OOMKilled"
 }
 
-// oomHourBucket returns the UTC hour bucket of the most recent OOM
-// termination's finishedAt, for use as the fingerprint's dedup bucket.
-// Falls back to the current hour when no OOM is present or its
-// timestamp is missing/unparseable — that keeps the fingerprint stable
-// within the rate-limit window even on malformed status.
-func oomHourBucket(obj map[string]any) int64 {
-	if cs := mostRecentOOMKilledContainerStatus(obj); cs != nil {
-		if _, ts := containerOOMTermination(cs); ts != "" {
-			if t, err := time.Parse(time.RFC3339, ts); err == nil {
-				return t.UTC().Truncate(time.Hour).Unix()
-			}
-		}
+// oomOccurrenceKey identifies the kill a pod_oom_killed fire reports:
+// the Pod, the container and the kill's finishedAt. The Pod name (not the
+// owner) keeps two replicas killed in the same second apart. Empty when
+// the termination carries no finishedAt, in which case the Finding gets a
+// random ID as before.
+func oomOccurrenceKey(obj map[string]any) string {
+	cs := mostRecentOOMKilledContainerStatus(obj)
+	if cs == nil {
+		return ""
 	}
-	return time.Now().UTC().Truncate(time.Hour).Unix()
+	_, ts := containerOOMTermination(cs)
+	if ts == "" {
+		return ""
+	}
+	cName, _ := cs["name"].(string)
+	return strings.Join([]string{metaNS(obj), metaName(obj), cName, ts}, "/")
 }
 
 // podNodeName returns spec.nodeName, or "" when unset (pod not yet scheduled).
