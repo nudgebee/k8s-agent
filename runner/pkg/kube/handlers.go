@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"sigs.k8s.io/yaml"
 
+	"github.com/nudgebee/nudgebee-agent/pkg/cmdout"
 	"github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/enrichers"
 )
@@ -76,7 +77,7 @@ func Handlers(c *Client, k *KubectlExecutor, accountID string) map[string]dispat
 	if k != nil {
 		hs["kubectl_command_executor"] = func(ctx context.Context, p map[string]any) (any, error) {
 			cmd := strParam(p, "command")
-			data, err := k.Run(ctx, cmd)
+			data, err := k.RunEncoded(ctx, cmd, strParam(p, cmdout.Param))
 			if err != nil {
 				return nil, err
 			}
