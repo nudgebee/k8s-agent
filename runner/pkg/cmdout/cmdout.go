@@ -56,11 +56,15 @@ func New(encoding string) *Output {
 
 // Write implements io.Writer.
 func (o *Output) Write(p []byte) (int, error) {
-	o.n += int64(len(p))
+	var n int
+	var err error
 	if o.zw != nil {
-		return o.zw.Write(p)
+		n, err = o.zw.Write(p)
+	} else {
+		n, err = o.text.Write(p)
 	}
-	return o.text.Write(p)
+	o.n += int64(n)
+	return n, err
 }
 
 // Encoding reports the encoding the output is collected in: Gzip or "".
