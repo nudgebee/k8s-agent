@@ -49,7 +49,27 @@ spec:
             - name: TRACES_ENDPOINT
               value: "http://{{ include "nudgebee-agent.otelcollector.servicename" . }}:4318/v1/traces"
           {{- end }}
-          {{- if .Values.nodeAgent.logsEndpoint }}
+          {{- if eq (include "nudgebee-agent.logsCollection" .) "node-agent" }}
+            - name: LOGS_ENDPOINT
+              value: "http://{{ include "nudgebee-agent.otelcollector.servicename" . }}:4318/v1/logs"
+          {{- /* Only the log push reads NODE_NAME; in other modes it would change the pod spec and restart every node-agent. */}}
+          {{- $envNames := list }}
+          {{- range (default (list) .Values.nodeAgent.env) }}
+          {{- if kindIs "map" . }}{{ $envNames = append $envNames (get . "name") }}{{ end }}
+          {{- end }}
+          {{- if not (has "NODE_NAME" $envNames) }}
+            # Set on exported log records as k8s.node.name.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          {{- end }}
+            # How far each container log file has been delivered, on the node, so
+            # a restarted node-agent resumes there instead of skipping the lines
+            # written while it was down.
+            - name: LOGS_POSITIONS_FILE
+              value: /var/lib/nudgebee-node-agent/log-positions.json
+          {{- else if .Values.nodeAgent.logsEndpoint }}
             - name: LOGS_ENDPOINT
               value: "{{ .Values.nodeAgent.logsEndpoint }}"
           {{- end }}
@@ -84,6 +104,10 @@ spec:
             - mountPath: /sys/kernel/debug
               name: debugfs
               readOnly: false
+            {{- if eq (include "nudgebee-agent.logsCollection" .) "node-agent" }}
+            - mountPath: /var/lib/nudgebee-node-agent
+              name: state
+            {{- end }}
       volumes:
         - hostPath:
             path: /sys/fs/cgroup
@@ -91,6 +115,13 @@ spec:
         - hostPath:
             path: /sys/kernel/debug
           name: debugfs
+        {{- if eq (include "nudgebee-agent.logsCollection" .) "node-agent" }}
+        # One directory per release, in case two agents run on a node.
+        - hostPath:
+            path: /var/lib/nudgebee-node-agent/{{ .Release.Namespace }}-{{ .Release.Name }}
+            type: DirectoryOrCreate
+          name: state
+        {{- end }}
 {{- end }}
 {{- if (and .Values.nodeAgent.enabled .Values.nodeAgent.service.enabled) }}
 ---

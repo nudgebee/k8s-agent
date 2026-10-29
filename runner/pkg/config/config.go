@@ -211,6 +211,30 @@ type Config struct {
 	ClickHousePassword string
 	ClickHouseDB       string
 	ClickHouseSSL      bool
+
+	// ServiceMapSource is where service_map reads the eBPF edge and container
+	// metrics: "prometheus" (default), "clickhouse" (falls back to Prometheus
+	// when ClickHouse cannot serve the window) or "shadow" (serves Prometheus,
+	// logs how the ClickHouse map differs). Needs the collector's node-agent
+	// metrics pipeline writing into ClickHouse.
+	ServiceMapSource string
+
+	// Where logs are written in that ClickHouse, for the logs health check. The
+	// chart sets these from the bundled collector's exporter config. Unset (the
+	// collector off, or an external writer), they fall back to otel_logs in
+	// ClickHouseDB.
+	ClickHouseLogsDatabase string
+	ClickHouseLogsTable    string
+	// ClickHouseLogsCollected: the chart's logs.collection ships this cluster's
+	// container logs into that ClickHouse. Set by the chart from that switch
+	// only (CLICKHOUSE_LOGS_COLLECTED), and reported as clickhouseLogsCollected.
+	ClickHouseLogsCollected bool
+
+	// ClickHouseReaderUser is a read-only ClickHouse user with query limits, which
+	// the chart creates in the bundled ClickHouse with the admin's password.
+	// query_data and the logs table check use it; schema changes keep
+	// ClickHouseUser. Empty: everything uses ClickHouseUser.
+	ClickHouseReaderUser string
 }
 
 // FromEnv reads config from env vars and returns it. Missing required fields
@@ -327,7 +351,12 @@ func FromEnv() (*Config, error) {
 		ClickHousePassword:         os.Getenv("CLICKHOUSE_PASSWORD"),
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
+		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
+		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
+		ClickHouseLogsCollected:    envBool("CLICKHOUSE_LOGS_COLLECTED", false),
+		ClickHouseReaderUser:       os.Getenv("CLICKHOUSE_READER_USER"),
 	}
+	c.ClickHouseLogsDatabase = cmp(os.Getenv("CLICKHOUSE_LOGS_DATABASE"), c.ClickHouseDB)
 	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring
 	// the legacy f-string default (utils.py).
 	if c.AzureTokenEndpoint == "" {

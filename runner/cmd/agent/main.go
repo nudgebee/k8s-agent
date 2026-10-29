@@ -57,6 +57,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/podexec"
 	"github.com/nudgebee/nudgebee-agent/pkg/podrunner"
 	"github.com/nudgebee/nudgebee-agent/pkg/podshell"
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 	"github.com/nudgebee/nudgebee-agent/pkg/rightsize"
@@ -93,6 +94,7 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 			Priority:         m.Spec.Priority,
 			FindingType:      m.Spec.FindingType,
 			Fingerprint:      m.Fingerprint,
+			OccurrenceKey:    m.OccurrenceKey,
 			Owner:            alerts.OwnerRef{Name: m.Owner.Name, Kind: m.Owner.Kind},
 			SubjectName:      m.SubjectName,
 			SubjectNamespace: m.SubjectNamespace,
@@ -104,6 +106,12 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 	}
 	return out
 }
+
+// promDiscoveryInterval is how often the agent re-looks for a Prometheus
+// Service when it started without one. Five minutes keeps a freshly installed
+// Prometheus usable within a scrape interval or two, at the cost of one
+// label-filtered Service LIST per interval until it is found.
+const promDiscoveryInterval = 5 * time.Minute
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -211,19 +219,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.PrometheusURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.PrometheusSelectors); u != "" {
 			cfg.PrometheusURL = u
-			logger.Info("prometheus auto-discovered", "url", u)
+			logger.Info("prometheus auto-discovered", "url", redact.URL(u))
 		}
 	}
 	if cfg.LokiURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.LokiSelectors); u != "" {
 			cfg.LokiURL = u
-			logger.Info("loki auto-discovered", "url", u)
+			logger.Info("loki auto-discovered", "url", redact.URL(u))
 		}
 	}
 	if cfg.AlertManagerURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.AlertManagerSelectors); u != "" {
 			cfg.AlertManagerURL = u
-			logger.Info("alertmanager auto-discovered", "url", u)
+			logger.Info("alertmanager auto-discovered", "url", redact.URL(u))
 		}
 	}
 	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
@@ -248,104 +256,126 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if opencostURL == "" {
 			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
 				opencostURL = u
-				logger.Info("opencost auto-discovered", "url", u)
+				logger.Info("opencost auto-discovered", "url", redact.URL(u))
 			}
 		}
 	} else {
 		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
 	}
 
-	var promClient *prometheus.Client
-	if cfg.PrometheusURL != "" {
-		promClient = prometheus.New(cfg.PrometheusURL, nil)
-		promClient.ExtraHeaders = config.ParseHeaders(cfg.PrometheusHeaders)
-		// Managed-provider auth, same precedence as the legacy
-		// generate_prometheus_config: AWS SigV4 → Coralogix token → Azure AD.
-		// Plain header/basic auth stays in PROMETHEUS_HEADERS above.
-		switch {
-		case cfg.AWSAccessKey != "":
-			promClient.Auth = prometheus.NewAWSAuth(cfg.AWSAccessKey, cfg.AWSSecretAccessKey, cfg.AWSRegion, cfg.AWSServiceName)
-			logger.Info("prometheus auth: AWS SigV4", "service", cfg.AWSServiceName, "region", cfg.AWSRegion)
-		case cfg.CoralogixPrometheusToken != "":
-			promClient.Auth = prometheus.NewCoralogixAuth(cfg.CoralogixPrometheusToken)
-			logger.Info("prometheus auth: Coralogix token")
-		case cfg.AzureUseManagedID != "" || cfg.AzureClientSecret != "":
-			if a := prometheus.NewAzureAuth(prometheus.AzureAuthConfig{
-				UseManagedID:     cfg.AzureUseManagedID,
-				ClientID:         cfg.AzureClientID,
-				ClientSecret:     cfg.AzureClientSecret,
-				TenantID:         cfg.AzureTenantID,
-				Resource:         cfg.AzureResource,
-				MetadataEndpoint: cfg.AzureMetadataEndpoint,
-				TokenEndpoint:    cfg.AzureTokenEndpoint,
-			}, nil); a != nil {
-				promClient.Auth = a
-				logger.Info("prometheus auth: Azure AD")
-			} else {
-				logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
-			}
-		}
-		ph := prometheus.Handlers(promClient)
-		maps.Copy(handlers, ph)
-		for name := range ph {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("prometheus enabled", "url", cfg.PrometheusURL, "actions", len(ph))
+	warnMisparsedCredentials(logger, map[string]string{
+		"PROMETHEUS_URL":    cfg.PrometheusURL,
+		"LOKI_URL":          cfg.LokiURL,
+		"LOKI_RULES_URL":    cfg.LokiRulesURL,
+		"ALERTMANAGER_URL":  cfg.AlertManagerURL,
+		"OPENCOST_ENDPOINT": opencostURL,
+		"ELASTICSEARCH_URL": cfg.ElasticsearchURL,
+		"SIGNOZ_URL":        cfg.SignozURL,
+		"JAEGER_URL":        cfg.JaegerURL,
+		"CHRONOSPHERE_URL":  cfg.ChronosphereURL,
+		"PINOT_URL":         cfg.PinotURL,
+		"CLICKHOUSE_HOST":   cfg.ClickHouseHost,
+	})
 
-		// Enrichers: prometheus_enricher / prometheus_queries_enricher
-		// produce Finding-shaped responses; api-server's relay.ExecuteAndExtractResponse
-		// walks findings[].evidence[].data.
-		promEnr := enrichers.NewPrometheusEnricher(promClient, cfg.AccountID)
-		handlers["prometheus_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
-			return promEnr.HandleEnricher(ctx, p)
+	// The client is built whether or not we have a URL yet. Its actions stay
+	// registered either way and begin working the moment one is discovered
+	// (see the watcher below); until then calls fail with a clear
+	// "prometheus: base URL not configured". Gating registration on a URL
+	// known at boot is what made a late-installed Prometheus invisible for the
+	// life of the process.
+	promClient := prometheus.New(cfg.PrometheusURL, nil)
+	promClient.ExtraHeaders = config.ParseHeaders(cfg.PrometheusHeaders)
+	// Managed-provider auth, same precedence as the legacy
+	// generate_prometheus_config: AWS SigV4 → Coralogix token → Azure AD.
+	// Plain header/basic auth stays in PROMETHEUS_HEADERS above.
+	switch {
+	case cfg.AWSAccessKey != "":
+		promClient.Auth = prometheus.NewAWSAuth(cfg.AWSAccessKey, cfg.AWSSecretAccessKey, cfg.AWSRegion, cfg.AWSServiceName)
+		logger.Info("prometheus auth: AWS SigV4", "service", cfg.AWSServiceName, "region", cfg.AWSRegion)
+	case cfg.CoralogixPrometheusToken != "":
+		promClient.Auth = prometheus.NewCoralogixAuth(cfg.CoralogixPrometheusToken)
+		logger.Info("prometheus auth: Coralogix token")
+	case cfg.AzureUseManagedID != "" || cfg.AzureClientSecret != "":
+		if a := prometheus.NewAzureAuth(prometheus.AzureAuthConfig{
+			UseManagedID:     cfg.AzureUseManagedID,
+			ClientID:         cfg.AzureClientID,
+			ClientSecret:     cfg.AzureClientSecret,
+			TenantID:         cfg.AzureTenantID,
+			Resource:         cfg.AzureResource,
+			MetadataEndpoint: cfg.AzureMetadataEndpoint,
+			TokenEndpoint:    cfg.AzureTokenEndpoint,
+		}, nil); a != nil {
+			promClient.Auth = a
+			logger.Info("prometheus auth: Azure AD")
+		} else {
+			logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
 		}
-		handlers["prometheus_queries_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
-			return promEnr.HandleQueriesEnricher(ctx, p)
-		}
-		// `prometheus_labels` returns label *values* for one
-		// label_name in a Finding-wrapped JsonBlock. Overrides the raw passthrough
-		// merged in via Handlers(c) above (now exposed under `prometheus_label_names`
-		// since /api/v1/labels lists names, not values). All production callers —
-		// api-server services/observability/{prometheus,chronosphere}.go and
-		// llm/rag-server — send {label_name} and unwrap result_type/data/error.
-		handlers["prometheus_labels"] = func(ctx context.Context, p map[string]any) (any, error) {
-			return promEnr.HandleLabels(ctx, p)
-		}
-		lightActions["prometheus_enricher"] = struct{}{}
-		lightActions["prometheus_queries_enricher"] = struct{}{}
-		lightActions["prometheus_labels"] = struct{}{}
+	}
+	ph := prometheus.Handlers(promClient)
+	maps.Copy(handlers, ph)
+	for name := range ph {
+		lightActions[name] = struct{}{}
+	}
+	logger.Info("prometheus actions registered", "url", redact.URL(promClient.URL()), "actions", len(ph))
 
-		// application_stats: thin {success,data} shape. Same Prometheus client.
-		appStats := enrichers.NewAppStatsEnricher(promClient)
-		handlers["application_stats"] = appStats.Handler()
-		lightActions["application_stats"] = struct{}{}
+	// Enrichers: prometheus_enricher / prometheus_queries_enricher
+	// produce Finding-shaped responses; api-server's relay.ExecuteAndExtractResponse
+	// walks findings[].evidence[].data.
+	promEnr := enrichers.NewPrometheusEnricher(promClient, cfg.AccountID)
+	handlers["prometheus_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
+		return promEnr.HandleEnricher(ctx, p)
+	}
+	handlers["prometheus_queries_enricher"] = func(ctx context.Context, p map[string]any) (any, error) {
+		return promEnr.HandleQueriesEnricher(ctx, p)
+	}
+	// `prometheus_labels` returns label *values* for one
+	// label_name in a Finding-wrapped JsonBlock. Overrides the raw passthrough
+	// merged in via Handlers(c) above (now exposed under `prometheus_label_names`
+	// since /api/v1/labels lists names, not values). All production callers —
+	// api-server services/observability/{prometheus,chronosphere}.go and
+	// llm/rag-server — send {label_name} and unwrap result_type/data/error.
+	handlers["prometheus_labels"] = func(ctx context.Context, p map[string]any) (any, error) {
+		return promEnr.HandleLabels(ctx, p)
+	}
+	lightActions["prometheus_enricher"] = struct{}{}
+	lightActions["prometheus_queries_enricher"] = struct{}{}
+	lightActions["prometheus_labels"] = struct{}{}
 
-		// slo_generator: thin {success,data} shape. Same client.
-		sloGen := enrichers.NewSLOEnricher(promClient)
-		handlers["slo_generator"] = sloGen.Handler()
-		lightActions["slo_generator"] = struct{}{}
+	// application_stats: thin {success,data} shape. Same Prometheus client.
+	appStats := enrichers.NewAppStatsEnricher(promClient)
+	handlers["application_stats"] = appStats.Handler()
+	lightActions["application_stats"] = struct{}{}
 
-		logger.Info("prometheus compat enrichers enabled", "actions", 4)
-	} else {
-		// Loud, explicit signal so a missing URL is obvious in the logs rather
-		// than inferred from the absence of "prometheus enabled". Common cause:
-		// migrating from the legacy agent (which read prometheus_url from the
-		// Robusta global_config ConfigMap) by only bumping the image tag on the
-		// old chart, which never sets the PROMETHEUS_URL env the Go agent reads.
-		logger.Warn("prometheus disabled: PROMETHEUS_URL not set and none autodiscovered; prometheus_* actions, rightsizing, service-map, and the Prometheus health badge are unavailable")
+	// slo_generator: thin {success,data} shape. Same client.
+	sloGen := enrichers.NewSLOEnricher(promClient)
+	handlers["slo_generator"] = sloGen.Handler()
+	lightActions["slo_generator"] = struct{}{}
+
+	logger.Info("prometheus compat enrichers enabled", "actions", 4)
+
+	// No URL yet: say so loudly rather than leaving it to be inferred from the
+	// absence of a "prometheus actions registered" url, and keep looking. Common
+	// causes are a Prometheus installed alongside or after the agent (the Service
+	// does not exist yet when we look at boot), and migrating from the legacy
+	// agent — which read prometheus_url from the Robusta global_config ConfigMap
+	// — by bumping only the image tag on the old chart, which never sets the
+	// PROMETHEUS_URL env the Go agent reads.
+	watchForPrometheus := promClient.URL() == ""
+	if watchForPrometheus {
+		logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
+			"retry_interval", promDiscoveryInterval)
 	}
 
 	// Service map needs the same Prometheus client (queries Coroot eBPF
-	// metrics in-cluster). Gated on PROMETHEUS_URL being set.
-	if promClient != nil {
-		smSvc := servicemap.New(promClient, cfg.ClusterName)
-		smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
-		maps.Copy(handlers, smHandlers)
-		for name := range smHandlers {
-			lightActions[name] = struct{}{}
-		}
-		logger.Info("service_map enabled", "actions", len(smHandlers))
+	// metrics in-cluster). Registered unconditionally; the handlers report
+	// the missing URL themselves until one is found.
+	smSvc := servicemap.New(promClient, cfg.ClusterName)
+	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
+	maps.Copy(handlers, smHandlers)
+	for name := range smHandlers {
+		lightActions[name] = struct{}{}
 	}
+	logger.Info("service_map actions registered", "actions", len(smHandlers))
 
 	if cfg.LokiURL != "" {
 		lc := loki.New(cfg.LokiURL, nil)
@@ -367,7 +397,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		for name := range ch {
 			lightActions[name] = struct{}{}
 		}
-		logger.Info("loki enabled", "url", cfg.LokiURL, "actions", len(lh)+len(ch))
+		logger.Info("loki enabled", "url", redact.URL(cfg.LokiURL), "actions", len(lh)+len(ch))
 	}
 
 	esEnabled := cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != ""
@@ -382,7 +412,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	ec.ExtraHeaders = config.ParseHeaders(cfg.ElasticsearchHeaders)
 	registerProxy("elasticsearch", esEnabled, elasticsearch.Handlers(ec))
 	if esEnabled {
-		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL)
+		logger.Info("elasticsearch enabled", "url", redact.URL(cfg.ElasticsearchURL))
 	}
 
 	sc := signoz.New(cfg.SignozURL, nil)
@@ -391,7 +421,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	sc.Password = cfg.SignozPassword
 	registerProxy("signoz", cfg.SignozURL != "", signoz.Handlers(sc))
 	if cfg.SignozURL != "" {
-		logger.Info("signoz enabled", "url", cfg.SignozURL)
+		logger.Info("signoz enabled", "url", redact.URL(cfg.SignozURL))
 	}
 
 	// Log which single logs provider will be reported to the UI and why —
@@ -400,7 +430,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// ELASTICSEARCH_URL hiding SigNoz). Making the winner explicit turns that
 	// class of "I configured X but see Y" into a one-line grep.
 	if provider, url := selectedLogsProvider(cfg); provider != "" {
-		logger.Info("logs provider selected", "provider", provider, "url", url)
+		logger.Info("logs provider selected", "provider", provider, "url", redact.URL(url))
 	} else {
 		logger.Info("logs provider: none configured")
 	}
@@ -409,14 +439,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	jc.Token = cfg.JaegerToken
 	registerProxy("jaeger", cfg.JaegerURL != "", jaeger.Handlers(jc))
 	if cfg.JaegerURL != "" {
-		logger.Info("jaeger enabled", "url", cfg.JaegerURL)
+		logger.Info("jaeger enabled", "url", redact.URL(cfg.JaegerURL))
 	}
 
 	cc := chronosphere.New(cfg.ChronosphereURL, nil)
 	cc.APIKey = cfg.ChronosphereAPIKey
 	registerProxy("chronosphere", cfg.ChronosphereURL != "", chronosphere.Handlers(cc))
 	if cfg.ChronosphereURL != "" {
-		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL)
+		logger.Info("chronosphere enabled", "url", redact.URL(cfg.ChronosphereURL))
 	}
 
 	pc := pinot.New(cfg.PinotURL, nil)
@@ -425,7 +455,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	pc.Password = cfg.PinotPassword
 	registerProxy("pinot", cfg.PinotURL != "", pinot.Handlers(pc))
 	if cfg.PinotURL != "" {
-		logger.Info("pinot enabled", "url", cfg.PinotURL)
+		logger.Info("pinot enabled", "url", redact.URL(cfg.PinotURL))
 	}
 
 	targets := config.ParseTargets(cfg.HTTPProxyTargets)
@@ -484,12 +514,44 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			Database:   cfg.ClickHouseDB,
 			SSLEnabled: cfg.ClickHouseSSL,
 		})
-		logger.Info("query_data enabled", "host", cfg.ClickHouseHost, "port", cfg.ClickHousePort, "db", cfg.ClickHouseDB)
+		logger.Info("query_data enabled", "host", redact.URL(cfg.ClickHouseHost), "port", cfg.ClickHousePort, "db", cfg.ClickHouseDB)
 	} else {
 		logger.Info("query_data registered without ClickHouse — returns empty result")
 	}
-	handlers["query_data"] = enrichers.QueryData(ch)
+	// query_data runs SQL the backend sends, LLM-written log queries included, so
+	// it goes through the read-only user with query limits when the chart
+	// provides one. Schema changes, the trace enricher and the service map keep
+	// the admin client.
+	queryCh := ch
+	if ch != nil && cfg.ClickHouseReaderUser != "" {
+		queryCh = chclient.New(chclient.Config{
+			Host:       cfg.ClickHouseHost,
+			Port:       cfg.ClickHousePort,
+			User:       cfg.ClickHouseReaderUser,
+			Password:   cfg.ClickHousePassword,
+			Database:   cfg.ClickHouseDB,
+			SSLEnabled: cfg.ClickHouseSSL,
+		})
+		logger.Info("query_data uses the read-only ClickHouse user", "user", cfg.ClickHouseReaderUser)
+	}
+	handlers["query_data"] = enrichers.QueryData(queryCh)
 	lightActions["query_data"] = struct{}{}
+
+	// The service map can read its eBPF metrics from the same ClickHouse; the
+	// source stays prometheus unless SERVICE_MAP_SOURCE says otherwise.
+	smSource, ok := servicemap.ParseSource(cfg.ServiceMapSource)
+	if !ok {
+		logger.Warn("unknown SERVICE_MAP_SOURCE; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if smSource != servicemap.SourcePrometheus && ch == nil {
+		logger.Warn("SERVICE_MAP_SOURCE needs ClickHouse, which is not configured; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if typedKube != nil {
+		smSvc.NodeAgentCount = nodeAgentCounter(typedKube, installNamespace(cfg))
+	}
+	smSvc.UseClickHouse(ch, smSource, logger)
+	smSvc.StartSummary(ctx)
+	logger.Info("service map source", "source", string(smSource), "clickhouse", ch != nil)
 
 	// api_traces_enricher_v2: OTel traces query against the same ClickHouse.
 	// Same registration semantics as query_data — register unconditionally so
@@ -615,14 +677,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if kubeRestCfg != nil {
 			mut.SetExec(podexec.New(typedKube, kubeRestCfg))
 		}
-		// INSTALLATION_NAMESPACE is set by the chart via the downward API.
-		// Required by the legacy alert-rule path; falls back to the scanner
-		// namespace (also chart-set) so a hand-rolled deployment without
-		// INSTALLATION_NAMESPACE still resolves to the right namespace.
-		installNs := os.Getenv("INSTALLATION_NAMESPACE")
-		if installNs == "" {
-			installNs = cfg.ScannerNamespace
-		}
+		// Required by the legacy alert-rule path.
+		installNs := installNamespace(cfg)
 		if installNs == "" {
 			logger.Warn("install namespace is empty (neither INSTALLATION_NAMESPACE nor SCANNER_NAMESPACE set) — legacy alert-rule actions will error at request time")
 		}
@@ -661,7 +717,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// unsigned, same trust posture as the alert-rule mutations carved in above —
 	// so it goes in lightActions. Skipped when either client is unavailable
 	// rather than registered as a fail-auth stub.
-	if promClient != nil && dynamicKube != nil {
+	if dynamicKube != nil {
 		// typedKube (may be nil) enables zero-downtime in-place pod resize; the
 		// rightsizer falls back to the template rollout when it's unavailable or
 		// the cluster is < 1.33.
@@ -670,8 +726,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		lightActions["continuous_rightsizing"] = struct{}{}
 		logger.Info("continuous_rightsizing enabled")
 	} else {
-		logger.Warn("continuous_rightsizing disabled — needs both Prometheus and a dynamic K8s client",
-			"prometheus", promClient != nil, "dynamic_client", dynamicKube != nil)
+		logger.Warn("continuous_rightsizing disabled — needs a dynamic K8s client")
 	}
 
 	// rightsizing_resource: applies a backend-computed recommendation (explicit
@@ -781,10 +836,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			cfg.PrometheusURL, config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			promClient.URL(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
+		// Read the URL per request rather than pinning the one we had at
+		// startup, so the /prometheus-v2/* route works on a Prometheus that
+		// only shows up later.
+		gp.PrometheusURLFn = promClient.URL
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
-			logger.Info("grafana proxy enabled", "url", grafanaURL)
+			logger.Info("grafana proxy enabled", "url", redact.URL(grafanaURL))
 		} else {
 			logger.Info("api proxy enabled (grafana unset; APIProxy still routed via X-API-Base-URL)")
 		}
@@ -816,6 +875,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
+
+	// Keep looking for a Prometheus we could not find at boot, and point the
+	// client at the first one that appears. Everything downstream reads the URL
+	// per request, so no restart and no re-registration is needed.
+	if watchForPrometheus && typedKube != nil {
+		g.Go(func() error {
+			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
+				promClient.SetURL(u)
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", redact.URL(u))
+			})
+			return nil
+		})
+	}
 
 	// Pod-shell idle-session reaper. Closes sessions that haven't been touched
 	// in IdleTimeout.
@@ -1067,9 +1139,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				chLogsPresent, chLogsErr, chLogsTable := clickhouseLogsStatus(probeCtx, queryCh, cfg.ClickHouseLogsDatabase, cfg.ClickHouseLogsTable)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
-					PrometheusURL:              cfg.PrometheusURL,
+					PrometheusURL:              promClient.URL(),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
 					OpencostURL:                opencostURL,
@@ -1092,6 +1165,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseStatus:           clickhouseStatus,
 					ClickHouseURL:              clickhouseHost,
 					ClickHouseError:            clickhouseErr,
+					ClickHouseLogsTablePresent: chLogsPresent,
+					ClickHouseLogsTableError:   chLogsErr,
+					ClickHouseLogsTable:        chLogsTable,
+					ClickHouseLogsCollected:    cfg.ClickHouseLogsCollected,
 					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
@@ -1170,24 +1247,21 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 		// Alert-rules push: feeds the collector's `event_rules` table so the
 		// UI's eventrules + runbook-fire paths know about every alert in the
-		// cluster. Skipped when neither a Prom client nor a dynamic K8s client
-		// is available — both sources would be empty.
-		if promClient != nil || dynamicKube != nil {
-			var kubeForRules *kube.Client
-			if dynamicKube != nil {
-				kubeForRules = kube.NewClient(dynamicKube, typedKube)
-			}
-			ar := &discovery.AlertRulesCollector{
-				Prom:   promClient,
-				Kube:   kubeForRules,
-				Sink:   discoverySink,
-				Logger: logger,
-			}
-			g.Go(func() error {
-				logger.Info("starting alert_rules collector", "interval", cfg.AlertRulesInterval)
-				return ar.Run(gctx, cfg.AlertRulesInterval)
-			})
+		// cluster. The Prometheus source skips itself while no URL is known.
+		var kubeForRules *kube.Client
+		if dynamicKube != nil {
+			kubeForRules = kube.NewClient(dynamicKube, typedKube)
 		}
+		ar := &discovery.AlertRulesCollector{
+			Prom:   promClient,
+			Kube:   kubeForRules,
+			Sink:   discoverySink,
+			Logger: logger,
+		}
+		g.Go(func() error {
+			logger.Info("starting alert_rules collector", "interval", cfg.AlertRulesInterval)
+			return ar.Run(gctx, cfg.AlertRulesInterval)
+		})
 	}
 
 	return g.Wait()
@@ -1262,7 +1336,7 @@ func (a *grafanaAdapter) HandlePrometheus(ctx context.Context, r *dispatch.Grafa
 // are reported Connected when metric queries work. Returns false on any error
 // so a broken backend shows Disconnected rather than panicking the tick.
 func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog.Logger) (ok bool, reason string) {
-	if c == nil || c.BaseURL == "" {
+	if c == nil || c.URL() == "" {
 		return false, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1295,7 +1369,7 @@ func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog
 // agent. Our local probe runs against the agent's own cluster so we drop
 // the token entirely.
 func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog.Logger) int {
-	if c == nil || c.BaseURL == "" {
+	if c == nil || c.URL() == "" {
 		return 0
 	}
 	const q = `up{job=~"(.+/)?nudgebee(-.*)?-node-agent"}`
@@ -1415,9 +1489,31 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, "CLICKHOUSE_HOST is not set: no traces backend is configured"
 	}
 	if err := httpProbeErr(ctx, c, fmt.Sprintf("http://%s:%s/ping", host, port)); err != nil {
-		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
+		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redact.URL(host), port, probeCause(err))
 	}
 	return true, ""
+}
+
+// clickhouseLogsStatus is the ClickHouse logs health the agent reports beside
+// its logs provider: ClickHouse answers and database.table, where logs are
+// written, is present. It reads system.tables through the query_data client,
+// never the logs, so it does not say whether logs are arriving. checked is the
+// `database.table` looked at, empty without a client.
+func clickhouseLogsStatus(ctx context.Context, ch *chclient.Client, database, table string) (present bool, reason, checked string) {
+	if ch == nil {
+		return false, "ClickHouse is not configured (CLICKHOUSE_HOST is empty or CLICKHOUSE_ENABLED is false)", ""
+	}
+	checked = database + "." + table
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	present, err := chclient.LogsTablePresent(ctx, ch, database, table)
+	switch {
+	case err != nil:
+		return false, "ClickHouse logs table check failed: " + err.Error(), checked
+	case !present:
+		return false, fmt.Sprintf("ClickHouse logs table %s is not present, or not visible to this ClickHouse user", checked), checked
+	}
+	return true, "", checked
 }
 
 // traceColumnsReady latches the materialized-column check. The columns are
@@ -1473,19 +1569,17 @@ func probeCause(err error) error {
 	return err
 }
 
-// redactUserinfo strips a `user:pass@` prefix from a host. CLICKHOUSE_HOST may
-// be a full URL rather than a bare host (pkg/clickhouse normalizes both forms),
-// and the reason string built above lands in the agent's connection_status
-// JSON, which the UI renders as-is — credentials must not ride along.
-func redactUserinfo(host string) string {
-	at := strings.LastIndex(host, "@")
-	if at < 0 {
-		return host
+// warnMisparsedCredentials flags datasource URLs whose inline credentials the
+// HTTP client will misread (see redact.Misparsed). Such a datasource cannot
+// connect, and the misread is otherwise visible only through confusing errors
+// like "lookup <username>: no such host".
+func warnMisparsedCredentials(logger *slog.Logger, urls map[string]string) {
+	for env, u := range urls {
+		if redact.Misparsed(u) {
+			logger.Warn("datasource URL credentials are not percent-encoded and will not be sent as credentials",
+				"env", env, "url", redact.URL(u))
+		}
 	}
-	if scheme := strings.Index(host, "://"); scheme >= 0 && scheme+3 <= at {
-		return host[:scheme+3] + host[at+1:]
-	}
-	return host[at+1:]
 }
 
 // fetchSignozVersion GETs Signoz's /api/v1/version and returns the reported
@@ -1648,4 +1742,15 @@ func handleHealth(_ map[string]any) (any, error) {
 		"go":         runtime.Version(),
 		"goroutines": runtime.NumGoroutine(),
 	}, nil
+}
+
+// installNamespace is the release namespace the agent runs in.
+// INSTALLATION_NAMESPACE is set by the chart via the downward API; it falls
+// back to the scanner namespace (also chart-set) so a hand-rolled deployment
+// without INSTALLATION_NAMESPACE still resolves to the right namespace.
+func installNamespace(cfg *config.Config) string {
+	if ns := os.Getenv("INSTALLATION_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return cfg.ScannerNamespace
 }

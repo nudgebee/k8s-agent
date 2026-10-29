@@ -8,10 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // TestService_PostsActivityStatsWithProbedStatus stands up fake datasources
@@ -530,5 +533,146 @@ func TestProbe_AlertRuleWriteCapabilities(t *testing.T) {
 		if !strings.Contains(string(body), tc.want) {
 			t.Errorf("activity stats %s missing %s", body, tc.want)
 		}
+	}
+}
+
+// The ClickHouse logs fields are reported as the caller found them, beside the
+// logs provider rather than in its place: Loki stays the reported provider.
+func TestProbe_ClickhouseLogsFieldsFromCaller(t *testing.T) {
+	s := &Service{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ds := Datasources{
+		LogsProvider:               "loki",
+		LogsProviderStatus:         true,
+		ClickHouseLogsTablePresent: false,
+		ClickHouseLogsTableError:   "table default.otel_logs is not present",
+		ClickHouseLogsTable:        "default.otel_logs",
+	}
+
+	got := s.probe(context.Background(), ds)
+
+	if got.LogsConnectionProvider != "loki" || !got.LogsConnection {
+		t.Errorf("logs provider = %q/%v; want loki/true untouched", got.LogsConnectionProvider, got.LogsConnection)
+	}
+	if got.ClickhouseLogsConnection || got.ClickhouseLogsConnectionError != ds.ClickHouseLogsTableError || got.ClickhouseLogsTable != "default.otel_logs" {
+		t.Errorf("clickhouse logs = %v/%q/%q; want false/%q/default.otel_logs",
+			got.ClickhouseLogsConnection, got.ClickhouseLogsConnectionError, got.ClickhouseLogsTable, ds.ClickHouseLogsTableError)
+	}
+	if got.ClickhouseLogsCollected {
+		t.Error("clickhouseLogsCollected = true; the switch is off")
+	}
+	ds.ClickHouseLogsCollected = true
+	if got = s.probe(context.Background(), ds); !got.ClickhouseLogsCollected {
+		t.Error("clickhouseLogsCollected = false; the switch is on")
+	}
+}
+
+// All ClickHouse logs keys must be in every post, false and "" included: the
+// collector merges the payload into what it stored before, so a missing key
+// would leave a stale "true" or reason behind.
+func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
+	buf, err := json.Marshal(ActivityStats{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"clickhouseLogsConnection":false`, `"clickhouseLogsConnectionError":""`, `"clickhouseLogsTable":""`, `"clickhouseLogsCollected":false`} {
+		if !strings.Contains(string(buf), key) {
+			t.Errorf("marshalled ActivityStats lacks %s: %s", key, buf)
+		}
+	}
+}
+
+// TestRedactReportedURLs_CoversEveryField is the guard for redactReportedURLs'
+// explicit field lists: it fills every URL-, error- or config-shaped field of
+// ActivityStats with a credential-bearing URL, so a field added later without
+// being redacted fails here instead of shipping credentials to the UI.
+func TestRedactReportedURLs_CoversEveryField(t *testing.T) {
+	const leaky = "https://user:pw@host.example.com/x"
+	var stats ActivityStats
+	v := reflect.ValueOf(&stats).Elem()
+	var filled []string
+	for i := 0; i < v.NumField(); i++ {
+		name := strings.ToLower(strings.Split(v.Type().Field(i).Tag.Get("json"), ",")[0])
+		f := v.Field(i)
+		switch {
+		case f.Kind() == reflect.String && (strings.Contains(name, "url") || strings.Contains(name, "error")):
+			f.SetString(leaky)
+		case f.Type() == reflect.TypeOf([]string{}) && strings.Contains(name, "error"):
+			f.Set(reflect.ValueOf([]string{leaky}))
+		case f.Type() == reflect.TypeOf(map[string]any{}):
+			f.Set(reflect.ValueOf(map[string]any{"endpoint": leaky}))
+		default:
+			continue
+		}
+		filled = append(filled, name)
+	}
+	if len(filled) < 10 {
+		t.Fatalf("filled only %v; the field filter no longer matches ActivityStats", filled)
+	}
+
+	redactReportedURLs(&stats, Datasources{})
+
+	v = reflect.ValueOf(stats)
+	for i := 0; i < v.NumField(); i++ {
+		if b, _ := json.Marshal(v.Field(i).Interface()); strings.Contains(string(b), "pw") {
+			t.Errorf("%s still carries credentials after redaction: %s — add it to redactReportedURLs",
+				v.Type().Field(i).Name, b)
+		}
+	}
+}
+
+// A misread URL's error can name the username as a host ("lookup user: no
+// such host") or quote a password fragment as a port — neither inside a URL.
+func TestProbe_MisparsedURLErrorReplaced(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	got := s.probe(context.Background(), Datasources{
+		PrometheusURL:            "https://admin:12?secret@prom.example.com",
+		PrometheusConnectedError: `Get "https://prom.example.com/api/v1/query": dial tcp: lookup admin: no such host`,
+		ClickHouseStatus:         false,
+		ClickHouseURL:            "admin:se/cret@clickhouse.example.com",
+		ClickHouseError:          `ClickHouse ping failed: invalid port ":se" after host`,
+	})
+	for name, e := range map[string]string{
+		"prometheus": got.PrometheusConnectionError,
+		"traces":     got.TracesConnectionError,
+	} {
+		if e != redact.MisparsedMessage {
+			t.Errorf("%s error = %q, want the misparsed-credentials message", name, e)
+		}
+	}
+}
+
+func TestProbe_RedactsURLCredentials(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	logCfg := map[string]any{"url": "https://user:secret@loki.example.com"}
+	ds := Datasources{
+		PrometheusURL:     "https://user:secret@prom.example.com",
+		LogsProvider:      "loki",
+		LogsProviderURL:   "https://user:secret@loki.example.com",
+		LogProviderConfig: logCfg,
+		ClickHouseStatus:  true,
+		ClickHouseURL:     "default:secret@clickhouse.example.com",
+		// net/http masks only the password; the username must go too.
+		PrometheusConnectedError: `Get "https://user:***@prom.example.com/api/v1/query": EOF`,
+		LogsProviderError:        `Get "https://secret@loki.example.com/ready": EOF`,
+	}
+	body, err := json.Marshal(s.probe(context.Background(), ds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "secret") || strings.Contains(string(body), "user") {
+		t.Fatalf("credentials leaked into the report: %s", body)
+	}
+	for _, want := range []string{"https://prom.example.com", "https://loki.example.com", "clickhouse.example.com"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("report missing %q: %s", want, body)
+		}
+	}
+	for _, want := range []string{`Get \"https://prom.example.com/api/v1/query\": EOF`, `Get \"https://loki.example.com/ready\": EOF`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("report missing redacted error %q: %s", want, body)
+		}
+	}
+	if logCfg["url"] != "https://user:secret@loki.example.com" {
+		t.Errorf("caller's LogProviderConfig was mutated: %v", logCfg["url"])
 	}
 }

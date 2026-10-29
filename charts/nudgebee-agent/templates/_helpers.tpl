@@ -101,9 +101,64 @@ override with an explicit value and skip the derivation entirely.
 {{- end -}}
 
 {{/*
+"true" when the bundled ClickHouse gets the read-only user query_data uses
+(templates/clickhouse-reader-users.yaml): the ClickHouse subchart is installed,
+clickhouse.reader.enabled, and the subchart mounts the users file. An operator's
+own clickhouse.extraVolumes / extraVolumeMounts replace the chart's lists, and an
+upgrade with --reuse-values keeps a release's old values, which have neither the
+reader nor the mount; in both cases the user doesn't exist, so nothing names it.
+*/}}
+{{- define "nudgebee-agent.clickhouseReader" -}}
+{{- $ch := default (dict) .Values.clickhouse -}}
+{{- $otelEnabled := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}
+{{- $volume := false -}}
+{{- range (default (list) $ch.extraVolumes) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "nudgebee-reader-users") -}}{{- $volume = true -}}{{- end -}}
+{{- end -}}
+{{- $mount := false -}}
+{{- range (default (list) $ch.extraVolumeMounts) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "nudgebee-reader-users") -}}{{- $mount = true -}}{{- end -}}
+{{- end -}}
+{{- $reader := $ch.reader -}}
+{{- if and $otelEnabled (kindIs "map" $reader) (get $reader "enabled") $volume $mount -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The cluster's container-log collection mode (logs.collection), validated:
+"none" (default) or "node-agent". One mode per cluster, so no second source
+double-ingests. The runner reports clickhouseLogsCollected from it, so the
+report can't disagree with what the chart deploys.
+*/}}
+{{- define "nudgebee-agent.logsCollection" -}}
+{{- $mode := dig "collection" "none" (default (dict) .Values.logs) | default "none" -}}
+{{- if eq $mode "node-agent" -}}
+{{- if not (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") -}}
+{{- fail "logs.collection=node-agent sends container logs to ClickHouse through the bundled OpenTelemetry collector: set opentelemetry-collector.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.nodeAgent.enabled -}}
+{{- fail "logs.collection=node-agent needs nodeAgent.enabled=true" -}}
+{{- end -}}
+{{- if .Values.nodeAgent.logsEndpoint -}}
+{{- fail "logs.collection=node-agent sets the node-agent's logs endpoint itself: unset nodeAgent.logsEndpoint" -}}
+{{- end -}}
+{{- range (default (list) .Values.nodeAgent.env) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "LOGS_ENDPOINT") -}}
+{{- fail "logs.collection=node-agent sets the node-agent's logs endpoint itself: remove LOGS_ENDPOINT from nodeAgent.env" -}}
+{{- end -}}
+{{- end -}}
+{{- else if eq $mode "otel-daemonset" -}}
+{{- fail "logs.collection=otel-daemonset is not available yet: use node-agent or none" -}}
+{{- else if ne $mode "none" -}}
+{{- fail (printf "logs.collection must be none or node-agent, not %q" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
+{{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
+{{- $logsCollection := include "nudgebee-agent.logsCollection" . }}
 - name: runner
   image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
   imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
@@ -252,6 +307,37 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- if and $otelEnabled (not (has "CLICKHOUSE_HOST" $envVarNames)) }}
     - name: CLICKHOUSE_HOST
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
+    {{- end }}
+    {{- /*
+    Where the bundled collector writes logs, for the runner's ClickHouse logs
+    check. Read from the exporter config, as clickhouse-schema-upgrade-job.yaml
+    does. With the collector off (or an external writer) these stay unset and
+    the runner falls back to otel_logs in CLICKHOUSE_DB.
+    */}}
+    {{- if $otelEnabled }}
+    {{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
+    {{- if not (has "CLICKHOUSE_LOGS_DATABASE" $envVarNames) }}
+    - name: CLICKHOUSE_LOGS_DATABASE
+      value: {{ default "default" (get $chExporter "database") | quote }}
+    {{- end }}
+    {{- if not (has "CLICKHOUSE_LOGS_TABLE" $envVarNames) }}
+    - name: CLICKHOUSE_LOGS_TABLE
+      value: {{ default "otel_logs" (get $chExporter "logs_table_name") | quote }}
+    {{- end }}
+    {{- /*
+    query_data reads through the read-only user templates/clickhouse-reader-users.yaml
+    creates, which exists only where the bundled ClickHouse mounts it: not when an
+    operator points CLICKHOUSE_HOST elsewhere.
+    */}}
+    {{- if and (include "nudgebee-agent.clickhouseReader" .) (not (has "CLICKHOUSE_HOST" $envVarNames)) (not (has "CLICKHOUSE_READER_USER" $envVarNames)) }}
+    - name: CLICKHOUSE_READER_USER
+      value: nudgebee_reader
+    {{- end }}
+    {{- /* Reported as clickhouseLogsCollected; set only by the switch. */}}
+    {{- if eq $logsCollection "node-agent" }}
+    - name: CLICKHOUSE_LOGS_COLLECTED
+      value: "true"
+    {{- end }}
     {{- end }}
     {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in
@@ -460,6 +546,26 @@ ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse s
 {{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+PromQL label matchers for this release's ClickHouse scrape target. The Prometheus
+operator labels every ServiceMonitor target with the Service's namespace and name;
+job is the Service name too, unless serviceMonitor.jobLabel renames it.
+*/}}
+{{- define "nudgebee-agent.clickhouse.target" -}}
+{{- $ns := default .Release.Namespace .Values.clickhouse.namespaceOverride | trunc 63 | trimSuffix "-" -}}
+{{- printf "namespace=%q,service=%q" $ns (include "nudgebee-agent.clickhouse.servicename" .) -}}
+{{- end -}}
+
+{{/*
+A value copied into the collector config by a {{ }} reference in its values (the
+clickhouse/logs exporter). The collector chart renders its config with
+tpl (toYaml ...), which leaves the reference inside single quotes, so a ' in the
+value is doubled to keep the rendered YAML valid.
+*/}}
+{{- define "nudgebee-agent.collectorQuoted" -}}
+{{- replace "'" "''" (toString .) -}}
 {{- end -}}
 
 {{/*

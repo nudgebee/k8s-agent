@@ -88,11 +88,11 @@ runnerServiceAccount:
 runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
-    tag: 2026-10-02T19-52-51_a218fe2ad2061ec8f3c74af5518026d63936cdb6
+    tag: 2026-10-05T18-41-56_c54355997233265c8a310e8957471ad298fc8ffd
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
-  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:e8fe8d4"
+  profilerImage: "ghcr.io/nudgebee/application-profiler-{}:04f4a18"
   imagePullPolicy: IfNotPresent
   # Expose net/http/pprof on the runner HTTP listener (surfaces as
   # PPROF_ENABLED). Off by default — the endpoints are unauthenticated;
@@ -240,6 +240,21 @@ runner:
   relay_address: wss://relay.nudgebee.com/register
   clickhouse_enabled: true
   clickhouse_secret: ""
+  # Where service_map reads the eBPF edge and container metrics:
+  #   prometheus  PromQL only (default).
+  #   shadow      serves the PromQL map; every 15 min per window also builds the
+  #               ClickHouse map and logs how the two differ.
+  #   clickhouse  edges and container health from ClickHouse, pods/services
+  #               still from Prometheus; falls back to Prometheus whenever
+  #               ClickHouse does not cover the requested window.
+  # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
+  # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
+  # holds this cluster's metrics only (the bundled one does). They create
+  # per-minute summary tables (nb_service_map_*_v1) fed by materialized views
+  # on otel_metrics_sum/_histogram, kept 7 days; the ClickHouse user needs DDL
+  # rights. A window from before the tables existed falls back to Prometheus.
+  # The prometheus default creates nothing.
+  serviceMapSource: prometheus
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.
@@ -352,6 +367,32 @@ runner:
     relay_signing_public_key: ''
   serviceAccount:
     annotations: {}
+# Where this cluster's container logs are collected. One mode per cluster:
+#   none        Not collected by this chart (default). Logs come from your own
+#               provider (Loki, Elasticsearch, ...), as before.
+#   node-agent  The node-agent ships every container's stdout/stderr through the
+#               bundled OpenTelemetry collector into ClickHouse, and the agent
+#               reports that its logs are collected there, so NudgeBee can read
+#               them. Needs opentelemetry-collector.enabled and nodeAgent.enabled;
+#               leave nodeAgent.logsEndpoint empty. Logs share ClickHouse's disk
+#               and retention with traces. Logs from kube-system and the agent's
+#               own namespace are dropped (filter/drop_log_namespaces under
+#               opentelemetry-collector.config.processors).
+#               Delivery is at least once: each node-agent saves how far every
+#               file was delivered under /var/lib/nudgebee-node-agent on the node
+#               and resumes there after a restart, and while the collector or
+#               ClickHouse is down or slow, unsent lines wait in the node's log
+#               files rather than being dropped. A paused node-agent finishes
+#               the file it has open after the kubelet rotates it, but not files
+#               rotated away in between (the kubelet compresses them), so an
+#               outage loses nothing while each container writes less than
+#               about one log file (containerLogMaxSize, 10 MiB by default).
+#               The positions stay on the node after helm uninstall, in
+#               /var/lib/nudgebee-node-agent/<namespace>-<release> on every
+#               node; remove that directory by hand once the agent is gone.
+# Loki or another provider keeps working alongside either mode.
+logs:
+  collection: none
 nodeAgent:
   enabled: true
   podmonitor:
@@ -374,7 +415,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.8
+    tag: 0.1.11
   resources:
     requests:
       cpu: "100m"
@@ -472,6 +513,16 @@ opentelemetry-collector:
         traces:
           span:
             - attributes["k8s.namespace.name"] == "kube-system"
+      # Drops container logs (logs.collection=node-agent) from kube-system and the
+      # agent's own namespace before ClickHouse, whose disk they share with traces.
+      # An override replaces the whole list. The subchart fills in
+      # {{ .Release.Namespace }}.
+      filter/drop_log_namespaces:
+        error_mode: ignore
+        logs:
+          log_record:
+            - resource.attributes["k8s.namespace.name"] == "kube-system"
+            - resource.attributes["k8s.namespace.name"] == "{{ .Release.Namespace }}"
       filter/drop_health_check:
         error_mode: ignore
         traces:
@@ -496,7 +547,14 @@ opentelemetry-collector:
         send_batch_size: 25000
     exporters:
       clickhouse:
-        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4" # Default endpoint, can be overridden
+        # materialized_views_ignore_errors: a broken service-map summary view
+        # must lose only its own rows, never fail the metric insert. Keep it
+        # when overriding the endpoint. It applies to every insert on this
+        # connection — logs, traces and metrics — so a failure in the
+        # exporter's own otel_traces_trace_id_ts_mv also drops only that
+        # view's rows instead of failing the trace insert. Failed view runs
+        # stay visible in system.query_views_log.
+        endpoint: "tcp://nudgebee-agent-clickhouse:9000?dial_timeout=10s&compress=lz4&materialized_views_ignore_errors=1" # Default endpoint, can be overridden
         database: default
         ttl: 168h
         username: default
@@ -509,6 +567,46 @@ opentelemetry-collector:
           initial_interval: 5s
           max_interval: 30s
           max_elapsed_time: 300s
+      # Container logs (logs.collection=node-agent) get their own exporter, with
+      # the connection settings of `clickhouse` above (the collector chart fills
+      # in the {{ }} references, so an override of `clickhouse` applies here
+      # too; nudgebee-agent.collectorQuoted keeps a ' in a value from breaking
+      # the rendered config), so that a ClickHouse outage or a full disk holds
+      # them back instead of dropping them:
+      # - it retries without a time limit (max_elapsed_time: 0);
+      # - it batches from its own queue, and the logs pipeline has no batch
+      #   processor, which would accept records and drop them later: when the
+      #   queue is full the receiver waits (block_on_overflow), so node-agents
+      #   keep unsent lines in the node's log files and send them once
+      #   ClickHouse is back.
+      # The queue holds up to queue_size records, about 1-2 KiB each in memory
+      # (100-200 MiB here), within resources.limits.memory; memory_limiter,
+      # first in the pipeline, refuses records (HTTP 503, which node-agents
+      # retry) before memory runs out. Records in the queue are still lost if
+      # the collector itself restarts or is OOM-killed while ClickHouse is down
+      # (the queue is in memory). Traces and metrics keep `clickhouse` above.
+      clickhouse/logs:
+        endpoint: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.endpoint }}'
+        database: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.database }}'
+        ttl: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.ttl }}'
+        username: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.username }}'
+        password: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.password }}'
+        logs_table_name: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.logs_table_name }}'
+        timeout: '{{ include "nudgebee-agent.collectorQuoted" .Values.config.exporters.clickhouse.timeout }}'
+        sending_queue:
+          enabled: true
+          sizer: items
+          queue_size: 100000
+          block_on_overflow: true
+          batch:
+            flush_timeout: 5s
+            min_size: 20000
+            max_size: 25000
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 0
     service:
       # memory_limiter must stay FIRST in every pipeline. The subchart defines the
       # processor (sized off resources.limits.memory) and puts it first in its own
@@ -521,8 +619,9 @@ opentelemetry-collector:
           exporters: [clickhouse]
           receivers: [otlp]
         logs:
-          processors: [memory_limiter, batch]
-          exporters: [clickhouse]
+          # No batch processor: clickhouse/logs batches (see above).
+          processors: [memory_limiter, filter/drop_log_namespaces]
+          exporters: [clickhouse/logs]
           receivers: [otlp]
         metrics:
           processors: [memory_limiter, batch]
@@ -553,7 +652,55 @@ clickhouse:
     # key `admin-password`). To pin a value, set it here or pass via
     # `--set clickhouse.auth.password=...`.
     password: ""
-  extraOverrides: "<clickhouse>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log remove=\"1\" />\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  # Most system logs are off to save disk. query_views_log stays: the runner's
+  # ClickHouse service map reads failed summary-view runs from it, and serves
+  # only windows it still covers (without it every map read falls back to
+  # Prometheus). It keeps 8 days, longer than the summary tables' 7, in daily
+  # partitions dropped whole once expired.
+  #
+  # merge_tree.min_free_disk_ratio_to_perform_insert: inserts into any table stop
+  # while less than 5% of the disk is free, so a filling disk stops ingestion
+  # with room left for merges, TTL part drops and queries, instead of filling up
+  # and failing everything. The ClickHouseDisk* alerts below fire before that.
+  # Refused trace and metric inserts are retried by the collector for
+  # retry_on_failure's max_elapsed_time, then dropped; container logs are held
+  # back until inserts resume (the clickhouse/logs exporter).
+  extraOverrides: "<clickhouse>\n  <merge_tree>\n    <min_free_disk_ratio_to_perform_insert>0.05</min_free_disk_ratio_to_perform_insert>\n  </merge_tree>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  # A read-only user for the runner's query_data action, which runs SQL the
+  # NudgeBee backend sends (log and trace reads, LLM-written log queries
+  # included). It can read and set query settings (readonly=2) but not write
+  # or change the schema, and it is granted only SELECT and SHOW, so the SQL
+  # can't use table functions that reach the network (url, s3, remote, ...).
+  # Its limits stop a runaway query: the defaults apply when a query sets
+  # nothing, and a query can lower but not raise them past the ceilings, or
+  # set them to 0. It shares the admin password (the
+  # runner holds that one anyway); schema changes and the collector's inserts
+  # keep the admin user. Defined in templates/clickhouse-reader-users.yaml and
+  # mounted by the extraVolumes / extraVolumeMounts entries below. If you set
+  # your own lists, keep both nudgebee-reader-users entries or drop both (a
+  # mount without its volume fails the StatefulSet); without them query_data
+  # uses the admin user. Changed limits apply after the ClickHouse pod restarts.
+  reader:
+    enabled: true
+    maxExecutionTime: 60        # seconds, when a query sets none
+    maxExecutionTimeCeiling: 600
+    maxRowsToRead: 2000000000
+    # Bytes per query. The pod's limit is 2000Mi, so ClickHouse allows about
+    # 1.8GB in all; this leaves room for inserts and merges. Raise both together.
+    maxMemoryUsage: 1500000000
+    # A sort or GROUP BY past this many bytes spills to disk rather than
+    # reaching maxMemoryUsage.
+    maxBytesBeforeSpill: 500000000
+  extraVolumes:
+    - name: nudgebee-reader-users
+      configMap:
+        name: '{{ include "common.names.fullname" . }}-reader-users'
+        optional: true
+  extraVolumeMounts:
+    - name: nudgebee-reader-users
+      # The image copies files under /bitnami/clickhouse/etc/users.d/*/ into
+      # ClickHouse's users.d.
+      mountPath: /bitnami/clickhouse/etc/users.d/nudgebee-reader
   resources:
     requests:
       cpu: 100m
@@ -579,27 +726,51 @@ clickhouse:
       enabled: false
       interval: 30s
       scrapeTimeout: 10s
+    # Rendered by this chart (templates/clickhouse-prometheusrule.yaml), not by
+    # the Bitnami subchart, which has no PrometheusRule template. Each expr goes
+    # through tpl: nudgebee-agent.clickhouse.target expands to this release's
+    # scrape target (namespace="...",service="..."), so the rules never match
+    # another release's ClickHouse in the same Prometheus.
     prometheusRule:
       enabled: true
       rules:
+        # Fires on a failed scrape (up == 0) and when the target is gone
+        # altogether (absent), e.g. the pod cannot be scheduled.
         - alert: ClickHouseInstanceDown
-          expr: up{job="clickhouse"} == 0
+          expr: up{ {{- include "nudgebee-agent.clickhouse.target" . -}} } == 0 or absent(up{ {{- include "nudgebee-agent.clickhouse.target" . -}} })
           for: 2m
           labels:
             severity: critical
           annotations:
             summary: "ClickHouse instance is down"
-            description: "ClickHouse node is not responding for more than 2 minutes."
-        - alert: ClickHouseHighLatency
-          # Divide only where queries ran: with none, rate(_count) is 0 and a
-          # float wobble in _sum turns the ratio into +Inf, firing falsely.
-          expr: rate(clickhouse_query_duration_seconds_sum[5m]) / (rate(clickhouse_query_duration_seconds_count[5m]) > 0) > 1
-          for: 5m
+            description: "Prometheus has not scraped ClickHouse for more than 2 minutes."
+        # Logs, traces and metrics share the ClickHouse disk, and its TTL drops
+        # data by age, not size. Inserts stop at 95% full
+        # (min_free_disk_ratio_to_perform_insert in extraOverrides). ClickHouse
+        # puts the disk name in the metric name (DiskAvailable_<disk>), so
+        # label_replace moves it to a disk label and every disk is covered.
+        - alert: ClickHouseDiskFilling
+          expr: |-
+            1 - label_replace({__name__=~"ClickHouseAsyncMetrics_DiskAvailable_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskAvailable_(.+)")
+              / label_replace({__name__=~"ClickHouseAsyncMetrics_DiskTotal_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskTotal_(.+)")
+              > 0.8
+          for: 10m
           labels:
             severity: warning
           annotations:
-            summary: "High query latency detected on ClickHouse"
-            description: "Average query duration is above 1 second over last 5 minutes."
+            summary: "ClickHouse disk {{ $labels.disk }} is over 80% full"
+            description: "ClickHouse stops accepting logs, traces and metrics at 95%. Enlarge the volume or shorten the retention."
+        - alert: ClickHouseDiskAlmostFull
+          expr: |-
+            1 - label_replace({__name__=~"ClickHouseAsyncMetrics_DiskAvailable_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskAvailable_(.+)")
+              / label_replace({__name__=~"ClickHouseAsyncMetrics_DiskTotal_.+", {{ include "nudgebee-agent.clickhouse.target" . }}}, "disk", "$1", "__name__", "ClickHouseAsyncMetrics_DiskTotal_(.+)")
+              > 0.9
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ClickHouse disk {{ $labels.disk }} is over 90% full"
+            description: "ClickHouse stops accepting logs, traces and metrics at 95%. Enlarge the volume or shorten the retention."
 alertmanager:
   create_nb_default_rules: true
   # --------------------------------------------------------------------------

@@ -1,7 +1,6 @@
 package kube
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/google/shlex"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/cmdout"
 )
 
 // allowedKubectlVerbs is the closed list of subcommands the agent will run
@@ -225,6 +226,14 @@ type cmdSegment struct {
 // pipes and redirects are rejected. Stdout, stderr, and exit code are returned
 // together — callers consume all three.
 func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]any, error) {
+	return k.RunEncoded(ctx, command, "")
+}
+
+// RunEncoded is Run with stdout collected in outputEncoding (see pkg/cmdout):
+// "" returns it as text in "stdout"; cmdout.Gzip compresses it as kubectl
+// writes it and returns it in "stdout_gzip_b64", so output of any size is
+// neither held nor sent raw.
+func (k *KubectlExecutor) RunEncoded(ctx context.Context, command, outputEncoding string) (map[string]any, error) {
 	if command == "" {
 		return nil, errors.New("kubectl: command is required")
 	}
@@ -259,7 +268,7 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 	if bin == "" {
 		bin = "kubectl"
 	}
-	return k.runSegments(ctx, bin, segments)
+	return k.runSegments(ctx, bin, segments, cmdout.New(outputEncoding))
 }
 
 // splitSegments partitions shlex tokens into command segments on the sequential
@@ -362,27 +371,34 @@ func shouldRunSegment(op string, prevExit int) bool {
 }
 
 // execResult packages the aggregated stdout/stderr and the running exit code
-// into the map shape the action handler consumes.
-func execResult(stdout, stderr *bytes.Buffer, exitCode int) map[string]any {
-	return map[string]any{
-		"stdout":    stdout.String(),
+// into the map shape the action handler consumes. runErr is the chain's own
+// error, returned alongside the partial output; it takes precedence over a
+// failure to finish the stdout encoding.
+func execResult(stdout *cmdout.Output, stderr *strings.Builder, exitCode int, runErr error) (map[string]any, error) {
+	res := map[string]any{
 		"stderr":    stderr.String(),
 		"exit_code": exitCode,
 	}
+	if err := stdout.AddTo(res); err != nil && runErr == nil {
+		return res, fmt.Errorf("kubectl: encode stdout: %w", err)
+	}
+	return res, runErr
 }
 
 // runSegments executes segments in order, honoring &&/||/; short-circuiting, and
 // aggregates their output. exit_code is the status of the last command that
 // actually ran (skipped segments carry the prior status forward, as in a shell).
 // A cancelled or timed-out context stops the chain and propagates its error.
-func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments []cmdSegment) (map[string]any, error) {
-	var stdout, stderr bytes.Buffer
+func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments []cmdSegment, stdout *cmdout.Output) (map[string]any, error) {
+	// strings.Builder, not bytes.Buffer: String() hands its buffer over without
+	// copying it, and command output can be hundreds of MB.
+	var stderr strings.Builder
 	exitCode := 0 // status carried between segments for &&/|| short-circuit
 
 	for i, seg := range segments {
 		// Don't start another kubectl once the context is done (deadline/cancel).
 		if err := ctx.Err(); err != nil {
-			return execResult(&stdout, &stderr, exitCode), err
+			return execResult(stdout, &stderr, exitCode, err)
 		}
 		if i > 0 && !shouldRunSegment(seg.op, exitCode) {
 			continue
@@ -390,7 +406,7 @@ func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments 
 
 		// Verb allowlist enforced per segment in validateSegment above.
 		cmd := exec.CommandContext(ctx, bin, seg.args...) //nolint:gosec // verb-allowlist enforced per segment
-		cmd.Stdout = &stdout
+		cmd.Stdout = stdout
 		cmd.Stderr = &stderr
 		runErr := cmd.Run()
 
@@ -407,7 +423,7 @@ func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments 
 		// (which we'd otherwise surface as data or, on the last segment, as
 		// success). Propagate the context error and stop the chain.
 		if err := ctx.Err(); err != nil {
-			return execResult(&stdout, &stderr, exitCode), err
+			return execResult(stdout, &stderr, exitCode, err)
 		}
 
 		if runErr != nil {
@@ -416,10 +432,10 @@ func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments 
 			// exec failure (binary missing) is a hard error and stops the chain.
 			var exitErr *exec.ExitError
 			if !errors.As(runErr, &exitErr) {
-				return execResult(&stdout, &stderr, exitCode), fmt.Errorf("kubectl exec: %w", runErr)
+				return execResult(stdout, &stderr, exitCode, fmt.Errorf("kubectl exec: %w", runErr))
 			}
 		}
 	}
 
-	return execResult(&stdout, &stderr, exitCode), nil
+	return execResult(stdout, &stderr, exitCode, nil)
 }

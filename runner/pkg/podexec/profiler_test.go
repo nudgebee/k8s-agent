@@ -28,27 +28,132 @@ func TestProfilingToolForType(t *testing.T) {
 		ptype    ProfileType
 		wantTool ProfilingTool
 		wantOut  OutputType
+		wantOK   bool
 	}{
-		{LangJava, ProfileMemory, ToolJcmd, OutputHeapHistogram},
-		{LangJava, ProfileCPU, ToolJcmd, OutputThreadDump},
-		{LangPython, ProfileCPU, ToolPyspy, OutputFlameGraph},
-		{LangPython, ProfileMemory, ToolAustin, OutputRaw},
-		{LangNode, ProfileCPU, ToolPerf, OutputFlameGraph},
-		{LangNode, ProfileMemory, ToolPerf, OutputHeapDump},
-		{LangGo, ProfileCPU, ToolPprof, OutputPprof},
-		{LangGo, ProfileMemory, ToolPprof, OutputHeapDump},
-		{LangRuby, ProfileCPU, ToolRbspy, OutputFlameGraph},
-		// Fallback path — `Bpf, FlameGraph` for anything not explicitly mapped.
-		{LangRust, ProfileCPU, ToolBpf, OutputFlameGraph},
-		{LangClang, ProfileMemory, ToolBpf, OutputFlameGraph},
-		{LangUnknown, ProfileCPU, ToolBpf, OutputFlameGraph},
+		{LangJava, ProfileMemory, ToolJcmd, OutputHeapHistogram, true},
+		{LangJava, ProfileCPU, ToolJcmd, OutputThreadDump, true},
+		{LangPython, ProfileCPU, ToolPyspy, OutputFlameGraph, true},
+		{LangPython, ProfileMemory, ToolAustin, OutputRaw, true},
+		{LangNode, ProfileCPU, ToolPerf, OutputFlameGraph, true},
+		{LangGo, ProfileCPU, ToolPprof, OutputPprof, true},
+		{LangGo, ProfileMemory, ToolPprof, OutputHeapDump, true},
+		{LangRuby, ProfileCPU, ToolRbspy, OutputFlameGraph, true},
+		// Fallback path — `Bpf, FlameGraph` for any CPU profile not explicitly mapped.
+		{LangRust, ProfileCPU, ToolBpf, OutputFlameGraph, true},
+		{LangUnknown, ProfileCPU, ToolBpf, OutputFlameGraph, true},
+		// No memory profiler for these: they used to come back as a CPU
+		// flamegraph labelled "memory".
+		{LangNode, ProfileMemory, "", "", false},
+		{LangRuby, ProfileMemory, "", "", false},
+		{LangClang, ProfileMemory, "", "", false},
+		{LangRust, ProfileMemory, "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.lang)+"/"+string(tc.ptype), func(t *testing.T) {
-			tool, out := profilingToolForType(tc.lang, tc.ptype)
+			tool, out, ok := profilingToolForType(tc.lang, tc.ptype)
+			if tool != tc.wantTool || out != tc.wantOut || ok != tc.wantOK {
+				t.Errorf("profilingToolForType(%q,%q) = (%q,%q,%v); want (%q,%q,%v)",
+					tc.lang, tc.ptype, tool, out, ok, tc.wantTool, tc.wantOut, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestResolveTool covers the requests the profiler screen and API callers
+// send. The screen sends output_type "flamegraph" with every cpu/memory
+// request; before profile_type decided the tool, that output silently won
+// and every "memory" request for Python or Go came back as a CPU profile.
+func TestResolveTool(t *testing.T) {
+	cases := []struct {
+		name     string
+		lang     ProgrammingLanguage
+		req      ProfileRequest
+		wantTool ProfilingTool
+		wantOut  OutputType
+		wantErr  string
+	}{
+		// Profile type decides; flamegraph kept where the tool draws one.
+		{name: "python memory flamegraph", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantTool: ToolAustin, wantOut: OutputFlameGraph},
+		{name: "python memory default", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileMemory},
+			wantTool: ToolAustin, wantOut: OutputRaw},
+		{name: "python cpu flamegraph", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolPyspy, wantOut: OutputFlameGraph},
+		// go_pprof cannot draw a flamegraph; the profiler would hand back
+		// a CPU pprof for either type, so the type's own output is used.
+		{name: "go memory flamegraph", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantTool: ToolPprof, wantOut: OutputHeapDump},
+		{name: "go cpu flamegraph", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolPprof, wantOut: OutputPprof},
+		{name: "go cpu raw is not buildable", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputRaw},
+			wantTool: ToolPprof, wantOut: OutputPprof},
+		{name: "node cpu flamegraph", lang: LangNode,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolPerf, wantOut: OutputFlameGraph},
+		{name: "node memory unsupported", lang: LangNode,
+			req:     ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantErr: "memory profiling is not available for node targets"},
+		{name: "ruby memory unsupported", lang: LangRuby,
+			req:     ProfileRequest{ProfileType: ProfileMemory},
+			wantErr: "memory profiling is not available for ruby targets"},
+		// Same profile type, another tool of the same language.
+		{name: "java cpu flamegraph via async-profiler", lang: LangJava,
+			req:      ProfileRequest{ProfileType: ProfileCPU, OutputType: OutputFlameGraph},
+			wantTool: ToolAsyncProfiler, wantOut: OutputFlameGraph},
+		{name: "java memory flamegraph stays a heap profile", lang: LangJava,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputFlameGraph},
+			wantTool: ToolJcmd, wantOut: OutputHeapHistogram},
+		{name: "java memory heapdump", lang: LangJava,
+			req:      ProfileRequest{ProfileType: ProfileMemory, OutputType: OutputHeapDump},
+			wantTool: ToolJcmd, wantOut: OutputHeapDump},
+		{name: "unknown profile type", lang: LangGo,
+			req:     ProfileRequest{ProfileType: "wall"},
+			wantErr: `unknown profile_type "wall"`},
+		// A named tool runs as asked, whatever the profile type says.
+		{name: "explicit tool kept", lang: LangGo,
+			req:      ProfileRequest{ProfileType: ProfileMemory, ProfileTool: ToolPprof, OutputType: OutputFlameGraph},
+			wantTool: ToolPprof, wantOut: OutputFlameGraph},
+		{name: "explicit tool no output", lang: LangPython,
+			req:      ProfileRequest{ProfileType: ProfileCPU, ProfileTool: ToolPyspy},
+			wantTool: ToolPyspy, wantOut: OutputFlameGraph},
+		// No profile type: output_type picks the tool, as before (the
+		// screen's Java and native-language paths).
+		{name: "java jfr no type", lang: LangJava,
+			req:      ProfileRequest{OutputType: OutputJfr},
+			wantTool: ToolJcmd, wantOut: OutputJfr},
+		{name: "ruby flamegraph no type", lang: LangRuby,
+			req:      ProfileRequest{OutputType: OutputFlameGraph},
+			wantTool: ToolRbspy, wantOut: OutputFlameGraph},
+		{name: "nothing given", lang: LangRust,
+			req:      ProfileRequest{},
+			wantTool: ToolBpf, wantOut: OutputFlameGraph},
+		{name: "nothing given, java", lang: LangJava,
+			req:      ProfileRequest{},
+			wantTool: ToolAsyncProfiler, wantOut: OutputFlameGraph},
+		{name: "tool given without output keeps the tool", lang: LangJava,
+			req:      ProfileRequest{ProfileTool: ToolJcmd},
+			wantTool: ToolJcmd, wantOut: OutputFlameGraph},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool, out, err := resolveTool(tc.lang, tc.req)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v; want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			if tool != tc.wantTool || out != tc.wantOut {
-				t.Errorf("profilingToolForType(%q,%q) = (%q,%q); want (%q,%q)",
-					tc.lang, tc.ptype, tool, out, tc.wantTool, tc.wantOut)
+				t.Errorf("resolveTool = (%q,%q); want (%q,%q)", tool, out, tc.wantTool, tc.wantOut)
 			}
 		})
 	}
@@ -278,63 +383,13 @@ func TestBuildDebuggerPod_ArgsMatchLegacy(t *testing.T) {
 }
 
 // ---------- streamUntilResult ----------
-// We can't drive client-go's GetLogs Stream directly from a fake
-// clientset (the fake doesn't pipe through arbitrary log content), but
-// we can test the parser shape via a helper that takes an io.Reader.
-// Refactor: extract the scan loop into a tiny function.
+// readProfilerEvents is streamUntilResult's parse loop over any reader, so
+// the JSON-event parsing is covered without a real K8s log stream.
 
-// scanForResult mirrors streamUntilResult's parse loop. Tested in
-// isolation so the JSON-event parsing has full coverage without needing
-// a real K8s log stream.
 func scanForResult(t *testing.T, lines []string) (map[string]any, error) {
 	t.Helper()
-	var b bytes.Buffer
-	for _, l := range lines {
-		b.WriteString(l)
-		b.WriteByte('\n')
-	}
-	// Use the same scanner the real path uses by calling the production
-	// parser via a tiny adapter — this avoids duplicating the buffer
-	// sizing logic.
-	return scanResultFromReader(&b)
-}
-
-// scanResultFromReader is the testable subset of streamUntilResult.
-// We replicate the Scanner setup but read from any io.Reader so tests
-// can feed canned content. The production streamUntilResult function
-// keeps its current signature; this is a parallel helper used only by
-// tests, structured to share the same JSON shape so behaviour drift
-// gets caught.
-func scanResultFromReader(r *bytes.Buffer) (map[string]any, error) {
-	// Inline simplification of streamUntilResult's loop. We don't share
-	// the function because the production version owns the http stream
-	// lifecycle (Close + buffer sizing); the test only needs the parse.
-	lines := strings.Split(r.String(), "\n")
-	endedSeen := false
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var ev resultEvent
-		if json.Unmarshal([]byte(line), &ev) != nil {
-			continue
-		}
-		switch ev.Type {
-		case "result":
-			return ev.Data, nil
-		case "error":
-			return nil, errors.New("profiler reported error")
-		case "progress":
-			if stage, _ := ev.Data["stage"].(string); stage == "ended" {
-				endedSeen = true
-			}
-		}
-	}
-	if endedSeen {
-		return nil, errors.New("profiler ended without emitting a result event")
-	}
-	return nil, errors.New("log stream closed before result")
+	res, _, err := readProfilerEvents(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+	return res, err
 }
 
 func TestScanForResult_HappyPath(t *testing.T) {
@@ -371,6 +426,50 @@ func TestScanForResult_ErrorEvent(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "profiler reported error") {
 		t.Errorf("err = %v; want 'profiler reported error'", err)
+	}
+}
+
+// TestScanForResult_ErrorEventReason — the profiler's reason is kept as
+// text (not a Go map dump) and as a typed error, which is what the Go
+// pprof fallback inspects.
+func TestScanForResult_ErrorEventReason(t *testing.T) {
+	_, err := scanForResult(t, []string{
+		`{"type":"progress","data":{"stage":"started"}}`,
+		`{"type":"error","data":{"reason":"no PIDs found for container ID: abc"}}`,
+	})
+	var perr *profilerError
+	if !errors.As(err, &perr) {
+		t.Fatalf("err = %v (%T); want *profilerError", err, err)
+	}
+	if perr.Reason != "no PIDs found for container ID: abc" {
+		t.Errorf("Reason = %q", perr.Reason)
+	}
+	if want := "pod_profiler: profiler reported error: no PIDs found for container ID: abc"; err.Error() != want {
+		t.Errorf("err = %q; want %q", err, want)
+	}
+}
+
+// TestReadProfilerEvents_TailWithoutVerdict — with no result or error the
+// last lines come back for the error message, JSON events cut down to
+// their payload and anything else kept as written.
+func TestReadProfilerEvents_TailWithoutVerdict(t *testing.T) {
+	lines := []string{`{"type":"progress","data":{"stage":"started"}}`}
+	for i := 0; i < 30; i++ {
+		lines = append(lines, "noise")
+	}
+	lines = append(lines, "panic: runtime error: index out of range")
+	_, tail, err := readProfilerEvents(strings.NewReader(strings.Join(lines, "\n")))
+	if !errors.Is(err, errStreamClosed) {
+		t.Fatalf("err = %v; want errStreamClosed", err)
+	}
+	if len(tail) != debuggerLogTailLines {
+		t.Fatalf("tail has %d lines; want %d", len(tail), debuggerLogTailLines)
+	}
+	if got := tail[len(tail)-1]; got != "panic: runtime error: index out of range" {
+		t.Errorf("last tail line = %q", got)
+	}
+	if compactLogLine(`{"type":"notice","data":{"msg":"Detected more than one PID"}}`) != "notice: Detected more than one PID" {
+		t.Error("JSON events should be rendered as their payload")
 	}
 }
 
@@ -533,8 +632,13 @@ func TestProfile_RejectsMissingTargetPod(t *testing.T) {
 	_, err := h.Profile(context.Background(), ProfileRequest{
 		Name: "missing", Namespace: "shop",
 	})
-	if err == nil || !strings.Contains(err.Error(), "get target pod") {
-		t.Errorf("err = %v; want 'get target pod' wrapping", err)
+	if err == nil || err.Error() != "pod_profiler: pod shop/missing no longer exists" {
+		t.Errorf("err = %v; want 'pod shop/missing no longer exists'", err)
+	}
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "create" {
+			t.Errorf("unexpected %s %s for a missing target", a.GetVerb(), a.GetResource().Resource)
+		}
 	}
 }
 
@@ -542,14 +646,23 @@ func TestProfile_RejectsMissingTargetPod(t *testing.T) {
 
 // fakeProm returns a canned /api/v1/query body (or an error) for
 // detectLang. It records the query so the test can assert the matcher.
+// failures are returned, in order, by the first calls; err by every call.
 type fakeProm struct {
 	body     string
 	err      error
+	failures []error
+	calls    int
 	lastSeen string
 }
 
 func (f *fakeProm) Query(_ context.Context, query, _, _ string) (json.RawMessage, error) {
 	f.lastSeen = query
+	f.calls++
+	if len(f.failures) > 0 {
+		err := f.failures[0]
+		f.failures = f.failures[1:]
+		return nil, err
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -596,6 +709,7 @@ func TestDetectLang(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+			h.langRetryDelay = time.Millisecond
 			if !tc.noSet {
 				h.SetLanguageDetector(tc.prom)
 			}
@@ -621,9 +735,69 @@ func TestDetectLang_QuotesMatcher(t *testing.T) {
 	// The backslash QuoteMeta adds must reach Prometheus as a literal, so it
 	// is doubled: a bare `\.` inside a PromQL string literal is an unknown
 	// escape sequence and fails the whole query at parse time.
-	want := `container_application_type{container_id=~"/k8s/shop/cart\\.0/.*"}`
+	// last_over_time reaches back past a missed scrape, where an instant
+	// selector would find no sample at "now".
+	want := `last_over_time(container_application_type{container_id=~"/k8s/shop/cart\\.0/.*"}[15m])`
 	if p.lastSeen != want {
 		t.Errorf("query = %s; want %s", p.lastSeen, want)
+	}
+}
+
+// TestDetectLang_RetriesFailedLookup — one failed lookup (a dropped
+// connection, a busy Prometheus) is retried; an empty answer is not.
+func TestDetectLang_RetriesFailedLookup(t *testing.T) {
+	cases := []struct {
+		name      string
+		prom      *fakeProm
+		want      ProgrammingLanguage
+		wantCalls int
+		wantWhy   string
+	}{
+		{name: "transient failure then answer",
+			prom: &fakeProm{failures: []error{errors.New("connection reset by peer")}, body: promVector("golang")},
+			want: LangGo, wantCalls: 2},
+		{name: "failure twice",
+			prom: &fakeProm{err: errors.New("connection refused")},
+			want: LangUnknown, wantCalls: 2, wantWhy: "the container_application_type lookup failed: connection refused"},
+		{name: "no series is an answer",
+			prom: &fakeProm{body: promVector()},
+			want: LangUnknown, wantCalls: 1, wantWhy: "no container_application_type metric reported for it"},
+		{name: "rejected query is an answer",
+			prom: &fakeProm{body: `{"status":"error","error":"bad"}`},
+			want: LangUnknown, wantCalls: 1, wantWhy: "Prometheus rejected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+			h.langRetryDelay = time.Millisecond
+			h.SetLanguageDetector(tc.prom)
+			got, why := h.detectLang(context.Background(), "shop", "cart-0")
+			if got != tc.want {
+				t.Errorf("detectLang = %q (%s); want %q", got, why, tc.want)
+			}
+			if tc.prom.calls != tc.wantCalls {
+				t.Errorf("queries = %d; want %d", tc.prom.calls, tc.wantCalls)
+			}
+			if !strings.Contains(why, tc.wantWhy) {
+				t.Errorf("why = %q; want it to contain %q", why, tc.wantWhy)
+			}
+		})
+	}
+}
+
+// TestDetectLang_NoRetryOnceCancelled — a lookup that failed because the
+// run itself is over is not retried.
+func TestDetectLang_NoRetryOnceCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &fakeProm{err: context.Canceled}
+	h := NewProfilerHandler(fake.NewClientset(), fakeRestConfig)
+	h.SetLanguageDetector(p)
+	if got, _ := h.detectLang(ctx, "shop", "cart-0"); got != LangUnknown {
+		t.Errorf("detectLang = %q; want unknown", got)
+	}
+	if p.calls != 1 {
+		t.Errorf("queries = %d; want 1", p.calls)
 	}
 }
 

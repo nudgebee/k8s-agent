@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // ActivityStats is the activity-stats payload. Pydantic on the legacy side
@@ -88,6 +90,22 @@ type ActivityStats struct {
 	// an explicit "" to clear the stale reason — dropping the key would strand
 	// it in the DB forever.
 	TracesConnectionError string `json:"tracesConnectionError"`
+
+	// ClickHouse logs, reported beside the logs provider above rather than in
+	// its place, so a cluster can read logs from ClickHouse without the agent
+	// dropping its Loki. ClickhouseLogsConnection means ClickHouse answers and
+	// the logs table is present — not that logs are arriving. Table is the
+	// checked `database.table`, empty when the agent has no ClickHouse client.
+	// No omitempty, for the same jsonb-merge reason as tracesConnectionError:
+	// a false or "" must overwrite a stale true or reason.
+	ClickhouseLogsConnection      bool   `json:"clickhouseLogsConnection"`
+	ClickhouseLogsConnectionError string `json:"clickhouseLogsConnectionError"`
+	ClickhouseLogsTable           string `json:"clickhouseLogsTable"`
+	// ClickhouseLogsCollected: the chart's logs.collection ships this cluster's
+	// container logs into that ClickHouse. Without it the logs table holds at
+	// most OTLP logs from instrumented apps, so the backend doesn't offer it as
+	// the cluster's logs provider. No omitempty: false must overwrite a stale true.
+	ClickhouseLogsCollected bool `json:"clickhouseLogsCollected"`
 
 	// Alert-rule write capabilities, read by api-server before it offers an edit
 	// or disable of a Prometheus rule. No omitempty: a false must overwrite a
@@ -193,6 +211,16 @@ type Datasources struct {
 	// by the caller. Empty when ClickHouse is healthy or was never probed
 	// (unconfigured / disabled). Surfaced as tracesConnectionError.
 	ClickHouseError string
+	// ClickHouse logs table check, computed by the caller (this package stays
+	// free of a ClickHouse dependency). TablePresent is the clickhouseLogsConnection
+	// flag, TableError its reason (credentials already stripped), Table the
+	// `database.table` that was checked.
+	ClickHouseLogsTablePresent bool
+	ClickHouseLogsTableError   string
+	ClickHouseLogsTable        string
+	// ClickHouseLogsCollected is the chart's logs-collection switch, reported as
+	// clickhouseLogsCollected.
+	ClickHouseLogsCollected bool
 	// HasMaterializedColumns reports whether otel_traces carries the
 	// agent-added materialized columns (workload_name, trace_source, …).
 	// Reported to the backend as traceProviderConfig.hasMaterializedColumn,
@@ -447,6 +475,83 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	// and were forced onto the recompute-from-attributes query shape.
 	out.TraceProviderConfig = map[string]any{"hasMaterializedColumn": ds.HasMaterializedColumns}
 
+	// ClickHouse logs table: checked by the caller, reported as found.
+	out.ClickhouseLogsConnection = ds.ClickHouseLogsTablePresent
+	out.ClickhouseLogsConnectionError = ds.ClickHouseLogsTableError
+	out.ClickhouseLogsTable = ds.ClickHouseLogsTable
+	out.ClickhouseLogsCollected = ds.ClickHouseLogsCollected
+
+	redactReportedURLs(&out, ds)
+	return out
+}
+
+// redactReportedURLs strips credentials from everything in the report that
+// can carry a datasource URL. Operators commonly configure basic auth inline
+// (https://user:pass@host); the probes above need it, but activity_stats is
+// stored as the agent's connection status and rendered verbatim in the UI, so
+// the userinfo must not leave the cluster.
+//
+// TestRedactReportedURLs_CoversEveryField fails when a URL or error field is
+// added to ActivityStats without being listed here.
+func redactReportedURLs(out *ActivityStats, ds Datasources) {
+	for _, f := range []*string{
+		&out.PrometheusURL,
+		&out.AlertManagerURL,
+		&out.LogProviderURL,
+		&out.OpencostURL,
+		&out.TracesURL,
+		&out.AgentURL,
+	} {
+		*f = redact.URL(*f)
+	}
+	for _, f := range []*string{
+		&out.PrometheusConnectionError,
+		&out.AlertManagerConnectionError,
+		&out.LogsConnectionError,
+		&out.OpencostConnectionError,
+		&out.TracesConnectionError,
+		&out.ClickhouseLogsConnectionError,
+	} {
+		*f = redact.Text(*f)
+	}
+	// A URL whose credentials the client misread fails with an error that can
+	// quote fragments of them outside any URL. Report the cause instead.
+	for _, p := range []struct {
+		url string
+		err *string
+	}{
+		{ds.PrometheusURL, &out.PrometheusConnectionError},
+		{ds.AlertManagerURL, &out.AlertManagerConnectionError},
+		{ds.LogsProviderURL, &out.LogsConnectionError},
+		{ds.OpencostURL, &out.OpencostConnectionError},
+		{ds.ClickHouseURL, &out.TracesConnectionError},
+		{ds.ClickHouseURL, &out.ClickhouseLogsConnectionError},
+	} {
+		if *p.err != "" && redact.Misparsed(p.url) {
+			*p.err = redact.MisparsedMessage
+		}
+	}
+	for i, e := range out.Errors {
+		out.Errors[i] = redact.Text(e)
+	}
+	out.LogProviderConfig = redactConfigURLs(out.LogProviderConfig)
+	out.TraceProviderConfig = redactConfigURLs(out.TraceProviderConfig)
+}
+
+// redactConfigURLs returns a copy of a provider config map with every string
+// value passed through redact.URL — any of them may be an endpoint. It copies
+// rather than mutates because the map comes from the caller's Datasources.
+func redactConfigURLs(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]any, len(cfg))
+	for k, v := range cfg {
+		if s, ok := v.(string); ok {
+			v = redact.URL(s)
+		}
+		out[k] = v
+	}
 	return out
 }
 

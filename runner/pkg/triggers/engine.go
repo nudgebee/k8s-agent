@@ -215,9 +215,14 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		extra = append(extra, e.fetchSubjectEvents(ev.Kind, namespace, name)...)
 		extra = append(extra, e.fetchNodeEvents(node)...)
 		extra = append(extra, e.fetchNamespaceEvents(namespace)...)
+		occurrenceKey := ""
+		if spec.OccurrenceKeyFn != nil {
+			occurrenceKey = spec.OccurrenceKeyFn(ev.Obj)
+		}
 		matches = append(matches, Match{
 			Spec:             spec,
 			Fingerprint:      fingerprint,
+			OccurrenceKey:    occurrenceKey,
 			Owner:            ResolveOwner(ev.Obj),
 			SubjectName:      name,
 			SubjectNamespace: namespace,

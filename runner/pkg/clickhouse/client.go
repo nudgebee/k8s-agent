@@ -10,13 +10,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 )
 
 // Client is a ClickHouse HTTP client. Concurrency-safe via the underlying http.Client.
@@ -78,7 +82,21 @@ type QueryResult struct {
 	Error       *string  `json:"error"`
 }
 
-// Query runs the SQL via /?database=...&user=...&password=... POST. The
+// settingPair is one "name = value" of a SETTINGS clause. The value is a
+// number, identifier or bool, or a single-quoted string whose quotes are
+// escaped by a backslash or by doubling, so a quoted comma or "=" stays inside
+// its value.
+const settingPair = `\w+\s*=\s*(?:'(?:[^'\\]|\\.|'')*'|[\w.+-]+)`
+
+// trailingFormat is a statement's closing FORMAT clause, which ClickHouse also
+// accepts before a SETTINGS clause.
+var trailingFormat = regexp.MustCompile(`(?i)\bFORMAT\s+\w+(?:\s+SETTINGS\s+` +
+	settingPair + `(?:\s*,\s*` + settingPair + `)*)?\s*;?$`)
+
+// Query runs the SQL via a POST to /?database=..., with the credentials as HTTP
+// Basic auth rather than URL parameters: a connection error repeats the URL, and
+// errors are reported to the backend and shown in the UI. With no user set it
+// sends ClickHouse's "default". The
 // legacy equivalent is db.run_query(query, values). `values` (positional
 // bind params) are spliced into the query the same way clickhouse-connect
 // does — we accept them but rely on ClickHouse's parameterized-query
@@ -98,38 +116,53 @@ func (c *Client) Query(ctx context.Context, query string, values []any) (*QueryR
 	if q == "" {
 		return errResult("clickhouse: empty query"), nil
 	}
-	// Append FORMAT JSONCompact unless the caller already has one. JSONCompact
-	// gives us {meta:[{name,type}], data:[[...]], rows:N} which we map directly.
-	if !strings.Contains(strings.ToUpper(q), "FORMAT ") {
+	// Append FORMAT JSONCompact unless the statement ends with a FORMAT clause of
+	// its own. JSONCompact gives us {meta:[{name,type}], data:[[...]], rows:N}
+	// which we map directly. "FORMAT " elsewhere, such as in a filter on span
+	// text, is not a clause.
+	if !trailingFormat.MatchString(q) {
 		q += " FORMAT JSONCompact"
 	}
 
 	v := url.Values{}
 	v.Set("database", c.Database)
-	if c.User != "" {
-		v.Set("user", c.User)
-	}
-	if c.Password != "" {
-		v.Set("password", c.Password)
-	}
 	endpoint := c.BaseURL + "/?" + v.Encode()
 
+	// Errors below quote the request URL. The password isn't in it (it goes as
+	// Basic auth), but CLICKHOUSE_HOST may carry userinfo. They reach logs,
+	// action results and the telemetry report, so scrub them here, once.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(q))
 	if err != nil {
-		return nil, err
+		return nil, errors.New(redact.Text(err.Error()))
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	user := c.User
+	if user == "" {
+		user = "default"
+	}
+	req.SetBasicAuth(user, c.Password)
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		// Connection-level errors surface as a result.error so callers see a
 		// uniform shape even when the host is unreachable.
-		return errResult(fmt.Sprintf("clickhouse: %v", err)), nil
+		return errResult("clickhouse: " + redact.Text(err.Error())), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		return errResult(fmt.Sprintf("clickhouse: HTTP %d: %s", resp.StatusCode, truncate(string(body), 1024))), nil
+	}
+	// A body cut short reads as empty or truncated; without this check the
+	// empty case below would report it as a successful statement.
+	if readErr != nil {
+		return errResult(fmt.Sprintf("clickhouse: read body: %v", readErr)), nil
+	}
+	// Statements that return no rows (ALTER, CREATE, DROP) answer 200 with an
+	// empty body even with FORMAT JSONCompact appended. That is success, not a
+	// malformed response; a SELECT always carries at least a meta block.
+	if len(bytes.TrimSpace(body)) == 0 {
+		return &QueryResult{Data: [][]any{}, Columns: []string{}, ColumnTypes: []string{}}, nil
 	}
 
 	var raw struct {

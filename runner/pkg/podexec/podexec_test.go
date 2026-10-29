@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/cmdout"
 )
 
 // stubExec records calls and returns canned responses. Lets us test the
@@ -70,6 +72,20 @@ func TestHandleBash_BuildsCorrectCommand(t *testing.T) {
 	}
 	if stub.got.Namespace != "shop" || stub.got.Pod != "frontend" || stub.got.Container != "web" {
 		t.Errorf("ns/pod/container wrong: %+v", stub.got)
+	}
+}
+
+func TestHandleBash_PassesOutputEncoding(t *testing.T) {
+	stub := &stubExec{}
+	_, err := Handlers(stub)["pod_bash_enricher"](context.Background(), map[string]any{
+		"namespace": "shop", "pod": "frontend", "command": "cat big.log",
+		cmdout.Param: cmdout.Gzip,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.got.OutputEncoding != cmdout.Gzip {
+		t.Errorf("OutputEncoding = %q; want %q", stub.got.OutputEncoding, cmdout.Gzip)
 	}
 }
 

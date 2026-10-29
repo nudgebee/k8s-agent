@@ -22,7 +22,7 @@ type prometheusFlagsResponse struct {
 // VictoriaMetrics' vmsingle returns 404 for this endpoint — caller must
 // tolerate the empty return.
 func PrometheusRetention(ctx context.Context, c *prometheus.Client, logger *slog.Logger) string {
-	if c == nil || c.BaseURL == "" {
+	if c == nil || c.URL() == "" {
 		return ""
 	}
 	raw, err := c.Flags(ctx)

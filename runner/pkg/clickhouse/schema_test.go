@@ -16,6 +16,7 @@ import (
 type chStub struct {
 	columns      []string
 	traceSrcExpr string
+	resourceExpr string
 	alters       []string
 	failAlter    bool
 	// columnsAfterAlter, when non-nil, is served by system.columns reads that
@@ -41,12 +42,17 @@ func (s *chStub) server(t *testing.T) *Client {
 				_, _ = w.Write([]byte("Code: 47. DB::Exception: Unknown identifier"))
 				return
 			}
-			_, _ = w.Write([]byte(`{"meta":[],"data":[]}`))
+			// Real ClickHouse answers a successful ALTER with 200 and an
+			// empty body, FORMAT JSONCompact or not.
+			w.WriteHeader(http.StatusOK)
 
 		case strings.Contains(q, "default_expression"):
 			rows := [][]any{}
 			if s.traceSrcExpr != "" {
-				rows = append(rows, []any{s.traceSrcExpr})
+				rows = append(rows, []any{"trace_source", s.traceSrcExpr})
+			}
+			if s.resourceExpr != "" {
+				rows = append(rows, []any{"resource", s.resourceExpr})
 			}
 			writeRows(w, "default_expression", rows)
 
@@ -293,19 +299,73 @@ func TestEnsure_RealDevSchema(t *testing.T) {
 	}
 }
 
-// Rackspace already has all 14 and no ScopeName. The correct outcome is no DDL
-// at all and a true flag — the mis-reported false is what pushed it onto the
-// recompute query shape, which then referenced a column its table lacks.
+// Rackspace already has all 14 and no ScopeName, so trace_source is left alone
+// and the flag is true — the mis-reported false is what pushed it onto the
+// recompute query shape, which then referenced a column its table lacks. Its
+// resource predates url.full, so that one column is rewritten.
 func TestEnsure_RealRackspaceSchema(t *testing.T) {
 	s := &chStub{
 		columns:      rackspaceSchema,
 		traceSrcExpr: "CASE WHEN toString(SpanAttributes['otel.scope.name']) = 'nudgebee-node-agent' THEN 'ebpf' ELSE 'otel' END",
+		resourceExpr: legacyResourceExpr,
 	}
 	if got := EnsureMaterializedColumns(context.Background(), s.server(t), discardLogger()); !got {
 		t.Fatal("EnsureMaterializedColumns = false; want true — the columns are all present")
 	}
+	if len(s.alters) != 1 || !strings.Contains(s.alters[0], "MODIFY COLUMN resource ") ||
+		strings.Contains(s.alters[0], "trace_source") || strings.Contains(s.alters[0], "ADD COLUMN") {
+		t.Errorf("want only MODIFY COLUMN resource; got %v", s.alters)
+	}
+}
+
+// legacyResourceExpr is resource as ClickHouse stores it on installs created
+// before url.full was read (system.columns.default_expression on the dev agent).
+const legacyResourceExpr = "multiIf(mapContains(SpanAttributes, 'db.statement'), SpanAttributes['db.statement'], " +
+	"SpanAttributes['http.url'])"
+
+// OTel SDKs on semconv >= 1.21 send url.full and no http.url; their client
+// spans had an empty resource until the definition read url.full.
+func TestEnsure_RewritesResourceWithoutURLFull(t *testing.T) {
+	cols := append([]string{"Timestamp", "SpanAttributes", scopeNameColumn}, allMaterialized()...)
+	s := &chStub{columns: cols, resourceExpr: legacyResourceExpr}
+	if got := EnsureMaterializedColumns(context.Background(), s.server(t), discardLogger()); !got {
+		t.Fatal("EnsureMaterializedColumns = false; want true")
+	}
+	if len(s.alters) != 1 || !strings.Contains(s.alters[0], "MODIFY COLUMN resource ") {
+		t.Fatalf("expected a MODIFY COLUMN resource; got %v", s.alters)
+	}
+	if !strings.Contains(s.alters[0], "cutQueryStringAndFragment(SpanAttributes['url.full'])") {
+		t.Errorf("rewritten definition does not read url.full:\n%s", s.alters[0])
+	}
+}
+
+// Once rewritten, the stored expression mentions url.full and the next
+// heartbeat must not issue the same ALTER again.
+func TestEnsure_LeavesCurrentResourceAlone(t *testing.T) {
+	cols := append([]string{"Timestamp", "SpanAttributes", scopeNameColumn}, allMaterialized()...)
+	s := &chStub{
+		columns: cols,
+		// As ClickHouse 24.12 stores the current definition after MODIFY COLUMN.
+		resourceExpr: "multiIf(mapContains(SpanAttributes, 'db.statement'), SpanAttributes['db.statement'], " +
+			"(SpanAttributes['http.url']) != '', SpanAttributes['http.url'], cutQueryStringAndFragment(SpanAttributes['url.full']))",
+	}
+	if got := EnsureMaterializedColumns(context.Background(), s.server(t), discardLogger()); !got {
+		t.Fatal("EnsureMaterializedColumns = false; want true")
+	}
 	if len(s.alters) != 0 {
-		t.Errorf("issued DDL against a table that needs none: %v", s.alters)
+		t.Errorf("rewrote a current definition: %v", s.alters)
+	}
+}
+
+// The node agent's http.url carries the templated path that keeps one trace
+// group per route; url.full is the raw URL with IDs in it. Reading url.full
+// first would split every eBPF group per ID.
+func TestResourceDefinition_PrefersHTTPURLOverURLFull(t *testing.T) {
+	def := materializedColumns["resource"]
+	httpURL := strings.Index(def, "SpanAttributes['http.url']")
+	urlFull := strings.Index(def, "SpanAttributes['url.full']")
+	if httpURL < 0 || urlFull < 0 || httpURL > urlFull {
+		t.Errorf("resource must read http.url before url.full:\n%s", def)
 	}
 }
 

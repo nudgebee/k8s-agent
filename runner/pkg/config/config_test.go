@@ -83,6 +83,10 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		ClickHouseEnabled: true,
 		ClickHousePort:    8123,
 		ClickHouseDB:      "default",
+		ServiceMapSource:  "prometheus",
+		// The logs check falls back to otel_logs in that database.
+		ClickHouseLogsDatabase: "default",
+		ClickHouseLogsTable:    "otel_logs",
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Config\n got:  %+v\n want: %+v", c, want)
@@ -289,5 +293,74 @@ func TestFromEnv_TriggerRateLimitsDefaultsEmpty(t *testing.T) {
 	}
 	if len(cfg.TriggerRateLimits) != 0 {
 		t.Errorf("TriggerRateLimits = %v; want empty so matchers keep their compiled windows", cfg.TriggerRateLimits)
+	}
+}
+
+// With nothing set (bundled collector off, or an external writer), the logs
+// check falls back to otel_logs in CLICKHOUSE_DB rather than reporting no table.
+func TestFromEnv_ClickHouseLogsTableFallsBack(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("CLICKHOUSE_DB", "telemetry")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseLogsDatabase != "telemetry" || c.ClickHouseLogsTable != "otel_logs" {
+		t.Errorf("logs table = %q.%q; want telemetry.otel_logs", c.ClickHouseLogsDatabase, c.ClickHouseLogsTable)
+	}
+}
+
+func TestFromEnv_ClickHouseLogsTableFromEnv(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("CLICKHOUSE_LOGS_DATABASE", "logs_db")
+	t.Setenv("CLICKHOUSE_LOGS_TABLE", "app_logs")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseLogsDatabase != "logs_db" || c.ClickHouseLogsTable != "app_logs" {
+		t.Errorf("logs table = %q.%q; want logs_db.app_logs", c.ClickHouseLogsDatabase, c.ClickHouseLogsTable)
+	}
+}
+
+// Without a reader user everything uses CLICKHOUSE_USER, as before.
+func TestFromEnv_ClickHouseReaderUser(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseReaderUser != "" {
+		t.Errorf("ClickHouseReaderUser = %q with CLICKHOUSE_READER_USER unset", c.ClickHouseReaderUser)
+	}
+	t.Setenv("CLICKHOUSE_READER_USER", "nudgebee_reader")
+	if c, err = FromEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseReaderUser != "nudgebee_reader" {
+		t.Errorf("ClickHouseReaderUser = %q; want nudgebee_reader", c.ClickHouseReaderUser)
+	}
+}
+
+// Off unless the chart's logs.collection switch sets it.
+func TestFromEnv_ClickHouseLogsCollected(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClickHouseLogsCollected {
+		t.Error("ClickHouseLogsCollected = true with CLICKHOUSE_LOGS_COLLECTED unset")
+	}
+	t.Setenv("CLICKHOUSE_LOGS_COLLECTED", "true")
+	if c, err = FromEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.ClickHouseLogsCollected {
+		t.Error("ClickHouseLogsCollected = false with CLICKHOUSE_LOGS_COLLECTED=true")
 	}
 }
