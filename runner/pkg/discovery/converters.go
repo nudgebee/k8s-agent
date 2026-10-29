@@ -428,9 +428,15 @@ func serviceDict(
 			// `labels` must be a non-nil map — k8s_workloads.labels is
 			// NOT NULL, and Go's nil map serializes as JSON null which
 			// fails the insert (collector logs NotNullViolation).
-			"labels":     nonNilLabels(meta.Labels),
-			"containers": containersFromTemplate(tpl),
-			"owner":      ownerInfos(owners),
+			"labels": nonNilLabels(meta.Labels),
+			// The pod template's labels, which are what a Service selector
+			// matches — `labels` above are the controller object's own and
+			// often lack them (a chart's `role: primary`, an Argo Rollout with
+			// no labels at all). The Knowledge Graph links Services to
+			// workloads on these. Empty for a workloadRef Rollout.
+			"template_labels": nonNilLabels(tpl.Labels),
+			"containers":      containersFromTemplate(tpl),
+			"owner":           ownerInfos(owners),
 			// Mirror the legacy ServiceConfig. The UI
 			// (KubernetesWorkloads.jsx:2488) reads `volumes.length` without
 			// optional chaining, so emitting an empty array — rather than
