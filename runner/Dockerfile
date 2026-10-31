@@ -2,16 +2,14 @@
 # working `kubectl` binary alongside the agent — the kubectl_command_executor
 # action shells out to it (pkg/kube/exec.go).
 
-# golang 1.26.5: fixes the stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
-# traversal) / CVE-2026-42505 (crypto/tls ECH) present in 1.26.4 builds.
-FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /src
 
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 # GOTOOLCHAIN=local: always compile with the base image's Go, never an
-# auto-downloaded toolchain — keeps the stdlib at the patched 1.26.5.
+# auto-downloaded toolchain — keeps the stdlib at the base image's patched Go.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
 
 COPY go.mod go.sum ./
@@ -27,27 +25,30 @@ RUN go build \
 	./cmd/agent
 
 # Pin kubectl to a known-good version. Bump alongside the Kubernetes versions
-# we test against. The download follows TARGETARCH so the arch matches the image
-# being built — dl.k8s.io's path segments are literally `amd64` / `arm64`, the
-# same values buildx sets. This used to be hardcoded to amd64 while
-# runner-image.yaml built both arches, so the arm64 image shipped an x86-64
-# kubectl and every kubectl_command_executor action on an arm64 node died with
+# we test against. Built from the release tag rather than downloaded: the
+# published v1.36.6 binary still carries x/net v0.56.0, and this also gives it the
+# same patched Go as the agent. GOARCH follows TARGETARCH so the arch matches the
+# image being built. This used to be hardcoded to amd64 while runner-image.yaml
+# built both arches, so the arm64 image shipped an x86-64 kubectl and every
+# kubectl_command_executor action on an arm64 node died with
 # `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
-# Pinned to BUILDPLATFORM: this stage only curls a binary, so there is no reason
-# to run it emulated on the arm64 leg.
-FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS kubectl
+# Pinned to BUILDPLATFORM: Go cross-compiles, so there is no reason to run this
+# emulated on the arm64 leg.
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS kubectl
 ARG TARGETARCH
-# v1.36.2 (current stable): upstream builds the 1.32 line on Go 1.24.13, whose
-# stale stdlib + x/net account for 33 of the image's 37 fixable Trivy findings
-# (20 HIGH). v1.36.2 is built on Go 1.26.4 — residual is only the industry-wide
-# 1.26.4 stdlib pair, which clears when upstream rebuilds on 1.26.5. kubectl's
-# CLI surface used by kubectl_command_executor is stable across these versions.
-ARG KUBECTL_VERSION=v1.36.2
-RUN apk add --no-cache curl ca-certificates && \
-	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
-	chmod +x /usr/local/bin/kubectl
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+ARG KUBECTL_VERSION=v1.36.6
+RUN apk add --no-cache git && \
+	git clone --depth 1 --branch "${KUBECTL_VERSION}" https://github.com/kubernetes/kubernetes /src
+WORKDIR /src
+RUN rm -rf vendor && \
+	go work edit -replace golang.org/x/net=golang.org/x/net@v0.60.0 && \
+	go work sync
+RUN GOOS=linux GOARCH="$TARGETARCH" go build -trimpath \
+	-ldflags "-s -w -X k8s.io/client-go/pkg/version.gitVersion=${KUBECTL_VERSION} -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION}" \
+	-o /usr/local/bin/kubectl ./cmd/kubectl
 
-# Assert the downloaded binary's ELF e_machine matches TARGETARCH, so this
+# Assert the built binary's ELF e_machine matches TARGETARCH, so this
 # cannot silently regress to shipping the wrong arch again.
 #
 # Byte 18 of the ELF header is e_machine: 0x3e = x86-64, 0xb7 = aarch64.
@@ -68,9 +69,10 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 WORKDIR /
-RUN apk add --no-cache ca-certificates && \
+RUN apk upgrade --no-cache && \
+	apk add --no-cache ca-certificates && \
 	addgroup -S nonroot -g 65532 && \
 	adduser -S -D -u 65532 -G nonroot nonroot
 COPY --from=build /out/nudgebee-agent /nudgebee-agent
