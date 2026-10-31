@@ -12,6 +12,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
@@ -205,6 +206,31 @@ func TestBuildJob_ImageScanFsShape(t *testing.T) {
 	// Privileged must stay unset when only RunAsUser was requested.
 	if c.SecurityContext.Privileged != nil {
 		t.Errorf("Privileged should be nil when not requested: %+v", c.SecurityContext.Privileged)
+	}
+}
+
+func TestBuildJob_ResourcesAndNodeSelector(t *testing.T) {
+	r := NewRunner(fake.NewClientset(), "ns", "scanner-sa")
+	resources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+	}
+	job := r.BuildJob(JobSpec{
+		NamePrefix:   "trivy-image-scan",
+		Image:        "registry.example.com/app:v2",
+		Resources:    resources,
+		NodeSelector: map[string]string{"kubernetes.io/arch": "arm64"},
+	}, "trivy-image-scan-1", "uuid-img")
+
+	ps := job.Spec.Template.Spec
+	if ps.NodeSelector["kubernetes.io/arch"] != "arm64" {
+		t.Errorf("NodeSelector = %v; want the requested arch", ps.NodeSelector)
+	}
+	if ps.NodeName != "" {
+		t.Errorf("NodeName = %q; want none", ps.NodeName)
+	}
+	if got := ps.Containers[0].Resources.Limits.Memory().String(); got != "2Gi" {
+		t.Errorf("memory limit = %s; want 2Gi", got)
 	}
 }
 
@@ -438,6 +464,61 @@ func TestWaitForJob_ImagePullBackOff(t *testing.T) {
 	reason := resp["failure_reason"].(string)
 	if !strings.Contains(reason, "image pull failed") || !strings.Contains(reason, "scanner") {
 		t.Errorf("failure_reason = %q; want image-pull detail naming the container", reason)
+	}
+}
+
+func unschedulablePod(job string, since time.Time) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      job + "-abc",
+			Namespace: "default",
+			Labels:    map[string]string{jobNameSelectorLabel: job},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{{
+				Type:               corev1.PodScheduled,
+				Status:             corev1.ConditionFalse,
+				Reason:             corev1.PodReasonUnschedulable,
+				Message:            "0/3 nodes are available",
+				LastTransitionTime: metav1.NewTime(since),
+			}},
+		},
+	}
+}
+
+// A pod with no node earns no Failed condition, so it must be surfaced through
+// the pod check, but only after the grace an autoscaler needs.
+func TestWaitForJob_Unschedulable(t *testing.T) {
+	cases := []struct {
+		name   string
+		age    time.Duration
+		status string
+	}{
+		{"still within grace", time.Minute, "Running"},
+		{"past grace", unschedulableGrace + time.Minute, "Failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewClientset()
+			_, _ = cs.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "j-pend", Namespace: "default"},
+				Status:     batchv1.JobStatus{Active: 1},
+			}, metav1.CreateOptions{})
+			_, _ = cs.CoreV1().Pods("default").Create(context.Background(), unschedulablePod("j-pend", time.Now().Add(-tc.age)), metav1.CreateOptions{})
+			r := NewRunner(cs, "default", "")
+			out, err := r.handleWaitForJob(context.Background(), map[string]any{"job_name": "j-pend"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := out.(map[string]any)
+			if resp["status"] != tc.status {
+				t.Fatalf("status = %v; want %s", resp["status"], tc.status)
+			}
+			if tc.status == "Failed" && !strings.HasPrefix(resp["failure_reason"].(string), "unschedulable: ") {
+				t.Errorf("failure_reason = %q; want the unschedulable prefix", resp["failure_reason"])
+			}
+		})
 	}
 }
 

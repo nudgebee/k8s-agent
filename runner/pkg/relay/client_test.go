@@ -68,7 +68,7 @@ func TestClient_RoundTrip(t *testing.T) {
 	client := NewClient(Config{
 		URL:           wsURL,
 		AuthSecretKey: "test-secret",
-		Greeting:      Greeting{Version: "test", AgentVersion: "0.0.0"},
+		Greeting:      Greeting{Version: "test", AgentVersion: "0.0.0", ProtocolVersion: "9"},
 	}, func(ctx context.Context, msg []byte, send SendFunc) {
 		var req ExternalActionRequest
 		if err := json.Unmarshal(msg, &req); err != nil {
@@ -89,8 +89,8 @@ func TestClient_RoundTrip(t *testing.T) {
 
 	select {
 	case g := <-gotGreeting:
-		if g.Action != "auth" || g.Version != "test" || g.AgentVersion != "0.0.0" {
-			t.Errorf("greeting = %+v; want action=auth version=test agent_version=0.0.0", g)
+		if g.Action != "auth" || g.Version != "test" || g.AgentVersion != "0.0.0" || g.ProtocolVersion != "9" {
+			t.Errorf("greeting = %+v; want action=auth version=test agent_version=0.0.0 protocol_version=9", g)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for greeting")
