@@ -558,6 +558,13 @@ func checkCoverage(ctx context.Context, c *chclient.Client, start, end time.Time
 		idx = slices.Compact(idx)
 		for k := 1; k < len(idx); k++ {
 			if idx[k] != idx[k-1]+1 {
+				// Agents are keyed IP/pod uid. A row without a uid (a
+				// scrape job without pod discovery) cannot tell a pod that
+				// reused a gone pod's IP from a gap, so say why.
+				if ip, ok := strings.CutSuffix(agent, "/"); ok {
+					return fmt.Errorf("%w: node agent %s has no rows for %s and no pod uid, so a reused IP cannot be told from a gap",
+						errNotCovered, ip, bucketTime(idx[k-1]+1))
+				}
 				return fmt.Errorf("%w: node agent %s has no rows for %s", errNotCovered, agent, bucketTime(idx[k-1]+1))
 			}
 		}
