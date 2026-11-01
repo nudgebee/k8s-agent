@@ -43,8 +43,11 @@ ARG TARGETARCH
 # no better). kubectl's CLI surface used by kubectl_command_executor is stable
 # across these versions.
 ARG KUBECTL_VERSION=v1.36.6
+# The .sha256 published next to the binary catches a corrupted or truncated download.
 RUN apk add --no-cache curl ca-certificates && \
-	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
+	url="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
+	curl -fsSLo /usr/local/bin/kubectl "$url" && \
+	echo "$(curl -fsSL "$url.sha256")  /usr/local/bin/kubectl" | sha256sum -c - && \
 	chmod +x /usr/local/bin/kubectl
 
 # Assert the downloaded binary's ELF e_machine matches TARGETARCH, so this
