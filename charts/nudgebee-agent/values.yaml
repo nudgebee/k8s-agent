@@ -478,7 +478,7 @@ opentelemetry-collector:
   enabled: true
   image:
     repository: ghcr.io/nudgebee/opentelemetry-collector-contrib
-    tag: 0.157.0
+    tag: 0.164.0
   # Inherit name overrides from parent chart
   nameOverride: ""
   fullnameOverride: ""
