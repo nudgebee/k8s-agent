@@ -2,16 +2,16 @@
 # working `kubectl` binary alongside the agent — the kubectl_command_executor
 # action shells out to it (pkg/kube/exec.go).
 
-# golang 1.26.5: fixes the stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
-# traversal) / CVE-2026-42505 (crypto/tls ECH) present in 1.26.4 builds.
-FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+# golang 1.27.3: 1.27.1 builds carry the stdlib CVEs GO-2026-6612 (critical) and
+# GO-2026-6603/6605/6607/6608/6610/6611/6613/6617 (high), fixed in 1.27.2.
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /src
 
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 # GOTOOLCHAIN=local: always compile with the base image's Go, never an
-# auto-downloaded toolchain — keeps the stdlib at the patched 1.26.5.
+# auto-downloaded toolchain — keeps the stdlib at the base image's patched release.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
 
 COPY go.mod go.sum ./
@@ -35,14 +35,14 @@ RUN go build \
 # `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
 # Pinned to BUILDPLATFORM: this stage only curls a binary, so there is no reason
 # to run it emulated on the arm64 leg.
-FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS kubectl
+FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS kubectl
 ARG TARGETARCH
-# v1.36.2 (current stable): upstream builds the 1.32 line on Go 1.24.13, whose
-# stale stdlib + x/net account for 33 of the image's 37 fixable Trivy findings
-# (20 HIGH). v1.36.2 is built on Go 1.26.4 — residual is only the industry-wide
-# 1.26.4 stdlib pair, which clears when upstream rebuilds on 1.26.5. kubectl's
-# CLI surface used by kubectl_command_executor is stable across these versions.
-ARG KUBECTL_VERSION=v1.36.2
+# v1.36.6: upstream builds it on Go 1.26.10, which clears the stdlib CVEs the
+# v1.36.2 binary (Go 1.26.4) carried. Its x/net is v0.56.0, so the x/net
+# advisories fixed in v0.60.0 stay until upstream bumps it (v1.37.2 has v0.57.0,
+# no better). kubectl's CLI surface used by kubectl_command_executor is stable
+# across these versions.
+ARG KUBECTL_VERSION=v1.36.6
 RUN apk add --no-cache curl ca-certificates && \
 	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
 	chmod +x /usr/local/bin/kubectl
@@ -68,7 +68,7 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 WORKDIR /
 RUN apk add --no-cache ca-certificates && \
 	addgroup -S nonroot -g 65532 && \
