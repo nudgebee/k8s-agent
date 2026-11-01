@@ -2,6 +2,8 @@
 # working `kubectl` binary alongside the agent — the kubectl_command_executor
 # action shells out to it (pkg/kube/exec.go).
 
+# golang 1.27.3: 1.27.1 builds carry the stdlib CVEs GO-2026-6612 (critical) and
+# GO-2026-6603/6605/6607/6608/6610/6611/6613/6617 (high), fixed in 1.27.2.
 FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /src
 
@@ -9,7 +11,7 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 # GOTOOLCHAIN=local: always compile with the base image's Go, never an
-# auto-downloaded toolchain — keeps the stdlib at the base image's patched Go.
+# auto-downloaded toolchain — keeps the stdlib at the base image's patched release.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
 
 COPY go.mod go.sum ./
