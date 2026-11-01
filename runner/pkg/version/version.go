@@ -10,6 +10,15 @@ var (
 	BuildTime = "unknown"
 )
 
+// ProtocolVersion names what this binary can do, for a server deciding whether
+// to send a Job that older agents would misread. It is compiled in because
+// CurrentVersion follows the chart: an upgrade that keeps the old image reports
+// the new version from the old binary. Bump it when a server needs to tell the
+// difference.
+//
+//	2: JobSpec resources and node_selector
+const ProtocolVersion = "2"
+
 // CurrentVersion returns the user-facing agent version. Prefers the
 // `RUNNER_VERSION` env var (set by the Helm chart to `.Chart.AppVersion`,
 // e.g. `0.0.124`) over the build-time `Version` ldflag (e.g.

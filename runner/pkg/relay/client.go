@@ -216,11 +216,12 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}()
 
 	if err := c.send(&Greeting{
-		Action:         "auth",
-		Version:        c.cfg.Greeting.Version,
-		AgentVersion:   c.cfg.Greeting.AgentVersion,
-		AgentCommit:    c.cfg.Greeting.AgentCommit,
-		AgentBuildTime: c.cfg.Greeting.AgentBuildTime,
+		Action:          "auth",
+		Version:         c.cfg.Greeting.Version,
+		AgentVersion:    c.cfg.Greeting.AgentVersion,
+		AgentCommit:     c.cfg.Greeting.AgentCommit,
+		AgentBuildTime:  c.cfg.Greeting.AgentBuildTime,
+		ProtocolVersion: c.cfg.Greeting.ProtocolVersion,
 	}); err != nil {
 		return fmt.Errorf("send greeting: %w", err)
 	}
