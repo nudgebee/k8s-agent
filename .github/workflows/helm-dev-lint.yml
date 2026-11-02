@@ -44,6 +44,11 @@ jobs:
       - name: Run chart-testing (lint)
         run: ct lint --debug --config ./.github/configs/ct.yaml --lint-conf ./.github/configs/lintconf.yaml --check-version-increment=false
 
+      - name: Check runner.image_registry covers every image
+        run: |
+          helm dependency build charts/nudgebee-agent
+          ./scripts/check-image-registry.sh
+
       # The agent reports appVersion to the server as RUNNER_VERSION, and the
       # server compares it against the newest released *chart* version to decide
       # whether to show "Please update your agent version". A PR that bumps

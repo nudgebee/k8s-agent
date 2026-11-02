@@ -441,7 +441,15 @@ fi
 
 image_registry_args=()
 if [ -n "$image_registry" ]; then
-  image_registry_args=(--set "runner.image_registry=$image_registry")
+  image_registry="${image_registry%/}"
+  image_registry_args=(
+    --set "runner.image_registry=$image_registry"
+    --set "opentelemetry-collector.image.repository=$image_registry/opentelemetry-collector-contrib"
+    --set "clickhouse.image.registry=$image_registry"
+    --set "clickhouse.image.repository=clickhouse"
+    --set "opencost.opencost.exporter.image.registry=$image_registry"
+    --set "opencost.opencost.exporter.image.repository=opencost"
+  )
 fi
 
 disable_opencost_args=()
