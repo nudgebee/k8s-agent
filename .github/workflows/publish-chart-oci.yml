@@ -1,0 +1,67 @@
+name: Publish Chart to OCI
+
+# Pushes already-released charts to the OCI registry: backfills older versions,
+# and recovers a release whose OCI step failed after chart-releaser succeeded.
+# Re-running for a version that is already published is a no-op.
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Space-separated chart versions (e.g. 0.1.30 0.1.31)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing of the OCI artifact
+      packages: write # push the chart to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.10.0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Download released chart packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for version in $VERSIONS; do
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc-[0-9]+)?$ ]]; then
+              echo "::error::Invalid chart version: $version"
+              exit 1
+            fi
+            gh release download "nudgebee-agent-$version" \
+              --pattern "nudgebee-agent-$version.tgz" --dir dist
+          done
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish to OCI
+        env:
+          COSIGN_YES: "true"
+        run: |
+          shopt -s nullglob
+          .github/scripts/publish-chart-oci.sh dist/*.tgz

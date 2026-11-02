@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
       id-token: write # keyless cosign signing of chart packages
-      packages: read # read GHCR tags to pin the runner image
+      packages: write # read GHCR tags to pin the runner image, push the chart
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -150,6 +150,11 @@ jobs:
           helm repo update
           helm install nudgebee-agent nudgebee/nudgebee-agent --version ${{ steps.rc_version.outputs.rc_version }}
           ```
+
+          Or from the OCI registry:
+          ```bash
+          helm install nudgebee-agent oci://ghcr.io/nudgebee/charts/nudgebee-agent --version ${{ steps.rc_version.outputs.rc_version }}
+          ```
           
           ### ⚠️ Pre-release Notice
           This is a release candidate. Use with caution in production environments.
@@ -198,3 +203,19 @@ jobs:
               "$pkg"
             gh release upload "$tag" "${pkg}.sigstore.json" --clobber
           done
+
+      # Runs after the classic release so a registry outage cannot block it.
+      # Recover a failure here with publish-chart-oci.yml.
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish chart packages to OCI
+        env:
+          COSIGN_YES: "true"
+        run: |
+          shopt -s nullglob
+          .github/scripts/publish-chart-oci.sh .cr-release-packages/*.tgz
