@@ -235,7 +235,9 @@ jobs:
           docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
           cm = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nudgebee-agent-clickhouse-reader-users")
           xml = cm["data"]["nudgebee-reader.xml"]
-          for want in ("<readonly>2</readonly>", "<password from_env=\"CLICKHOUSE_ADMIN_PASSWORD\"/>", "<max_execution_time><min>1</min><max>600</max></max_execution_time>", "<profile>nudgebee_reader</profile>", "<query>GRANT SELECT, SHOW ON *.*</query>", "<max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>"):
+          for want in ("<readonly>2</readonly>", "<password from_env=\"CLICKHOUSE_ADMIN_PASSWORD\"/>", "<max_execution_time><min>1</min><max>600</max></max_execution_time>", "<profile>nudgebee_reader</profile>", "<query>GRANT SELECT, SHOW ON *.*</query>", "<max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>",
+                       "<max_memory_usage_for_user>1500000000</max_memory_usage_for_user>", "<max_concurrent_queries_for_user>8</max_concurrent_queries_for_user>",
+                       "<max_memory_usage_for_user><min>1</min><max>1500000000</max></max_memory_usage_for_user>", "<max_concurrent_queries_for_user><min>1</min><max>8</max></max_concurrent_queries_for_user>"):
               assert want in xml, want
           sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"].startswith("nudgebee-agent-clickhouse-shard"))
           pod = sts["spec"]["template"]["spec"]
@@ -256,6 +258,11 @@ jobs:
             [ -z "$(reader_env "$out")" ] || fail "$args: runner names the reader without its mount"
             if printf '%s\n' "$out" | grep -q 'name: nudgebee-agent-clickhouse-reader-users'; then fail "$args: reader ConfigMap rendered"; fi
           done
+          # --reuse-values from a release with the reader but before the per-user
+          # caps: the user renders without them, never with a 0 cap.
+          out="$(render --set clickhouse.reader.maxMemoryUsageForUser=null --set clickhouse.reader.maxConcurrentQueries=null)" || fail "no per-user caps: render failed"
+          printf '%s\n' "$out" | grep -q '<readonly>2</readonly>' || fail "no per-user caps: reader user missing"
+          if printf '%s\n' "$out" | grep -q -E 'max_memory_usage_for_user|max_concurrent_queries_for_user'; then fail "no per-user caps: a cap rendered"; fi
           echo 'ok: query_data reads through the read-only ClickHouse user'
 
       # logs.collection is the one switch for where container logs go. node-agent

@@ -686,8 +686,15 @@ clickhouse:
     maxExecutionTimeCeiling: 600
     maxRowsToRead: 2000000000
     # Bytes per query. The pod's limit is 2000Mi, so ClickHouse allows about
-    # 1.8GB in all; this leaves room for inserts and merges. Raise both together.
+    # 1.8GB in all; this leaves room for inserts and merges. Raise it,
+    # maxMemoryUsageForUser and the pod's limit together.
     maxMemoryUsage: 1500000000
+    # Bytes for all of this user's queries running at once, so concurrent
+    # reads together stay within the same room left for inserts and merges.
+    maxMemoryUsageForUser: 1500000000
+    # Queries this user runs at once; ClickHouse refuses the next one
+    # (TOO_MANY_SIMULTANEOUS_QUERIES) instead of queueing it.
+    maxConcurrentQueries: 8
     # A sort or GROUP BY past this many bytes spills to disk rather than
     # reaching maxMemoryUsage.
     maxBytesBeforeSpill: 500000000
