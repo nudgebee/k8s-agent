@@ -226,3 +226,72 @@ func TestClient_RelayPingsKeepSessionAlive(t *testing.T) {
 	case <-time.After(900 * time.Millisecond):
 	}
 }
+
+// Regression: the relay stopped reading the agent's socket but kept sending
+// its pings. The agent's response writes timed out, yet every relay ping
+// pushed the read deadline forward and the write errors were only logged, so
+// the session never ended and the agent sat disconnected until a pod restart.
+// Before the fix this test sees one dial only.
+func TestClient_ReconnectsWhenRelayStopsReading(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	dials := make(chan struct{}, 4)
+	testOver := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		dials <- struct{}{}
+		var g Greeting
+		if err := conn.ReadJSON(&g); err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"request_id":"r1"}`)); err != nil {
+			return
+		}
+		// Never read again, but keep pinging — the relay's pinger runs apart
+		// from its reader, so a stuck reader still pings.
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-testOver:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+					return
+				}
+			}
+		}
+	}))
+	defer srv.Close()
+	defer close(testOver)
+
+	// Big enough to fill the loopback socket buffers, so the write blocks
+	// until WriteTimeout.
+	big := strings.Repeat("x", 64<<20)
+	client := NewClient(Config{
+		URL:            "ws" + strings.TrimPrefix(srv.URL, "http"),
+		AuthSecretKey:  "test-secret",
+		WriteTimeout:   200 * time.Millisecond,
+		PingInterval:   time.Hour, // isolate the response-write path
+		PongWait:       300 * time.Millisecond,
+		ReconnectDelay: 10 * time.Millisecond,
+	}, func(ctx context.Context, msg []byte, send SendFunc) {
+		_ = send(&Response{Data: big})
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = client.Run(ctx) }()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-dials:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timeout waiting for dial %d; a relay that stopped reading did not end the session", i+1)
+		}
+	}
+}
