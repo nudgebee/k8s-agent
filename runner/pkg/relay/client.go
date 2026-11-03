@@ -194,8 +194,13 @@ func (c *Client) runOnce(ctx context.Context) error {
 		if errors.Is(err, websocket.ErrCloseSent) {
 			return nil
 		}
+		if socketWriteFailed(err) {
+			return err
+		}
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
+			// Timed out waiting behind a slow response write, not on the
+			// socket: the connection is fine, the pong is just late.
 			return nil
 		}
 		return err
@@ -258,10 +263,11 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 }
 
-// pingLoop sends a ping every PingInterval until the session ends. A failed
-// write means the connection is gone; returning unblocks nothing by itself,
-// but the read loop sees the same failure (or times out on PongWait) and ends
-// the session.
+// pingLoop sends a ping every PingInterval until the session ends. A ping
+// that fails on the socket closes the connection, which ends the read loop and
+// the session. Waiting for the read loop to notice is not enough: a relay that
+// has stopped reading can still be sending us pings, and each one pushes the
+// read deadline forward, so the session would never end.
 //
 // WriteControl is safe to call concurrently with the WriteMessage in send(),
 // so this deliberately does not take c.mu — a pinger blocked behind a slow
@@ -276,6 +282,9 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ticker.C:
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(c.cfg.WriteTimeout)); err != nil {
 				c.cfg.Logger.Warn("relay ping failed", "err", err)
+				if socketWriteFailed(err) {
+					_ = conn.Close()
+				}
 				return
 			}
 		}
@@ -297,5 +306,21 @@ func (c *Client) send(v any) error {
 	if err != nil {
 		return err
 	}
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	err = c.conn.WriteMessage(websocket.TextMessage, data)
+	if socketWriteFailed(err) {
+		// gorilla refuses every later write on this connection, so the session
+		// is finished; close it so the read loop ends and Run redials. See
+		// pingLoop for why the read loop alone may never notice.
+		c.cfg.Logger.Warn("relay write failed; closing session", "err", err)
+		_ = c.conn.Close()
+	}
+	return err
+}
+
+// socketWriteFailed reports whether err came from writing to the socket itself
+// (a timeout because the relay stopped reading, a reset, a broken pipe), as
+// opposed to gorilla giving up while waiting for another writer to finish.
+func socketWriteFailed(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op)
 }
