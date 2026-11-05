@@ -243,23 +243,44 @@ func (c *Client) runOnce(ctx context.Context) error {
 		}
 		resetDeadline()
 		if c.sem == nil {
-			go c.handler(ctx, msg, send)
+			go c.handler(sessionCtx, msg, send)
 			continue
 		}
 		if !c.sem.TryAcquire(1) {
 			// Pool saturated — shed rather than pile up unbounded goroutines.
-			// The backend will time out / retry; better than OOM under overload.
+			// Answer 503 so the caller fails fast instead of waiting out its timeout.
 			c.shed.Add(1)
 			if c.cfg.OnShed != nil {
 				c.cfg.OnShed()
 			}
 			c.cfg.Logger.Warn("relay handler pool saturated; shedding message", "shed_total", c.shed.Load())
+			go c.replyShed(msg)
 			continue
 		}
 		go func() {
 			defer c.sem.Release(1)
-			c.handler(ctx, msg, send)
+			c.handler(sessionCtx, msg, send)
 		}()
+	}
+}
+
+// replyShed answers a shed message with 503 so the caller does not block until
+// its own timeout. Messages without a request_id are fire-and-forget.
+func (c *Client) replyShed(msg []byte) {
+	var probe struct {
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(msg, &probe) != nil || probe.RequestID == "" {
+		return
+	}
+	if err := c.send(&Response{
+		Action:     "response",
+		RequestID:  probe.RequestID,
+		StatusCode: 503,
+		Data:       map[string]any{"error": "agent overloaded"},
+		OutputType: "actions",
+	}); err != nil {
+		c.cfg.Logger.Warn("relay shed reply failed", "err", err)
 	}
 }
 

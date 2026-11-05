@@ -319,15 +319,18 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 		pool = d.high
 	}
 
-	if err := pool.Acquire(ctx, 1); err != nil {
+	// Start the deadline before queueing so time spent waiting for a slot counts
+	// against it; otherwise a saturated pool could hold a request far past the
+	// caller's own timeout.
+	taskCtx, cancel := context.WithTimeout(ctx, d.cfg.TaskTimeout)
+	defer cancel()
+
+	if err := pool.Acquire(taskCtx, 1); err != nil {
 		logger.Warn("dispatch: pool acquire failed", "err", err)
 		d.respond(send, raw.RequestID, 503, map[string]any{"error": "agent overloaded"})
 		return
 	}
 	defer pool.Release(1)
-
-	taskCtx, cancel := context.WithTimeout(ctx, d.cfg.TaskTimeout)
-	defer cancel()
 
 	start := time.Now()
 	data, err := handler(taskCtx, params)
