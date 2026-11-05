@@ -326,6 +326,10 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 	defer cancel()
 
 	if err := pool.Acquire(taskCtx, 1); err != nil {
+		if errors.Is(err, context.Canceled) {
+			// Session ended; there is nobody to answer.
+			return
+		}
 		logger.Warn("dispatch: pool acquire failed", "err", err)
 		d.respond(send, raw.RequestID, 503, map[string]any{"error": "agent overloaded"})
 		return

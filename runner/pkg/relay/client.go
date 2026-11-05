@@ -210,10 +210,17 @@ func (c *Client) runOnce(ctx context.Context) error {
 	// deferred Close above runs, so it never writes to a closed conn.
 	sessionCtx, endSession := context.WithCancel(ctx)
 	var pinger sync.WaitGroup
-	pinger.Add(1)
+	pinger.Add(2)
 	go func() {
 		defer pinger.Done()
 		c.pingLoop(sessionCtx, conn)
+	}()
+	// Shed replies go through one worker and a bounded queue so a flood of shed
+	// messages cannot pile up goroutines blocked on the write lock.
+	shedQ := make(chan string, shedReplyQueue)
+	go func() {
+		defer pinger.Done()
+		c.shedReplyLoop(sessionCtx, shedQ)
 	}()
 	defer func() {
 		endSession()
@@ -254,7 +261,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 				c.cfg.OnShed()
 			}
 			c.cfg.Logger.Warn("relay handler pool saturated; shedding message", "shed_total", c.shed.Load())
-			go c.replyShed(msg)
+			c.enqueueShedReply(shedQ, msg)
 			continue
 		}
 		go func() {
@@ -264,23 +271,42 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 }
 
-// replyShed answers a shed message with 503 so the caller does not block until
-// its own timeout. Messages without a request_id are fire-and-forget.
-func (c *Client) replyShed(msg []byte) {
+// shedReplyQueue bounds pending 503 replies per session; beyond it the reply is
+// dropped and the caller falls back to its own timeout.
+const shedReplyQueue = 256
+
+// enqueueShedReply queues a 503 reply for a shed message so the caller does not
+// block until its own timeout. Messages without a request_id are
+// fire-and-forget. Never blocks the read loop.
+func (c *Client) enqueueShedReply(q chan<- string, msg []byte) {
 	var probe struct {
 		RequestID string `json:"request_id"`
 	}
 	if json.Unmarshal(msg, &probe) != nil || probe.RequestID == "" {
 		return
 	}
-	if err := c.send(&Response{
-		Action:     "response",
-		RequestID:  probe.RequestID,
-		StatusCode: 503,
-		Data:       map[string]any{"error": "agent overloaded"},
-		OutputType: "actions",
-	}); err != nil {
-		c.cfg.Logger.Warn("relay shed reply failed", "err", err)
+	select {
+	case q <- probe.RequestID:
+	default:
+	}
+}
+
+func (c *Client) shedReplyLoop(ctx context.Context, q <-chan string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-q:
+			if err := c.send(&Response{
+				Action:     "response",
+				RequestID:  id,
+				StatusCode: 503,
+				Data:       map[string]any{"error": "agent overloaded"},
+				OutputType: "actions",
+			}); err != nil {
+				c.cfg.Logger.Warn("relay shed reply failed", "err", err)
+			}
+		}
 	}
 }
 
