@@ -120,6 +120,17 @@ spec:
             - name: http-metrics
               containerPort: 8001
             {{- end }}
+          # Up to 5 minutes to answer /ping after a start, so loading a large
+          # volume (as on the first start of this image) is not cut short by the
+          # liveness probe. Liveness and readiness are as the Bitnami subchart had.
+          startupProbe:
+            failureThreshold: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+            httpGet:
+              path: /ping
+              port: http
           livenessProbe:
             failureThreshold: 3
             initialDelaySeconds: 10
