@@ -1,6 +1,11 @@
-# Multi-stage build. The final image is alpine-based so we can ship a
-# working `kubectl` binary alongside the agent — the kubectl_command_executor
-# action shells out to it (pkg/kube/exec.go).
+# Multi-stage build. The final image is Red Hat UBI 9 micro (Red Hat container
+# certification, #40411). Both the agent and kubectl are static Go binaries, so
+# the only OS content they need is the CA bundle and tzdata, installed into
+# /rootfs below. The kubectl_command_executor action shells out to kubectl
+# (pkg/kube/exec.go); nothing in the image needs a shell.
+#
+# Build with the repo root as a named context so the LICENSE can be copied in:
+#   docker buildx build --build-context repo=. -f runner/Dockerfile runner
 
 # golang 1.27.3: 1.27.1 builds carry the stdlib CVEs GO-2026-6612 (critical) and
 # GO-2026-6603/6605/6607/6608/6610/6611/6613/6617 (high), fixed in 1.27.2.
@@ -71,13 +76,37 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
-WORKDIR /
-RUN apk upgrade --no-cache && \
-	apk add --no-cache ca-certificates && \
-	addgroup -S nonroot -g 65532 && \
-	adduser -S -D -u 65532 -G nonroot nonroot
-COPY --from=build /out/nudgebee-agent /nudgebee-agent
-COPY --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
-USER nonroot:nonroot
+# Everything the runtime installs from packages is assembled under /rootfs here.
+# Bump OS_PKG_EPOCH (ISO week) to change this layer's cache key so a registry
+# cache can't serve a stale package layer.
+FROM registry.access.redhat.com/ubi9 AS rootfs-builder
+ARG OS_PKG_EPOCH=2026-W45
+RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
+ && dnf install -y --installroot /rootfs --releasever 9 --setopt=install_weak_deps=false --nodocs \
+      ca-certificates tzdata \
+ && dnf --installroot /rootfs clean all && rm -rf /rootfs/var/cache/*
+
+FROM registry.access.redhat.com/ubi9/ubi-micro
+ARG IMAGE_VERSION=0.0.0
+ARG IMAGE_RELEASE=1
+LABEL name="nudgebee-agent" \
+      maintainer="nudgebee" \
+      vendor="nudgebee" \
+      version="${IMAGE_VERSION}" \
+      release="${IMAGE_RELEASE}" \
+      summary="Nudgebee Kubernetes agent" \
+      description="Runs Nudgebee actions and enrichers inside a customer cluster."
+COPY --from=rootfs-builder /rootfs/ /
+# Red Hat certification (HasLicense): license text must be under /licenses.
+COPY --from=repo LICENSE /licenses/LICENSE
+# The agent writes nothing itself; /tmp is the one world-writable path for kubectl's
+# discovery cache ($HOME/.kube/cache) under an arbitrary UID with no home directory.
+ENV HOME=/tmp
+WORKDIR /tmp
+# --chmod sets the mode in the COPY itself; root-owned and world-executable so
+# the arbitrary UID OpenShift assigns can run but not overwrite them.
+COPY --chmod=0755 --from=build /out/nudgebee-agent /nudgebee-agent
+COPY --chmod=0755 --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
+# Numeric uid so runAsNonRoot can be verified without an /etc/passwd entry.
+USER 65532:65532
 ENTRYPOINT ["/nudgebee-agent"]
