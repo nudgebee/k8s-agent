@@ -1,0 +1,215 @@
+{{- /*
+The bundled ClickHouse, on the official clickhouse/clickhouse-server image.
+
+It is the same StatefulSet the Bitnami subchart rendered, so an upgrade updates
+it in place and the new pod mounts the existing volume
+data-<fullname>-shard0-0. Kubernetes rejects an upgrade that changes any of
+these, so keep them as they are:
+  metadata.name, spec.selector, spec.serviceName, spec.podManagementPolicy,
+  spec.volumeClaimTemplates (its labels too: helm.sh/chart stays clickhouse-3.1.6).
+Everything under spec.template may change.
+
+The data stays at /bitnami/clickhouse, where the Bitnami image kept it; the paths
+inside it are set in 10_storage_paths.xml (clickhouse-configmap.yaml). The
+container runs as UID 1001, the owner of those files, so the official image's
+entrypoint never changes their ownership.
+*/ -}}
+{{- if include "nudgebee-agent.clickhouse.installed" . }}
+{{- $ch := .Values.clickhouse }}
+{{- $fullname := include "nudgebee-agent.clickhouse.servicename" . }}
+{{- if or (contains "bitnami" (toString $ch.image.repository)) (contains "-debian-" (toString $ch.image.tag)) }}
+{{- fail (printf "\n\nclickhouse.image is %s/%s:%s, a Bitnami-based image. This chart runs the official ClickHouse image and its start-up differs. This usually comes from `helm upgrade --reuse-values`, which keeps the image of the earlier chart: upgrade with --reset-then-reuse-values instead, or set clickhouse.image.tag." $ch.image.registry $ch.image.repository $ch.image.tag) }}
+{{- end }}
+{{- if or (gt (int (default 1 $ch.replicaCount)) 1) (gt (int (default 1 $ch.shards)) 1) }}
+{{- fail "\n\nclickhouse.replicaCount and clickhouse.shards must be 1: the bundled ClickHouse is a single server." }}
+{{- end }}
+{{- $persistence := dig "persistence" "enabled" true $ch }}
+{{- $extraVolumes := list }}
+{{- range (default (list) $ch.extraVolumes) }}
+{{- if ne (toString (get . "name")) "nudgebee-reader-users" }}{{ $extraVolumes = append $extraVolumes . }}{{ end }}
+{{- end }}
+{{- $extraVolumeMounts := list }}
+{{- range (default (list) $ch.extraVolumeMounts) }}
+{{- if ne (toString (get . "name")) "nudgebee-reader-users" }}{{ $extraVolumeMounts = append $extraVolumeMounts . }}{{ end }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-shard0
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.clickhouse.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  podManagementPolicy: "Parallel"
+  selector:
+    matchLabels:
+      {{- include "nudgebee-agent.clickhouse.selectorLabels" . | nindent 6 }}
+  serviceName: {{ $fullname }}-headless
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/clickhouse-configmap.yaml") . | sha256sum }}
+        {{- if $ch.metrics.enabled }}
+        prometheus.io/port: "8001"
+        prometheus.io/scrape: "true"
+        {{- end }}
+      labels:
+        {{- include "nudgebee-agent.clickhouse.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fullname }}
+      {{- if dig "podSecurityContext" "enabled" true $ch }}
+      securityContext:
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- end }}
+      containers:
+        - name: clickhouse
+          image: "{{ $ch.image.registry }}/{{ $ch.image.repository }}:{{ $ch.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          {{- if dig "containerSecurityContext" "enabled" true $ch }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 0
+          {{- end }}
+          env:
+            # Users come from users.d (clickhouse-configmap.yaml), not from the
+            # entrypoint, which would otherwise write its own default-user.xml.
+            - name: CLICKHOUSE_SKIP_USER_SETUP
+              value: "1"
+            # Never change the ownership of the files on the data volume.
+            - name: CLICKHOUSE_DO_NOT_CHOWN
+              value: "1"
+            - name: CLICKHOUSE_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nudgebee-agent.clickhouse.secretName" . }}
+                  key: {{ include "nudgebee-agent.clickhouse.secretKey" . }}
+            {{- if $ch.metrics.enabled }}
+            - name: CLICKHOUSE_METRICS_PORT
+              value: "8001"
+            {{- end }}
+            - name: CLICKHOUSE_SHARD_ID
+              value: "shard0"
+            - name: CLICKHOUSE_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml $ch.resources | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: tcp
+              containerPort: 9000
+            - name: tcp-postgresql
+              containerPort: 9005
+            - name: tcp-mysql
+              containerPort: 9004
+            - name: http-intersrv
+              containerPort: 9009
+            {{- if $ch.metrics.enabled }}
+            - name: http-metrics
+              containerPort: 8001
+            {{- end }}
+          livenessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+            httpGet:
+              path: /ping
+              port: http
+          readinessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+            httpGet:
+              path: /ping
+              port: http
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/clickhouse
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d
+            - name: users
+              mountPath: /etc/clickhouse-server/users.d
+            {{- with $extraVolumeMounts }}
+            {{- tpl (toYaml .) $ | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap:
+                  name: {{ $fullname }}
+              {{- if $ch.extraOverrides }}
+              - configMap:
+                  name: {{ $fullname }}-extra
+              {{- end }}
+        - name: users
+          projected:
+            sources:
+              - configMap:
+                  name: {{ $fullname }}-users
+              {{- if include "nudgebee-agent.clickhouseReader" . }}
+              - configMap:
+                  name: {{ $fullname }}-reader-users
+              {{- end }}
+        {{- if not $persistence }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- with $extraVolumes }}
+        {{- tpl (toYaml .) $ | nindent 8 }}
+        {{- end }}
+  {{- /* Rendered as the Bitnami subchart did, including the persistence.* and
+         common* values it read: a release that set them must get the same
+         claim template, or Kubernetes rejects the upgrade. */}}
+  {{- if $persistence }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- $annotations := merge (dict) (default (dict) $ch.persistence.annotations) (default (dict) $ch.commonAnnotations) }}
+        {{- with $annotations }}
+        annotations:
+          {{- tpl (toYaml .) $ | nindent 10 }}
+        {{- end }}
+        {{- $labels := dict "app.kubernetes.io/name" (include "nudgebee-agent.clickhouse.name" .) "helm.sh/chart" "clickhouse-3.1.6" "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/managed-by" .Release.Service "app.kubernetes.io/component" "clickhouse" }}
+        {{- with $ch.commonLabels }}{{ $labels = mustMergeOverwrite $labels (fromYaml (tpl (toYaml .) $)) }}{{ end }}
+        {{- with $ch.persistence.labels }}{{ $labels = mustMergeOverwrite $labels (fromYaml (tpl (toYaml .) $)) }}{{ end }}
+        labels:
+          {{- toYaml $labels | nindent 10 }}
+      spec:
+        accessModes:
+        {{- range (default (list "ReadWriteOnce") $ch.persistence.accessModes) }}
+          - {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $ch.persistence.size | quote }}
+        {{- with $ch.persistence.selector }}
+        selector:
+          {{- tpl (toYaml .) $ | nindent 10 }}
+        {{- end }}
+        {{- with $ch.persistence.dataSource }}
+        dataSource:
+          {{- tpl (toYaml .) $ | nindent 10 }}
+        {{- end }}
+        {{- $storageClass := coalesce .Values.global.storageClass $ch.persistence.storageClass }}
+        {{- if $storageClass }}
+        storageClassName: {{ if eq $storageClass "-" }}""{{ else }}{{ $storageClass }}{{ end }}
+        {{- end }}
+  {{- end }}
+{{- end }}
