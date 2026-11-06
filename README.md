@@ -125,6 +125,30 @@ helm upgrade nudgebee-agent nudgebee-agent/nudgebee-agent -n nudgebee-agent \
   --reset-then-reuse-values
 ```
 
+On Helm older than 3.14, pass your values file instead (`-f my-values.yaml`,
+without `--reuse-values`). A `--reuse-values` upgrade fails while rendering,
+before anything is applied, so it puts no data at risk.
+
+Before you upgrade:
+
+- **Mirrored images.** The ClickHouse StatefulSet and the pre-upgrade schema
+  job both use `ghcr.io/nudgebee/clickhouse:24.12.4-nb-1`. If you pull from a
+  private mirror, mirror that image first and point `clickhouse.image` at it,
+  or the upgrade stops at the pre-upgrade hook. The chart recognises a Bitnami
+  image only by `bitnami` in the repository or `-debian-` in the tag, so a
+  mirrored Bitnami image under another name is not caught when rendering.
+- **One restart.** The upgrade restarts the ClickHouse pod once. The startup
+  probe gives it up to 5 minutes to load the volume. Later chart releases do
+  not restart it unless its image or configuration changes.
+- **Password changes.** `clickhouse.auth.password` is used only when the
+  `<release>-clickhouse` Secret is first created; changing it later does not
+  change the password (the Bitnami image used to re-apply it on every start).
+  To change the password, update `admin-password` in that Secret (or in your
+  `clickhouse.auth.existingSecret`), then restart the ClickHouse pod, the
+  runner and the OpenTelemetry collector, which read it at start.
+- **OpenShift.** The upgrade has been checked by rendering only; try it on a
+  non-production OpenShift cluster first.
+
 ## Configuration
 
 All configurable values live in [`charts/nudgebee-agent/values.yaml`](charts/nudgebee-agent/values.yaml). Common overrides:

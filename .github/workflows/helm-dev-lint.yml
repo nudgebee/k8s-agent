@@ -385,6 +385,22 @@ jobs:
           fi
           case "$out" in *"--reset-then-reuse-values"*) ;; *) echo "unexpected failure: $out"; exit 1 ;; esac
           echo 'ok: a Bitnami-based image is refused'
+          # A chart release alone must not restart ClickHouse: render again with
+          # only the chart version changed and compare the pod templates.
+          cp -r charts/nudgebee-agent /tmp/chart-next
+          sed -i 's/^version: .*/version: 99.0.0/; s/^appVersion: .*/appVersion: 99.0.0/' /tmp/chart-next/Chart.yaml
+          for c in charts/nudgebee-agent /tmp/chart-next; do
+            helm template nudgebee-agent "$c" --namespace nudgebee-agent \
+              --set clickhouse.extraOverrides='<clickhouse/>' \
+              --show-only templates/clickhouse-statefulset.yaml \
+              | python3 -c 'import sys, yaml, json; print(json.dumps(yaml.safe_load(sys.stdin)["spec"]["template"], sort_keys=True))'
+          done > /tmp/pod-templates.txt
+          if [ "$(sort -u /tmp/pod-templates.txt | wc -l)" != 1 ]; then
+            echo "the ClickHouse pod template changes with the chart version, so every release would restart it"
+            diff <(sed -n 1p /tmp/pod-templates.txt | python3 -m json.tool) <(sed -n 2p /tmp/pod-templates.txt | python3 -m json.tool)
+            exit 1
+          fi
+          echo 'ok: a chart version bump leaves the ClickHouse pod template unchanged'
 
       - name: Install kubeconform
         run: |

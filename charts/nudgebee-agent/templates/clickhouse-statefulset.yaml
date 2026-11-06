@@ -48,16 +48,26 @@ spec:
   serviceName: {{ $fullname }}-headless
   updateStrategy:
     type: RollingUpdate
+  {{- /* Nothing in the pod template may depend on the chart version, or every
+         chart release restarts ClickHouse. So the checksum covers only the
+         ConfigMaps' names and data (their labels carry helm.sh/chart), and the
+         pod labels leave out helm.sh/chart. */}}
+  {{- $configData := list }}
+  {{- range (splitList "\n---" (include (print $.Template.BasePath "/clickhouse-configmap.yaml") .)) }}
+  {{- $doc := fromYaml . }}
+  {{- if and $doc $doc.metadata }}{{ $configData = append $configData (dict "name" $doc.metadata.name "data" $doc.data) }}{{ end }}
+  {{- end }}
   template:
     metadata:
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/clickhouse-configmap.yaml") . | sha256sum }}
+        checksum/config: {{ toJson $configData | sha256sum }}
         {{- if $ch.metrics.enabled }}
         prometheus.io/port: "8001"
         prometheus.io/scrape: "true"
         {{- end }}
       labels:
-        {{- include "nudgebee-agent.clickhouse.labels" . | nindent 8 }}
+        {{- include "nudgebee-agent.clickhouse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
     spec:
       serviceAccountName: {{ $fullname }}
       {{- if dig "podSecurityContext" "enabled" true $ch }}
