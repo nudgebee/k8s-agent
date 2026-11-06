@@ -28,7 +28,6 @@ jobs:
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo add opencost https://opencost.github.io/opencost-helm-chart
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm repo add bitnami https://charts.bitnami.com/bitnami
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -75,8 +74,8 @@ jobs:
       # release does not create. kubelet cannot resolve the reference, so the pod
       # never starts — it sits in phase Pending with CreateContainerConfigError,
       # which reads as "stuck Pending" to operators. It bit us when the runner
-      # kept a hard secretKeyRef to the ClickHouse Secret while the ClickHouse
-      # subchart is conditioned on opentelemetry-collector.enabled.
+      # kept a hard secretKeyRef to the ClickHouse Secret while the bundled
+      # ClickHouse is conditioned on opentelemetry-collector.enabled.
       - name: Assert no workload references a Secret/ConfigMap the release omits
         run: |
           pip install pyyaml
@@ -118,6 +117,11 @@ jobs:
                       if 'configMap' in v:
                           check('ConfigMap', v['configMap']['name'],
                                 f"{owner} volume/{v['name']}", v['configMap'].get('optional'))
+                      for src in (v.get('projected') or {}).get('sources') or []:
+                          for key, kind in (('secret', 'Secret'), ('configMap', 'ConfigMap')):
+                              if ref := src.get(key):
+                                  check(kind, ref['name'],
+                                        f"{owner} volume/{v['name']} (projected)", ref.get('optional'))
 
               for d in docs:
                   if d.get('kind') not in POD_OWNERS:
@@ -166,10 +170,9 @@ jobs:
           print(f'ok: memory_limiter first in {len(pipelines)} pipeline(s)')
           PY
 
-      # global.storageClass / clickhouse.persistence.storageClass work only
-      # because the Bitnami common helper reads them, and the chart tracks
-      # `clickhouse 3.1.*` with a floating patch. Pin the three semantics the
-      # README documents rather than trusting a subchart bump not to change them.
+      # Pin the three global.storageClass / clickhouse.persistence.storageClass
+      # semantics the README documents (and the Bitnami subchart had): the
+      # global wins, "-" means storageClassName: "", empty omits the key.
       - name: Assert the StorageClass values reach the ClickHouse PVC
         run: |
           assert() { # <expected-storageClassName-line-or-empty> <helm-args...>
@@ -220,8 +223,8 @@ jobs:
 
       # query_data reads through a read-only user with query limits. The user
       # exists only in the bundled ClickHouse, so the runner names it only when
-      # that is where it connects, and the users file is mounted where the
-      # image copies users.d overrides from.
+      # that is where it connects, and the users file is mounted into the
+      # official image's users.d.
       - name: Assert the read-only ClickHouse user for query_data
         run: |
           render() { helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@"; }
@@ -239,23 +242,49 @@ jobs:
               assert want in xml, want
           sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"].startswith("nudgebee-agent-clickhouse-shard"))
           pod = sts["spec"]["template"]["spec"]
-          vol = next(v for v in pod["volumes"] if v["name"] == "nudgebee-reader-users")
-          assert vol["configMap"]["name"] == cm["metadata"]["name"], vol
-          mounts = [m for c in pod["containers"] for m in c.get("volumeMounts") or [] if m["name"] == "nudgebee-reader-users"]
-          assert [m["mountPath"] for m in mounts] == ["/bitnami/clickhouse/etc/users.d/nudgebee-reader"], mounts
+          vol = next(v for v in pod["volumes"] if v["name"] == "users")
+          assert {"configMap": {"name": cm["metadata"]["name"]}} in vol["projected"]["sources"], vol
+          mounts = [m for c in pod["containers"] for m in c.get("volumeMounts") or [] if m["name"] == "users"]
+          assert [m["mountPath"] for m in mounts] == ["/etc/clickhouse-server/users.d"], mounts
           '
 
           [ -z "$(reader_env "$(render --set clickhouse.reader.enabled=false)")" ] || fail "reader disabled: runner still names it"
           [ -z "$(reader_env "$(render --set opentelemetry-collector.enabled=false)")" ] || fail "no bundled ClickHouse: runner still names the reader"
           [ -z "$(reader_env "$(render --set 'runner.additional_env_vars[0].name=CLICKHOUSE_HOST' --set 'runner.additional_env_vars[0].value=ch.example')")" ] \
             || fail "external CLICKHOUSE_HOST: runner still names the reader"
-          # --reuse-values from a release without clickhouse.reader, or a custom
-          # clickhouse.extraVolumes without the reader mount: no user, no ConfigMap.
-          for args in '--set clickhouse.reader=null' '--set clickhouse.extraVolumes[0].name=certs --set clickhouse.extraVolumes[0].emptyDir.medium=Memory'; do
-            out="$(render $args)" || fail "$args: render failed"
-            [ -z "$(reader_env "$out")" ] || fail "$args: runner names the reader without its mount"
-            if printf '%s\n' "$out" | grep -q 'name: nudgebee-agent-clickhouse-reader-users'; then fail "$args: reader ConfigMap rendered"; fi
-          done
+          # --reuse-values from a release without clickhouse.reader: no user, no ConfigMap.
+          out="$(render --set clickhouse.reader=null)" || fail "reader=null: render failed"
+          [ -z "$(reader_env "$out")" ] || fail "reader=null: runner names the reader"
+          if printf '%s\n' "$out" | grep -q 'name: nudgebee-agent-clickhouse-reader-users'; then fail "reader=null: reader ConfigMap rendered"; fi
+          # An operator's own extraVolumes no longer drop the reader. The
+          # nudgebee-reader-users entries earlier charts shipped in these lists
+          # (they named the subchart's common.names.fullname helper, which is
+          # gone) are skipped, not rendered.
+          cat > /tmp/extra-volumes.yaml <<'EOF'
+          clickhouse:
+            extraVolumes:
+              - name: certs
+                emptyDir:
+                  medium: Memory
+              - name: nudgebee-reader-users
+                configMap:
+                  name: '{{ include "common.names.fullname" . }}-reader-users'
+                  optional: true
+            extraVolumeMounts:
+              - name: nudgebee-reader-users
+                mountPath: /bitnami/clickhouse/etc/users.d/nudgebee-reader
+          EOF
+          out="$(render -f /tmp/extra-volumes.yaml)" || fail "extraVolumes: render failed"
+          [ "$(reader_env "$out")" = '-name:CLICKHOUSE_READER_USER value:nudgebee_reader' ] || fail "extraVolumes: runner lacks CLICKHOUSE_READER_USER"
+          printf '%s\n' "$out" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          pod = next(d for d in docs if d["kind"] == "StatefulSet")["spec"]["template"]["spec"]
+          names = [v["name"] for v in pod["volumes"]]
+          assert "certs" in names and "nudgebee-reader-users" not in names, names
+          mounts = [m["name"] for c in pod["containers"] for m in c.get("volumeMounts") or []]
+          assert "nudgebee-reader-users" not in mounts, mounts
+          '
           echo 'ok: query_data reads through the read-only ClickHouse user'
 
       # logs.collection is the one switch for where container logs go. node-agent
@@ -310,6 +339,68 @@ jobs:
           printf '%s\n' "$rendered" | grep -q -- '- filter/drop_log_namespaces$' \
             || { echo 'filter/drop_log_namespaces is not in the logs pipeline'; exit 1; }
           echo 'ok: logs.collection sets the node-agent endpoint, NODE_NAME and clickhouseLogsCollected together'
+
+      # The bundled ClickHouse replaced the Bitnami subchart in place: an upgrade
+      # updates the same StatefulSet, and its pod mounts the existing volume.
+      # Kubernetes rejects an upgrade that changes the StatefulSet's name,
+      # selector, serviceName, podManagementPolicy or volumeClaimTemplates, and
+      # data already on a volume is found only at the storage paths below. The
+      # expected values are what the Bitnami subchart (clickhouse 3.1.6) rendered.
+      - name: Assert the ClickHouse objects keep what earlier charts rendered
+        run: |
+          helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent | python3 -c '
+          import sys, yaml
+          docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(sys.stdin) if d}
+          sel = {"app.kubernetes.io/name": "clickhouse", "app.kubernetes.io/instance": "nudgebee-agent", "app.kubernetes.io/component": "clickhouse"}
+          sts = docs[("StatefulSet", "nudgebee-agent-clickhouse-shard0")]["spec"]
+          assert sts["selector"] == {"matchLabels": sel}, sts["selector"]
+          assert sts["serviceName"] == "nudgebee-agent-clickhouse-headless", sts["serviceName"]
+          assert sts["podManagementPolicy"] == "Parallel", sts["podManagementPolicy"]
+          assert sts["volumeClaimTemplates"] == [{
+              "metadata": {"name": "data", "labels": dict(sel, **{"helm.sh/chart": "clickhouse-3.1.6", "app.kubernetes.io/managed-by": "Helm"})},
+              "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "50Gi"}}},
+          }], sts["volumeClaimTemplates"]
+          c = sts["template"]["spec"]["containers"][0]
+          assert {"name": "data", "mountPath": "/bitnami/clickhouse"} in c["volumeMounts"], c["volumeMounts"]
+          pw = next(e for e in c["env"] if e["name"] == "CLICKHOUSE_ADMIN_PASSWORD")
+          assert pw["valueFrom"]["secretKeyRef"] == {"name": "nudgebee-agent-clickhouse", "key": "admin-password"}, pw
+          assert "admin-password" in docs[("Secret", "nudgebee-agent-clickhouse")]["data"]
+          ports = {p["name"]: p["port"] for p in docs[("Service", "nudgebee-agent-clickhouse")]["spec"]["ports"]}
+          assert ports == {"http": 8123, "tcp": 9000, "tcp-mysql": 9004, "tcp-postgresql": 9005, "http-intersrv": 9009, "http-metrics": 8001}, ports
+          assert docs[("Service", "nudgebee-agent-clickhouse-headless")]["spec"]["clusterIP"] == "None"
+          paths = docs[("ConfigMap", "nudgebee-agent-clickhouse")]["data"]["10_storage_paths.xml"]
+          for want in ("<path>/bitnami/clickhouse/data/</path>", "<tmp_path>/bitnami/clickhouse/data/tmp/</tmp_path>",
+                       "<user_files_path>/bitnami/clickhouse/data/user_files/</user_files_path>",
+                       "<format_schema_path>/bitnami/clickhouse/data/format_schemas/</format_schema_path>",
+                       "<local_directory><path>/bitnami/clickhouse/data/access/</path></local_directory>"):
+              assert want in paths, want
+          users = docs[("ConfigMap", "nudgebee-agent-clickhouse-users")]["data"]["00_admin_user.xml"]
+          assert "from_env=\"CLICKHOUSE_ADMIN_PASSWORD\"" in users, users
+          print("ok: ClickHouse StatefulSet, Services, Secret and storage paths match earlier charts")
+          '
+          # A Bitnami-based image (what --reuse-values carries over from an
+          # earlier release) fails the render instead of starting the wrong image.
+          if out="$(helm template nudgebee-agent charts/nudgebee-agent --set clickhouse.image.tag=24.12.4-debian-12-r0-nb-3 2>&1)"; then
+            echo "rendered with a Bitnami-based image; expected it to fail"; exit 1
+          fi
+          case "$out" in *"--reset-then-reuse-values"*) ;; *) echo "unexpected failure: $out"; exit 1 ;; esac
+          echo 'ok: a Bitnami-based image is refused'
+          # A chart release alone must not restart ClickHouse: render again with
+          # only the chart version changed and compare the pod templates.
+          cp -r charts/nudgebee-agent /tmp/chart-next
+          sed -i 's/^version: .*/version: 99.0.0/; s/^appVersion: .*/appVersion: 99.0.0/' /tmp/chart-next/Chart.yaml
+          for c in charts/nudgebee-agent /tmp/chart-next; do
+            helm template nudgebee-agent "$c" --namespace nudgebee-agent \
+              --set clickhouse.extraOverrides='<clickhouse/>' \
+              --show-only templates/clickhouse-statefulset.yaml \
+              | python3 -c 'import sys, yaml, json; print(json.dumps(yaml.safe_load(sys.stdin)["spec"]["template"], sort_keys=True))'
+          done > /tmp/pod-templates.txt
+          if [ "$(sort -u /tmp/pod-templates.txt | wc -l)" != 1 ]; then
+            echo "the ClickHouse pod template changes with the chart version, so every release would restart it"
+            diff <(sed -n 1p /tmp/pod-templates.txt | python3 -m json.tool) <(sed -n 2p /tmp/pod-templates.txt | python3 -m json.tool)
+            exit 1
+          fi
+          echo 'ok: a chart version bump leaves the ClickHouse pod template unchanged'
 
       - name: Install kubeconform
         run: |

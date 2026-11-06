@@ -136,7 +136,7 @@ if [ -z "$auth_key" ]; then
   exit 1
 fi
 
-# `-` is the Bitnami convention for "disable dynamic provisioning, bind a
+# `-` is the chart's convention for "disable dynamic provisioning, bind a
 # pre-created PV". Only the agent chart understands it: kube-prometheus-stack
 # copies the value straight into the PVC (yielding a StorageClass named "-" that
 # does not exist, so the volume stays Pending forever) and loki-stack renders it

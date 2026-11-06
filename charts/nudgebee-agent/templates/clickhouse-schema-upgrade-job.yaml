@@ -21,6 +21,13 @@ This hook runs the additive, idempotent ALTERs before each upgrade: harmless
 when the columns (or the tables themselves) don't exist yet, and it keeps
 existing telemetry data (7d TTL) instead of requiring a table drop.
 
+An upgrade can also be the one that turns ClickHouse on. The hook runs before
+Helm creates anything, so there is no ClickHouse and no Secret yet, and nothing
+to migrate. The password reference is optional so the pod still starts, and the
+job exits 0 when the ClickHouse Service does not exist. Before this, the pod
+never started (secret not found) and the upgrade failed with
+"pre-upgrade hooks failed".
+
 Note that upgraded tables keep their original ORDER BY — new installs sort
 metrics by (ServiceName, MetricName, ...), upgraded ones still by
 (MetricName, Attributes, ...). Inserts are unaffected (the exporter names its
@@ -28,11 +35,9 @@ columns explicitly, so appended columns are fine), but ServiceName-filtered
 queries won't hit the primary key on upgraded clusters.
 */}}
 {{- if and .Values.clickhouse.enabled (index .Values "opentelemetry-collector" "enabled") }}
-{{- /* Mirror the bitnami subchart's fullname logic: fullnameOverride wins,
-       else <release>-<nameOverride|"clickhouse">. */}}
-{{- $chFullname := coalesce .Values.clickhouse.fullnameOverride (printf "%s-%s" .Release.Name (default "clickhouse" .Values.clickhouse.nameOverride)) }}
-{{- $chSecretName := default $chFullname (dig "auth" "existingSecret" "" .Values.clickhouse) }}
-{{- $chSecretKey := default "admin-password" (dig "auth" "existingSecretKey" "" .Values.clickhouse) }}
+{{- $chFullname := include "nudgebee-agent.clickhouse.servicename" . }}
+{{- $chSecretName := include "nudgebee-agent.clickhouse.secretName" . }}
+{{- $chSecretKey := include "nudgebee-agent.clickhouse.secretKey" . }}
 {{- /* Keep the target database/table in lockstep with the exporter config. */}}
 {{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
 {{- $chDatabase := default "default" (get $chExporter "database") }}
@@ -99,11 +104,21 @@ spec:
                 secretKeyRef:
                   name: {{ $chSecretName | quote }}
                   key: {{ $chSecretKey | quote }}
+                  # Absent when this upgrade is the one that turns ClickHouse on.
+                  optional: true
           command:
             - /bin/bash
             - -ec
             - |
               cc() { clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASSWORD" --query "$1"; }
+              # The Service exists once ClickHouse has been installed; Helm creates
+              # it after this hook. Without it this upgrade installs ClickHouse for
+              # the first time, and the collector creates the tables with the
+              # current schema.
+              if ! getent hosts "$CH_HOST" >/dev/null; then
+                echo "No ClickHouse Service ${CH_HOST} yet: this upgrade installs ClickHouse. Nothing to migrate."
+                exit 0
+              fi
               # Wait for the (pre-upgrade, still-running) clickhouse to answer.
               for i in $(seq 1 30); do
                 cc "SELECT 1" >/dev/null 2>&1 && break

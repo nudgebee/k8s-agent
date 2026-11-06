@@ -102,25 +102,15 @@ override with an explicit value and skip the derivation entirely.
 
 {{/*
 "true" when the bundled ClickHouse gets the read-only user query_data uses
-(templates/clickhouse-reader-users.yaml): the ClickHouse subchart is installed,
-clickhouse.reader.enabled, and the subchart mounts the users file. An operator's
-own clickhouse.extraVolumes / extraVolumeMounts replace the chart's lists, and an
-upgrade with --reuse-values keeps a release's old values, which have neither the
-reader nor the mount; in both cases the user doesn't exist, so nothing names it.
+(templates/clickhouse-reader-users.yaml): the bundled ClickHouse is installed and
+clickhouse.reader.enabled. The StatefulSet mounts the users file itself. An
+upgrade with --reuse-values keeps a release's old values, and values from before
+the reader have no clickhouse.reader; then the user doesn't exist, so nothing
+names it.
 */}}
 {{- define "nudgebee-agent.clickhouseReader" -}}
-{{- $ch := default (dict) .Values.clickhouse -}}
-{{- $otelEnabled := index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}
-{{- $volume := false -}}
-{{- range (default (list) $ch.extraVolumes) -}}
-{{- if and (kindIs "map" .) (eq (toString (get . "name")) "nudgebee-reader-users") -}}{{- $volume = true -}}{{- end -}}
-{{- end -}}
-{{- $mount := false -}}
-{{- range (default (list) $ch.extraVolumeMounts) -}}
-{{- if and (kindIs "map" .) (eq (toString (get . "name")) "nudgebee-reader-users") -}}{{- $mount = true -}}{{- end -}}
-{{- end -}}
-{{- $reader := $ch.reader -}}
-{{- if and $otelEnabled (kindIs "map" $reader) (get $reader "enabled") $volume $mount -}}true{{- end -}}
+{{- $reader := (default (dict) .Values.clickhouse).reader -}}
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (kindIs "map" $reader) (get $reader "enabled") -}}true{{- end -}}
 {{- end -}}
 
 {{/*
@@ -284,8 +274,8 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Values.runner.nudgebee.relay_signing_public_key | quote }}
     {{- end }}
     {{- /*
-    ClickHouse wiring for the runner. The in-chart ClickHouse subchart is
-    conditioned on `opentelemetry-collector.enabled`, so with the collector off
+    ClickHouse wiring for the runner. The in-chart ClickHouse is installed
+    only with `opentelemetry-collector.enabled`, so with the collector off
     neither the `<release>-clickhouse` Service nor its Secret exists. Point the
     runner at either of them anyway and kubelet cannot resolve the secretKeyRef:
     the pod never starts and sits in phase Pending with CreateContainerConfigError.
@@ -342,7 +332,8 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in
     the runner Secret), runner.clickhouse_secret (operator-provisioned), then the
-    subchart Secret — the last only when the subchart is actually installed.
+    bundled ClickHouse's Secret (clickhouse.auth.existingSecret when set) — the
+    last only when the bundled ClickHouse is actually installed.
     No source at all means no env var rather than a reference to a missing Secret.
     */}}
     {{- if .Values.runner.clickhouse_password }}
@@ -361,8 +352,8 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
-          key: admin-password
+          name: {{ include "nudgebee-agent.clickhouse.secretName" . }}
+          key: {{ include "nudgebee-agent.clickhouse.secretKey" . }}
     {{- end }}
     {{- end }}
     {{- if kindIs "string" .Values.runner.additional_env_vars }}
@@ -533,7 +524,60 @@ alert rules created from the UI.
 {{- end }}
 
 {{/*
-ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse subchart
+"true" when the chart installs its own ClickHouse (templates/clickhouse-*.yaml).
+It follows opentelemetry-collector.enabled, the condition the Bitnami subchart
+had, so turning the chart upgrade on installs exactly what it did before.
+*/}}
+{{- define "nudgebee-agent.clickhouse.installed" -}}
+{{- if index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+app.kubernetes.io/name of the ClickHouse objects. nameOverride changes it, as it
+did in the Bitnami subchart.
+*/}}
+{{- define "nudgebee-agent.clickhouse.name" -}}
+{{- default "clickhouse" .Values.clickhouse.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+ClickHouse selector labels. They are in the StatefulSet selector and its
+volumeClaimTemplates, which Kubernetes does not let an upgrade change, and the
+Services and the ServiceMonitor select on them: keep them as the Bitnami
+subchart rendered them.
+*/}}
+{{- define "nudgebee-agent.clickhouse.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "nudgebee-agent.clickhouse.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: clickhouse
+{{- end -}}
+
+{{- define "nudgebee-agent.clickhouse.labels" -}}
+{{ include "nudgebee-agent.clickhouse.selectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ include "nudgebee-agent.chart" . }}
+{{- end -}}
+
+{{/*
+The Secret and key that hold the ClickHouse admin password:
+clickhouse.auth.existingSecret / existingSecretKey when set, else the chart's own
+<fullname> Secret under admin-password.
+*/}}
+{{- define "nudgebee-agent.clickhouse.secretName" -}}
+{{- default (include "nudgebee-agent.clickhouse.servicename" .) (dig "auth" "existingSecret" "" .Values.clickhouse) -}}
+{{- end -}}
+
+{{- define "nudgebee-agent.clickhouse.secretKey" -}}
+{{- if dig "auth" "existingSecret" "" .Values.clickhouse -}}
+{{- default "admin-password" (dig "auth" "existingSecretKey" "" .Values.clickhouse) -}}
+{{- else -}}
+admin-password
+{{- end -}}
+{{- end -}}
+
+{{/*
+ClickHouse fullname (Services, Secret, ConfigMaps, StatefulSet prefix). Same
+rules as the Bitnami subchart's common.names.fullname, so the names don't change.
 */}}
 {{- define "nudgebee-agent.clickhouse.servicename" -}}
 {{- if .Values.clickhouse.fullnameOverride -}}

@@ -17,7 +17,7 @@ Helm chart for the NudgeBee Kubernetes agent. The agent runs in your cluster, co
 | `node-agent` (DaemonSet) | Per-node logs, profiles, and traces collector (eBPF-based) |
 | `opencost` (subchart) | Kubernetes cost allocation metrics |
 | `opentelemetry-collector` (subchart) | Receives OTLP signals from `node-agent` and exports to ClickHouse |
-| `clickhouse` (subchart) | Local store for traces / logs / metrics (7-day TTL by default) |
+| `clickhouse` (StatefulSet) | Local store for traces / logs / metrics (7-day TTL by default), on the official ClickHouse image |
 | Prometheus rules / ServiceMonitors | Default alerting + scrape config for `kube-prometheus-stack` users |
 
 The runner connects out to `wss://relay.nudgebee.com/register` and `https://collector.nudgebee.com`. No inbound connectivity is required.
@@ -88,8 +88,8 @@ helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent \
 ```
 
 [`openshift-values.yaml`](openshift-values.yaml) creates the SCCs, lets the
-node-agent run under a privileged SCC, and turns off the ClickHouse subchart's
-hardcoded UID so OpenShift can assign one. `installation.sh -o` sets the same
+node-agent run under a privileged SCC, and turns off ClickHouse's fixed UID so
+OpenShift can assign one. `installation.sh -o` sets the same
 values. To run without any privileged workload, also pass
 `--set openshift.createPrivilegedScc=false --set nodeAgent.enabled=false`.
 
@@ -107,6 +107,47 @@ helm upgrade nudgebee-agent nudgebee-agent/nudgebee-agent -n nudgebee-agent \
 ```
 
 To turn it off, upgrade without this file and without `--reuse-values`.
+
+### Upgrading from 0.1.31 or earlier
+
+Charts up to 0.1.31 ran ClickHouse from the Bitnami subchart. Later charts run
+the official ClickHouse image, same version (24.12.4), on the same StatefulSet
+and the same volume: an upgrade restarts the ClickHouse pod once and keeps its
+data, its Services and its password.
+
+`--reuse-values` keeps the earlier release's values, including its Bitnami-based
+ClickHouse image, and the chart refuses to render with it. Upgrade with
+`--reset-then-reuse-values` (Helm 3.14+), which applies the new chart's defaults
+under your own overrides:
+
+```bash
+helm upgrade nudgebee-agent nudgebee-agent/nudgebee-agent -n nudgebee-agent \
+  --reset-then-reuse-values
+```
+
+On Helm older than 3.14, pass your values file instead (`-f my-values.yaml`,
+without `--reuse-values`). A `--reuse-values` upgrade fails while rendering,
+before anything is applied, so it puts no data at risk.
+
+Before you upgrade:
+
+- **Mirrored images.** The ClickHouse StatefulSet and the pre-upgrade schema
+  job both use `ghcr.io/nudgebee/clickhouse:24.12.4-nb-1`. If you pull from a
+  private mirror, mirror that image first and point `clickhouse.image` at it,
+  or the upgrade stops at the pre-upgrade hook. The chart recognises a Bitnami
+  image only by `bitnami` in the repository or `-debian-` in the tag, so a
+  mirrored Bitnami image under another name is not caught when rendering.
+- **One restart.** The upgrade restarts the ClickHouse pod once. The startup
+  probe gives it up to 5 minutes to load the volume. Later chart releases do
+  not restart it unless its image or configuration changes.
+- **Password changes.** `clickhouse.auth.password` is used only when the
+  `<release>-clickhouse` Secret is first created; changing it later does not
+  change the password (the Bitnami image used to re-apply it on every start).
+  To change the password, update `admin-password` in that Secret (or in your
+  `clickhouse.auth.existingSecret`), then restart the ClickHouse pod, the
+  runner and the OpenTelemetry collector, which read it at start.
+- **OpenShift.** The upgrade has been checked by rendering only; try it on a
+  non-production OpenShift cluster first.
 
 ## Configuration
 
@@ -140,12 +181,11 @@ runner:
 global:
   storageClass: ""
 
-# Subcharts can be disabled if not needed
+# Subcharts can be disabled if not needed. ClickHouse is installed together
+# with the collector.
 opencost:
   enabled: true
 opentelemetry-collector:
-  enabled: true
-clickhouse:
   enabled: true
 ```
 
@@ -197,7 +237,7 @@ the old PVC (losing the local traces/logs, which have a 7-day TTL) to move
 ClickHouse to a different class.
 
 `global.storageClass` is a Helm convention, not a guarantee: it reaches a
-subchart's PVCs only if that subchart reads it. The Bitnami ClickHouse subchart
+subchart's PVCs only if that subchart reads it. The chart's own ClickHouse
 does. The OpenCost subchart does **not** — it writes
 `storageClassName` unconditionally, so leaving its class unset means
 `storageClassName: ""`, which *disables* dynamic provisioning rather than falling

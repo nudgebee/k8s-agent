@@ -1,0 +1,118 @@
+{{- /*
+ClickHouse configuration, mounted into the official image's
+/etc/clickhouse-server/config.d (<fullname>, <fullname>-extra) and users.d
+(<fullname>-users) by templates/clickhouse-statefulset.yaml.
+
+<fullname> and <fullname>-extra keep the names and settings the Bitnami subchart
+rendered. <fullname>-users replaces the subchart's <fullname>-scripts: its
+setup.sh only started the Bitnami entrypoint, which the official image does not
+need.
+*/ -}}
+{{- if include "nudgebee-agent.clickhouse.installed" . }}
+{{- $fullname := include "nudgebee-agent.clickhouse.servicename" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.clickhouse.labels" . | nindent 4 }}
+data:
+  00_default_overrides.xml: |
+    <clickhouse>
+      <!-- Macros -->
+      <macros>
+        <shard from_env="CLICKHOUSE_SHARD_ID"></shard>
+        <replica from_env="CLICKHOUSE_REPLICA_ID"></replica>
+        <layer>{{ $fullname }}</layer>
+      </macros>
+      <!-- Log Level -->
+      <logger>
+        <level>information</level>
+      </logger>
+      {{- if .Values.clickhouse.metrics.enabled }}
+       <!-- Prometheus metrics -->
+       <prometheus>
+          <endpoint>/metrics</endpoint>
+          <port from_env="CLICKHOUSE_METRICS_PORT"></port>
+          <metrics>true</metrics>
+          <events>true</events>
+          <asynchronous_metrics>true</asynchronous_metrics>
+      </prometheus>
+      {{- end }}
+    </clickhouse>
+  # Keeps the on-disk layout the Bitnami image used. There /var/lib/clickhouse was
+  # a link to /bitnami/clickhouse/data, so every /var/lib/clickhouse/... default
+  # ended up on the data volume. In the official image /var/lib/clickhouse is a
+  # directory in the container, so each path is set here. Do not change them:
+  # data already on a volume is found only at these paths.
+  10_storage_paths.xml: |
+    <clickhouse>
+      <path>/bitnami/clickhouse/data/</path>
+      <tmp_path>/bitnami/clickhouse/data/tmp/</tmp_path>
+      <user_files_path>/bitnami/clickhouse/data/user_files/</user_files_path>
+      <format_schema_path>/bitnami/clickhouse/data/format_schemas/</format_schema_path>
+      <custom_cached_disks_base_directory>/bitnami/clickhouse/data/caches/</custom_cached_disks_base_directory>
+      <user_directories replace="replace">
+        <users_xml><path>users.xml</path></users_xml>
+        <local_directory><path>/bitnami/clickhouse/data/access/</path></local_directory>
+      </user_directories>
+
+      <!-- As the Bitnami image did: log to the console only, listen on IPv4,
+           and no built-in "default" cluster. -->
+      <logger>
+        <console>1</console>
+        <log remove="remove"/>
+        <errorlog remove="remove"/>
+      </logger>
+      <listen_host>0.0.0.0</listen_host>
+      <remote_servers remove="remove"/>
+    </clickhouse>
+{{- if .Values.clickhouse.extraOverrides }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-extra
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.clickhouse.labels" . | nindent 4 }}
+data:
+  01_extra_overrides.xml: |
+    {{- tpl .Values.clickhouse.extraOverrides . | nindent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-users
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.clickhouse.labels" . | nindent 4 }}
+data:
+  # The admin user. Its password comes from CLICKHOUSE_ADMIN_PASSWORD (the
+  # ClickHouse Secret), as in the Bitnami image; the read-only user in
+  # clickhouse-reader-users.yaml reads the same variable.
+  00_admin_user.xml: |
+    <clickhouse>
+      <users>
+      {{- $user := default "default" .Values.clickhouse.auth.username }}
+      {{- if eq $user "default" }}
+        <default>
+          <password replace="replace" from_env="CLICKHOUSE_ADMIN_PASSWORD"/>
+        </default>
+      {{- else }}
+        <default remove="remove"/>
+        <{{ $user }}>
+          <profile>default</profile>
+          <password from_env="CLICKHOUSE_ADMIN_PASSWORD"/>
+          <networks>
+            <ip>::/0</ip>
+          </networks>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </{{ $user }}>
+      {{- end }}
+      </users>
+    </clickhouse>
+{{- end }}
