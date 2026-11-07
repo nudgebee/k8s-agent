@@ -813,16 +813,22 @@ func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []s
 		// snapshot. The queue dedups by key, so a backend outage holds at most
 		// one entry per object, and the retry reads the latest cached state.
 		requeued := 0
-		for _, key := range append(converted, mapKeys(tombs)...) {
+		requeue := func(key string) bool {
 			if h.queue.NumRequeues(key) >= maxIncrementalRequeues {
 				h.queue.Forget(key)
-				continue
-			}
-			if tomb, ok := tombs[key]; ok {
-				h.restashTombstone(key, tomb)
+				return false
 			}
 			h.queue.AddRateLimited(key)
 			requeued++
+			return true
+		}
+		for _, key := range converted {
+			requeue(key)
+		}
+		for key, tomb := range tombs {
+			if requeue(key) {
+				h.restashTombstone(key, tomb)
+			}
 		}
 		s.logger.Error("incremental post failed", "type", h.typ, "count", len(items),
 			"requeued", requeued, "err", err)
@@ -834,14 +840,6 @@ func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []s
 	for key := range tombs {
 		h.queue.Forget(key)
 	}
-}
-
-func mapKeys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 // enqueue puts a MetaNamespaceKey for obj on the queue. Deletion-aware: a
