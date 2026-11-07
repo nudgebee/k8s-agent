@@ -973,7 +973,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
-			var eventsLister triggers.K8sEventsLister = newK8sEventsLister(typedKube)
+			eventsLister := newK8sEventsLister(typedKube)
 			if cfg.TriggerEventsCache {
 				cached, err := newCachedEventsLister(typedKube, eventsLister)
 				if err != nil {

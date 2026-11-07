@@ -124,7 +124,7 @@ func (f *Forwarder) enqueueKubewatch(job kubewatchJob, key string) bool {
 	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
-	shard := f.kwShards[h.Sum32()%uint32(len(f.kwShards))]
+	shard := f.kwShards[int(h.Sum32())%len(f.kwShards)]
 	f.kwDepth.Add(1)
 	select {
 	case shard <- job:
