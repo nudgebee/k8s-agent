@@ -111,6 +111,12 @@ runnerServiceAccount:
   imagePullSecrets: []
 # parameters for the nudgebee runner
 runner:
+  # Pull the agent's images from your own registry, for example
+  # registry.example.com/nudgebee. Mirror the images under the same names. Moves
+  # the runner, forwarder, node agent and profiler images, and points the PVC
+  # mover at <registry>/ubuntu. Subchart images are set separately; the chart
+  # fails with the exact values to add if an enabled subchart still uses ghcr.
+  image_registry: ""
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
     tag: 2026-10-05T18-41-56_c54355997233265c8a310e8957471ad298fc8ffd

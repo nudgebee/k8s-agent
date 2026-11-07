@@ -39,7 +39,7 @@ spec:
       hostPID: true
       containers:
         - name: node-agent
-          image: "{{ .Values.nodeAgent.image.repository }}:{{ .Values.nodeAgent.image.tag }}"
+          image: {{ include "nudgebee.imageRef" (dict "root" . "ref" (printf "%s:%v" .Values.nodeAgent.image.repository .Values.nodeAgent.image.tag)) | quote }}
           args: ["--cgroupfs-root", "/host/sys/fs/cgroup"]
           imagePullPolicy: {{ .Values.nodeAgent.image.pullPolicy }}
           resources:
