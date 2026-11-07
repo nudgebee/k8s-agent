@@ -8,6 +8,9 @@ ceiling, so it can lower a limit but neither raise it nor set 0 (unlimited).
 readonly only stops writes: the grants also take away table functions that reach
 out of ClickHouse (url, s3, remote, mysql, postgresql, ...), which a user defined
 here would otherwise have.
+The per-user memory and concurrency caps are rendered only when set, so a
+release upgraded with --reuse-values from before them keeps running uncapped
+rather than getting a 0 (unlimited) cap with an unsatisfiable constraint.
 The users file is copied in when ClickHouse starts: changed limits apply after
 its pod restarts.
 */}}
@@ -28,12 +31,24 @@ data:
           <max_execution_time>{{ int64 $r.maxExecutionTime }}</max_execution_time>
           <max_rows_to_read>{{ int64 $r.maxRowsToRead }}</max_rows_to_read>
           <max_memory_usage>{{ int64 $r.maxMemoryUsage }}</max_memory_usage>
+          {{- if $r.maxMemoryUsageForUser }}
+          <max_memory_usage_for_user>{{ int64 $r.maxMemoryUsageForUser }}</max_memory_usage_for_user>
+          {{- end }}
+          {{- if $r.maxConcurrentQueries }}
+          <max_concurrent_queries_for_user>{{ int64 $r.maxConcurrentQueries }}</max_concurrent_queries_for_user>
+          {{- end }}
           <max_bytes_before_external_sort>{{ int64 $r.maxBytesBeforeSpill }}</max_bytes_before_external_sort>
           <max_bytes_before_external_group_by>{{ int64 $r.maxBytesBeforeSpill }}</max_bytes_before_external_group_by>
           <constraints>
             <max_execution_time><min>1</min><max>{{ int64 $r.maxExecutionTimeCeiling }}</max></max_execution_time>
             <max_rows_to_read><min>1</min><max>{{ int64 $r.maxRowsToRead }}</max></max_rows_to_read>
             <max_memory_usage><min>1</min><max>{{ int64 $r.maxMemoryUsage }}</max></max_memory_usage>
+            {{- if $r.maxMemoryUsageForUser }}
+            <max_memory_usage_for_user><min>1</min><max>{{ int64 $r.maxMemoryUsageForUser }}</max></max_memory_usage_for_user>
+            {{- end }}
+            {{- if $r.maxConcurrentQueries }}
+            <max_concurrent_queries_for_user><min>1</min><max>{{ int64 $r.maxConcurrentQueries }}</max></max_concurrent_queries_for_user>
+            {{- end }}
           </constraints>
         </nudgebee_reader>
       </profiles>
