@@ -44,6 +44,12 @@ func TestListHelmReleases_LatestRevisionMetadataOnly(t *testing.T) {
 		helmSecret(t, "monitoring", "loki", 2, "superseded"),
 		helmSecret(t, "monitoring", "loki", 3, "deployed"),
 		helmSecret(t, "app", "api", 1, "failed"),
+		// Decodes, but names no release (blob is JSON null).
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "sh.helm.release.v1.empty.v1", Namespace: "app", Labels: map[string]string{"owner": "helm"}},
+			Type:       "helm.sh/release.v1",
+			Data:       map[string][]byte{"release": encodeHelmRelease(t, nil)},
+		},
 		// Not a release: same label, other type.
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "app", Labels: map[string]string{"owner": "helm"}},

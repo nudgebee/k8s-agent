@@ -89,7 +89,8 @@ func helmReleaseMeta(s *corev1.Secret) (HelmReleaseMeta, bool) {
 		return HelmReleaseMeta{}, false
 	}
 	rel, err := decodeHelmRelease(raw)
-	if err != nil {
+	// A blob that decodes to an empty object (e.g. JSON `null`) names no release.
+	if err != nil || rel.Name == "" {
 		return HelmReleaseMeta{}, false
 	}
 	ns := rel.Namespace

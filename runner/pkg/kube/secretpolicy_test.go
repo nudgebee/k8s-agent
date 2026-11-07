@@ -41,6 +41,9 @@ func TestKubectl_RefusesSecretAccess(t *testing.T) {
 		"kubectl get --raw /api/v1/namespaces/app/%73ecrets",
 		"kubectl get --raw /apis/external-secrets.io/v1beta1/externalsecrets",
 		"kubectl create --raw /api/v1/namespaces/app/serviceaccounts/default/token -f req.json",
+		"kubectl create --raw /api/v1/namespaces/app/serviceaccounts/default/./token -f req.json",
+		"kubectl create --raw /api/v1/namespaces/app/serviceaccounts/default//token -f req.json",
+		"kubectl get --raw /api/v1/namespaces/app/secrets/../secrets/db",
 		// File-backed output formats read the agent pod's filesystem.
 		"kubectl get pods -o jsonpath-file=/var/run/secrets/kubernetes.io/serviceaccount/token",
 		"kubectl get pods -o jsonpath-file=/tmp/t",
@@ -51,6 +54,8 @@ func TestKubectl_RefusesSecretAccess(t *testing.T) {
 		// Mounted credential paths.
 		"kubectl get -f /var/run/secrets/kubernetes.io/serviceaccount/token",
 		"kubectl get pods --token-file=/var/run/../run/secrets/x",
+		"kubectl get -f ../var/run/secrets/kubernetes.io/serviceaccount/token",
+		"kubectl get -f var/run/secrets/x",
 	}
 	for _, write := range []bool{false, true} {
 		k := &KubectlExecutor{BinaryPath: "/usr/bin/true", AllowWrite: write}

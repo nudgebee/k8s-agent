@@ -52,10 +52,12 @@ var resourceTakingVerbs = map[string]struct{}{
 // mountedSecretPaths are where kubelet mounts ServiceAccount tokens and Secret
 // volumes. A kubectl argument naming one reads a local credential file on the
 // agent pod (`-f`, `--token-file`, a template file) or, via exec, a target pod.
+// No leading slash, so a relative spelling (`../var/run/secrets/...`, or
+// `var/run/secrets/...` from a workdir of /) matches too.
 var mountedSecretPaths = []string{
-	"/var/run/secrets",
-	"/run/secrets",
-	"/var/lib/kubelet/pods",
+	"var/run/secrets",
+	"run/secrets",
+	"var/lib/kubelet/pods",
 	"kubernetes.io/serviceaccount",
 }
 
@@ -112,7 +114,9 @@ func secretBearingKindIn(args []string) string {
 // secret-bearing resource or ServiceAccount token minting. `--raw` skips
 // kubectl's resource parsing, so the kind check above never sees the path.
 // The path is percent-decoded first: the API server decodes it before routing,
-// so `%73ecrets` reaches the secrets handler.
+// so `%73ecrets` reaches the secrets handler. Both the path as written and its
+// cleaned form are checked, so dot segments and doubled slashes
+// (`serviceaccounts/sa/./token`) cannot shift a segment out of place.
 func checkRawPaths(args []string) error {
 	for i, a := range args {
 		var raw string
@@ -129,13 +133,16 @@ func checkRawPaths(args []string) error {
 		if err != nil {
 			return fmt.Errorf("kubectl: --raw path %q is not a valid URL path", raw)
 		}
-		segs := strings.Split(strings.ToLower(decoded), "/")
-		for j, s := range segs {
-			if _, ok := secretBearingAPIResources[s]; ok {
-				return fmt.Errorf("kubectl: --raw access to %q is blocked. Secret-bearing resources are not readable through the agent", s)
-			}
-			if s == "token" && j >= 2 && segs[j-2] == "serviceaccounts" {
-				return fmt.Errorf("kubectl: --raw access to ServiceAccount tokens is blocked")
+		decoded = strings.ToLower(decoded)
+		for _, form := range []string{decoded, path.Clean(decoded)} {
+			segs := strings.Split(form, "/")
+			for j, s := range segs {
+				if _, ok := secretBearingAPIResources[s]; ok {
+					return fmt.Errorf("kubectl: --raw access to %q is blocked. Secret-bearing resources are not readable through the agent", s)
+				}
+				if s == "token" && j >= 2 && segs[j-2] == "serviceaccounts" {
+					return fmt.Errorf("kubectl: --raw access to ServiceAccount tokens is blocked")
+				}
 			}
 		}
 	}
