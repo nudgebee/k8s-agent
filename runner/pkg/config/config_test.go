@@ -65,14 +65,18 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		DiscoveryResync:    10 * time.Minute,
 		AlertRulesInterval: 30 * time.Minute, // default when ALERT_RULES_INTERVAL unset
 		// Scalability knobs — defaults applied when their env vars are unset.
-		DiscoveryBatchSize:   1000,
-		IncrementalBatchSize: 1,
-		ForwardPoolSize:      64,
-		RelayHandlerPoolSize: 32,
-		TriggerRateLimits:    map[string]time.Duration{},
-		KubeEnabled:          true,
-		PodExecEnabled:       true,
-		ScannerNamespace:     "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
+		DiscoveryBatchSize:     1000,
+		IncrementalBatchSize:   1,
+		ForwardPoolSize:        64,
+		KubewatchWorkers:       8,
+		KubewatchQueueSize:     2048,
+		KubewatchQueueMaxBytes: 64 << 20,
+		TriggerEventsCache:     true,
+		RelayHandlerPoolSize:   32,
+		TriggerRateLimits:      map[string]time.Duration{},
+		KubeEnabled:            true,
+		PodExecEnabled:         true,
+		ScannerNamespace:       "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
 		// Pull-secret copy is on unless SCANNER_AUTO_COPY_PULL_SECRETS says
 		// otherwise: without it, a private image whose node-local copy is gone
 		// can never be scanned.
