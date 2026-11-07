@@ -81,7 +81,17 @@ override with an explicit value and skip the derivation entirely.
 {{- if .Values.runner.goMemLimit -}}
 {{- .Values.runner.goMemLimit -}}
 {{- else -}}
-{{- $lim := (dig "resources" "limits" "memory" "" .Values.runner) | toString -}}
+{{- include "nudgebee-agent.goMemLimitFrom" (dict "limit" (dig "resources" "limits" "memory" "" .Values.runner) "ratio" .Values.runner.goMemLimitRatio) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+GOMEMLIMIT bytes for a memory limit string: limit x ratio (default 0.8).
+Takes (dict "limit" <quantity> "ratio" <float>). Emits nothing for an empty or
+unparseable limit.
+*/}}
+{{- define "nudgebee-agent.goMemLimitFrom" -}}
+{{- $lim := .limit | toString -}}
 {{- $num := regexFind "^[0-9.]+" $lim -}}
 {{- if $num -}}
 {{- $mult := 1.0 -}}
@@ -94,10 +104,17 @@ override with an explicit value and skip the derivation entirely.
 {{- else if hasSuffix "G" $lim -}}{{- $mult = 1000000000.0 -}}
 {{- else if hasSuffix "T" $lim -}}{{- $mult = 1000000000000.0 -}}
 {{- end -}}
-{{- $ratio := .Values.runner.goMemLimitRatio | default 0.8 -}}
+{{- $ratio := .ratio | default 0.8 -}}
 {{- printf "%d" (int64 (mulf (float64 $num) $mult $ratio)) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Memory limit of the forwarder (kubewatch) container. The limit equals the
+request: kubewatch's footprint is its informer caches, which do not burst.
+*/}}
+{{- define "nudgebee-agent.kubewatchMemory" -}}
+{{- if .Values.isSmallCluster -}}64Mi{{- else -}}{{- .Values.kubewatch.resources.requests.memory -}}{{- end -}}
 {{- end -}}
 
 {{/*

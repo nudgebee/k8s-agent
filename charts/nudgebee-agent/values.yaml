@@ -45,12 +45,26 @@ kubewatch:
   # it, and a hardcoded UID is rejected by restricted-v2. Set to ~ to never set it.
   runAsUser: 1000
   pprof: true
+  # SIZING: kubewatch caches every object of each enabled kind below and holds
+  # the not-yet-sent changes, so memory follows the cluster's object count, not
+  # its traffic. The memory limit equals requests.memory. Raise it with the
+  # watched object count (pods + configmaps dominate):
+  #   <2k pods      : 512Mi
+  #   ~5k pods      : 1Gi
+  #   ~10k+ pods    : 2Gi
+  # A sustained rise in kubewatch_workqueue_depth{name="Pod"} means the agent
+  # is not keeping up; kubewatch_events_dropped_total counts what the queue
+  # limit (config.queue.maxPending) shed.
   resources:
     requests:
-      cpu: 10m
+      cpu: 50m
       memory: 512Mi
     limits:
       cpu: ~
+  # GOMEMLIMIT for kubewatch, derived from the memory limit like the runner's.
+  goMemLimitRatio: 0.8
+  # Explicit GOMEMLIMIT override; skips the derivation when non-empty.
+  goMemLimit: ""
   additional_env_vars: []
   tolerations: []
   annotations: {}
@@ -58,25 +72,36 @@ kubewatch:
   imagePullSecrets: []
   config:
     namespace: ""
+    # Send queue per watched kind (kubewatch builds that predate it ignore
+    # this). workers send concurrently; events for one object stay in order.
+    # maxPending caps the objects waiting per kind; past it the longest-waiting
+    # objects' changes are dropped and counted instead of growing until OOM.
+    queue:
+      workers: 4
+      maxPending: 5000
+    # Watch only the kinds the runner's alert matchers read. Each enabled kind
+    # is cached in full and every change to it is sent to the runner, so a
+    # kind nothing reads costs memory and CPU for no alert. Kinds marked "not
+    # read" can be turned back on, but the runner drops their events.
     resource:
       deployment: true
       replicationcontroller: false # 0.10.12 disabled because not supported on the runner
-      replicaset: true
+      replicaset: false # not read; the highest-churn kind after events
       daemonset: true
       statefulset: true
       services: true
       pod: true
       job: true
       node: true
-      hpa: true
-      clusterrole: true
-      clusterrolebinding: true
-      serviceaccount: true
-      persistentvolume: true
-      namespace: true
+      hpa: false # not read
+      clusterrole: false # not read
+      clusterrolebinding: false # not read
+      serviceaccount: false # not read
+      persistentvolume: false # not read
+      namespace: false # not read
       configmap: true # 0.9.17
       secret: false # disabled for security reasons
-      event: true # updated on kubewatch 2.5
+      event: false # not read; Finding event tables come from the runner's own cache
       coreevent: false # added on kubewatch 2.5
       ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
       rollout: true
