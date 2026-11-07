@@ -107,6 +107,8 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 	return out
 }
 
+func (a *triggerAdapter) HandlesKind(kind string) bool { return a.e.HandlesKind(kind) }
+
 // promDiscoveryInterval is how often the agent re-looks for a Prometheus
 // Service when it started without one. Five minutes keeps a freshly installed
 // Prometheus usable within a scrape interval or two, at the cost of one
@@ -920,6 +922,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		fwd.SetKubewatchQueue(cfg.KubewatchWorkers, cfg.KubewatchQueueSize, cfg.KubewatchQueueMaxBytes)
+		fwd.KubewatchMetrics = mreg
+		mreg.RegisterKubewatchQueueDepth(func() float64 { return float64(fwd.KubewatchQueueDepth()) })
 		// Lets the forwarder report a node-exporter alert against the node it
 		// describes rather than the exporter pod that emitted it. Opportunistic:
 		// without a typed client the correction falls back to the alert's own
@@ -968,7 +973,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
-			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
+			eventsLister := newK8sEventsLister(typedKube)
+			if cfg.TriggerEventsCache {
+				cached, err := newCachedEventsLister(typedKube, eventsLister)
+				if err != nil {
+					logger.Warn("events cache unavailable; evidence tables use live List calls", "err", err)
+				} else {
+					g.Go(func() error {
+						cached.Run(gctx)
+						return nil
+					})
+					eventsLister = cached
+				}
+			}
+			eng = eng.WithEventsLister(eventsLister)
 			// Service-backends lister lets service_no_endpoints resolve a
 			// Service's selector against live pods + workload templates.
 			// Without it (no K8s client) that matcher never fires. The

@@ -172,8 +172,12 @@ runner:
     batchSize: 1000 # items per snapshot batch when snapshotBatching is on
     incrementalBatchSize: 100 # coalesce N informer events per incremental POST (>1 needs collector to iterate data)
     emitTombstones: true # emit deleted:true on delete (needs collector incremental-delete support)
-  # forwardPoolSize: 64          # bound concurrent event-forward goroutines
-  # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
+    # forwardPoolSize: 64          # bound concurrent event-forward goroutines
+    # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
+    # kubewatchWorkers: 8          # workers matching kubewatch events off the request path
+    # kubewatchQueueSize: 2048     # kubewatch events allowed to wait; beyond it they are shed and counted
+    # kubewatchQueueMaxBytes: 67108864  # bytes of waiting kubewatch events (64 MiB); beyond it they are shed
+    # eventsCache: true            # serve Finding event tables from an Event informer instead of API Lists
   tolerations: []
   annotations: {}
   nodeSelector: ~
