@@ -13,7 +13,7 @@ Helm chart for the NudgeBee Kubernetes agent. The agent runs in your cluster, co
 | Component | Purpose |
 | --- | --- |
 | `runner` | Connects to the NudgeBee backend over WebSocket; executes diagnostic and remediation actions in-cluster (source: [`runner/`](runner/)) |
-| `kubewatch` (forwarder) | Streams Kubernetes resource changes and events to the runner |
+| `kubewatch` (forwarder) | Streams Kubernetes resource changes to the runner |
 | `node-agent` (DaemonSet) | Per-node logs, profiles, and traces collector (eBPF-based) |
 | `opencost` (subchart) | Kubernetes cost allocation metrics |
 | `opentelemetry-collector` (subchart) | Receives OTLP signals from `node-agent` and exports to ClickHouse |
