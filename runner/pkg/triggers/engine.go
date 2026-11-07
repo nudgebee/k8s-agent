@@ -257,6 +257,18 @@ func (e *Engine) suppressedByResync(obj map[string]any) bool {
 	return t.Before(e.startTime.Add(-e.graceWindow))
 }
 
+// HandlesKind reports whether any matcher could fire on an event of this
+// kind. The intake uses it to drop kinds no matcher reads before it pays
+// for decoding the objects or queueing them.
+func (e *Engine) HandlesKind(kind string) bool {
+	for i := range e.specs {
+		if kindMatches(e.specs[i].Kind, kind) {
+			return true
+		}
+	}
+	return false
+}
+
 // kindMatches compares a spec's Kind against the kind kubewatch reported.
 // Case-insensitive: kubewatch's per-resource handlers are not consistent
 // about casing across kinds ("Deployment" but "configmap"), and a spec

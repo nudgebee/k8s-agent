@@ -27,6 +27,11 @@ type Registry struct {
 	ForwardShed     *prometheus.CounterVec // labels: source (kubewatch|alertmanager|relay)
 	RelayReconnects prometheus.Counter
 	RelayConnected  prometheus.Gauge
+
+	KubewatchEvents    *prometheus.CounterVec   // labels: kind, outcome
+	KubewatchHandle    prometheus.Histogram     // /api/handle time held from the sender
+	KubewatchQueueWait prometheus.Histogram     // time an event waited for a worker
+	KubewatchMatch     *prometheus.HistogramVec // labels: kind; predicates + evidence lookups
 }
 
 // New builds the registry and pre-registers all collectors.
@@ -85,6 +90,30 @@ func New() *Registry {
 		Help:      "1 when the relay WS is open, 0 otherwise.",
 	})
 
+	reg.KubewatchEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "kubewatch_events_total",
+		Help:      "kubewatch events received, by kind and outcome (matched, unmatched, ignored_kind, shed, invalid, panic).",
+	}, []string{"kind", "outcome"})
+	reg.KubewatchHandle = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "kubewatch_handle_seconds",
+		Help:      "Time /api/handle holds the kubewatch request. kubewatch sends its next event of a type only after this returns.",
+		Buckets:   []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, 1},
+	})
+	reg.KubewatchQueueWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "kubewatch_queue_wait_seconds",
+		Help:      "Time a kubewatch event waited in the intake queue for a worker.",
+		Buckets:   []float64{.001, .01, .1, .5, 1, 5, 15, 30, 60, 120},
+	})
+	reg.KubewatchMatch = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "kubewatch_match_seconds",
+		Help:      "Time spent matching one kubewatch event: predicates plus the evidence lookups of any matcher that fired.",
+		Buckets:   []float64{.0001, .001, .005, .01, .05, .1, .5, 1, 3, 10},
+	}, []string{"kind"})
+
 	r.MustRegister(
 		reg.ActionsTotal,
 		reg.ActionDuration,
@@ -95,6 +124,10 @@ func New() *Registry {
 		reg.ForwardShed,
 		reg.RelayReconnects,
 		reg.RelayConnected,
+		reg.KubewatchEvents,
+		reg.KubewatchHandle,
+		reg.KubewatchQueueWait,
+		reg.KubewatchMatch,
 	)
 	return reg
 }
@@ -145,6 +178,32 @@ func (r *Registry) OnRelayConnected(connected bool) {
 		return
 	}
 	r.RelayConnected.Set(0)
+}
+
+// OnKubewatchEvent satisfies alerts.KubewatchMetrics.
+func (r *Registry) OnKubewatchEvent(kind, outcome string) {
+	r.KubewatchEvents.WithLabelValues(kind, outcome).Inc()
+}
+
+// ObserveKubewatchHandle satisfies alerts.KubewatchMetrics.
+func (r *Registry) ObserveKubewatchHandle(seconds float64) { r.KubewatchHandle.Observe(seconds) }
+
+// ObserveKubewatchQueueWait satisfies alerts.KubewatchMetrics.
+func (r *Registry) ObserveKubewatchQueueWait(seconds float64) { r.KubewatchQueueWait.Observe(seconds) }
+
+// ObserveKubewatchMatch satisfies alerts.KubewatchMetrics.
+func (r *Registry) ObserveKubewatchMatch(kind string, seconds float64) {
+	r.KubewatchMatch.WithLabelValues(kind).Observe(seconds)
+}
+
+// RegisterKubewatchQueueDepth exposes the intake's queue depth as a gauge read
+// at scrape time. Call once.
+func (r *Registry) RegisterKubewatchQueueDepth(depth func() float64) {
+	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "kubewatch_queue_depth",
+		Help:      "kubewatch events waiting in the intake queue for a worker.",
+	}, depth))
 }
 
 // OnRelayReconnect counts redial attempts after a session ends.

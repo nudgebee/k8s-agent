@@ -235,6 +235,22 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: RELAY_HANDLER_POOL_SIZE
       value: {{ .relayHandlerPoolSize | quote }}
     {{- end }}
+    {{- if .kubewatchWorkers }}
+    - name: KUBEWATCH_WORKERS
+      value: {{ .kubewatchWorkers | quote }}
+    {{- end }}
+    {{- if .kubewatchQueueSize }}
+    - name: KUBEWATCH_QUEUE_SIZE
+      value: {{ .kubewatchQueueSize | quote }}
+    {{- end }}
+    {{- if .kubewatchQueueMaxBytes }}
+    - name: KUBEWATCH_QUEUE_MAX_BYTES
+      value: {{ .kubewatchQueueMaxBytes | int64 | quote }}
+    {{- end }}
+    {{- if hasKey . "eventsCache" }}
+    - name: TRIGGER_EVENTS_CACHE
+      value: {{ .eventsCache | quote }}
+    {{- end }}
     {{- end }}
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE

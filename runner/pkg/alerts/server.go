@@ -29,6 +29,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -67,6 +69,20 @@ type Forwarder struct {
 	// which nothing polls.
 	OnForward func()
 	OnDrop    func(source string)
+
+	// KubewatchMetrics, if set, receives the kubewatch intake's per-kind
+	// outcome counts and latencies.
+	KubewatchMetrics KubewatchMetrics
+
+	// Kubewatch intake (k8s_intake.go): sharded queue + workers, started on
+	// the first event.
+	kwWorkers   int
+	kwQueueSize int
+	kwMaxBytes  int64
+	kwOnce      sync.Once
+	kwShards    []chan kubewatchJob
+	kwDepth     atomic.Int64
+	kwBytes     atomic.Int64
 }
 
 // SetForwardPoolSize bounds concurrent event-forward goroutines. n<=0 leaves
@@ -87,7 +103,8 @@ func (f *Forwarder) SetNodeLocator(l NodeLocator) {
 }
 
 // ForwardShed returns the number of intake events dropped because the forward
-// pool was saturated. Wire to a Prometheus counter in main.
+// pool or the kubewatch intake queue was saturated. Wire to a Prometheus
+// counter in main.
 func (f *Forwarder) ForwardShed() uint64 { return f.forwardShed.Load() }
 
 // spawnForward runs fn in a goroutine under the (optional) pool bound. When the
@@ -184,7 +201,7 @@ func (f *Forwarder) handleAlert(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleK8sEvent receives a kubewatch payload at `/api/handle` (or alias)
-// and runs it through the trigger engine. Effective behaviour: most
+// and queues it for the trigger engine. Effective behaviour: most
 // kubewatch events match no trigger and are silently dropped — only
 // events matching a registered predicate produce a Finding.
 //
@@ -193,13 +210,21 @@ func (f *Forwarder) handleAlert(w http.ResponseWriter, r *http.Request) {
 //	{"type":"cluster_snapshot", ...}    — drop. pkg/discovery already does
 //	                                       informer-driven full sync every
 //	                                       30 min.
-//	{"data":{operation,kind,obj,...}}   — run through Engine.MatchK8sEvent.
+//	{"data":{operation,kind,obj,...}}   — queue for Engine.MatchK8sEvent.
 //	                                       One Finding per fired matcher
 //	                                       (a Pod can be both
 //	                                       ImagePullBackOff and
 //	                                       CrashLoopBackOff).
 //	{}                                   — malformed; drop with WARN.
+//
+// The handler does no matching itself: kubewatch waits for this response
+// before sending its next event of the same type, so the request path only
+// reads the event header and queues it (k8s_intake.go).
 func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if f.KubewatchMetrics != nil {
+		defer func() { f.KubewatchMetrics.ObserveKubewatchHandle(time.Since(start).Seconds()) }()
+	}
 	body, ok := readBody(w, r)
 	if !ok {
 		return
@@ -211,6 +236,7 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
+		f.recordKubewatch("", KubewatchOutcomeInvalid)
 		f.Logger.Warn("kubewatch: payload parse failed; dropping",
 			"err", err, "bytes", len(body))
 		return
@@ -220,6 +246,7 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(probe.Data) == 0 {
+		f.recordKubewatch("", KubewatchOutcomeInvalid)
 		f.Logger.Warn("kubewatch: payload missing both `type` and `data`; dropping",
 			"bytes", len(body))
 		return
@@ -234,44 +261,47 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the inner `data` dict to extract operation/kind/obj/oldObj.
-	var inner struct {
-		Operation string         `json:"operation"`
-		Kind      string         `json:"kind"`
-		Obj       map[string]any `json:"obj"`
-		OldObj    map[string]any `json:"oldObj"`
+	// Only the header: the objects themselves are decoded by the worker.
+	var head struct {
+		Operation string `json:"operation"`
+		Kind      string `json:"kind"`
+		Obj       struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		} `json:"obj"`
 	}
-	if err := json.Unmarshal(probe.Data, &inner); err != nil {
+	if err := json.Unmarshal(probe.Data, &head); err != nil {
+		f.recordKubewatch("", KubewatchOutcomeInvalid)
 		f.Logger.Warn("kubewatch: inner data parse failed; dropping",
 			"err", err)
 		return
 	}
-
-	matches := f.Engine.MatchK8sEvent(inner.Operation, inner.Kind, inner.Obj, inner.OldObj)
-	if len(matches) == 0 {
+	if kf, ok := f.Engine.(KindFilter); ok && !kf.HandlesKind(head.Kind) {
+		// Labelled "other", not by kind: the kind is whatever the sender
+		// wrote, and an unbounded label set is worse than no label.
 		f.k8sUnmatched.Add(1)
+		f.recordKubewatch("other", KubewatchOutcomeIgnoredKind)
 		return
 	}
 
-	// One Finding per match. The same kubewatch event can fire multiple
-	// matchers (e.g., a Pod that's both ImagePullBackOff and CrashLoopBackOff)
-	// — each produces its own Finding with its own aggregation_key. Acquire the
-	// pool slot ONCE per event (not per match) so a multi-finding event stays
-	// atomic and ordered.
-	f.spawnForward("kubewatch", func() {
-		for i := range matches {
-			env, err := f.builder.FromMatchedTrigger(matches[i], probe.Data)
-			if err != nil {
-				f.recordDrop("kubewatch_matcher_"+matches[i].MatcherName, err)
-				continue
-			}
-			if err := f.forward(context.Background(), env); err != nil {
-				f.recordDrop("kubewatch_matcher_"+matches[i].MatcherName, err)
-				continue
-			}
-			f.recordForward()
+	job := kubewatchJob{
+		operation: head.Operation,
+		kind:      head.Kind,
+		data:      probe.Data,
+		queued:    start,
+	}
+	key := kubewatchShardKey(head.Kind, head.Obj.Metadata.Namespace, head.Obj.Metadata.Name)
+	if !f.enqueueKubewatch(job, key) {
+		f.forwardShed.Add(1)
+		if f.OnShed != nil {
+			f.OnShed("kubewatch_queue")
 		}
-	})
+		f.recordKubewatch(strings.ToLower(head.Kind), KubewatchOutcomeShed)
+		f.Logger.Debug("kubewatch: event shed: intake queue full",
+			"kind", head.Kind, "namespace", head.Obj.Metadata.Namespace, "name", head.Obj.Metadata.Name)
+	}
 }
 
 // readBody enforces POST + a 5 MB cap. Returns (body, true) on success,
