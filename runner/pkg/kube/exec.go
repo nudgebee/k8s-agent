@@ -317,8 +317,9 @@ func splitSegments(tokens []string) ([]cmdSegment, error) {
 	return segments, nil
 }
 
-// validateSegment resolves the verb past leading global flags and enforces the
-// read-only allowlist when write mode is off.
+// validateSegment resolves the verb past leading global flags, refuses Secret
+// access in every mode (secretpolicy.go), and enforces the read-only allowlist
+// when write mode is off.
 func (k *KubectlExecutor) validateSegment(args []string) error {
 	verb, subcommand, err := firstVerbAndSubcommand(args)
 	if err != nil {
@@ -326,6 +327,10 @@ func (k *KubectlExecutor) validateSegment(args []string) error {
 	}
 	if verb == "" {
 		return errors.New("kubectl: no verb found (only flags supplied)")
+	}
+	// Before the write-mode early return: write RBAC does not license Secret access.
+	if err := checkSecretAccess(verb, args); err != nil {
+		return err
 	}
 	if k.AllowWrite {
 		return nil
