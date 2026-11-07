@@ -83,6 +83,8 @@ type Forwarder struct {
 	kwShards    []chan kubewatchJob
 	kwDepth     atomic.Int64
 	kwBytes     atomic.Int64
+	kwShedSince atomic.Uint64 // sheds since the last warning
+	kwShedWarn  atomic.Int64  // unix nanos of the last warning
 }
 
 // SetForwardPoolSize bounds concurrent event-forward goroutines. n<=0 leaves
@@ -299,9 +301,27 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 			f.OnShed("kubewatch_queue")
 		}
 		f.recordKubewatch(strings.ToLower(head.Kind), KubewatchOutcomeShed)
-		f.Logger.Debug("kubewatch: event shed: intake queue full",
-			"kind", head.Kind, "namespace", head.Obj.Metadata.Namespace, "name", head.Obj.Metadata.Name)
+		f.warnKubewatchShed(head.Kind, head.Obj.Metadata.Namespace, head.Obj.Metadata.Name)
 	}
+}
+
+// kubewatchShedWarnInterval spaces the shed warnings. A shed means Kubernetes
+// alerts are being lost, so it must be visible at the default log level, but
+// sheds come in floods and one line per event would bury everything else.
+const kubewatchShedWarnInterval = 30 * time.Second
+
+// warnKubewatchShed logs a shed at Warn at most once per interval, carrying
+// how many events were shed since the previous warning.
+func (f *Forwarder) warnKubewatchShed(kind, namespace, name string) {
+	n := f.kwShedSince.Add(1)
+	now := time.Now().UnixNano()
+	last := f.kwShedWarn.Load()
+	if now-last < int64(kubewatchShedWarnInterval) || !f.kwShedWarn.CompareAndSwap(last, now) {
+		return
+	}
+	f.kwShedSince.Add(-n)
+	f.Logger.Warn("kubewatch: events shed: intake queue full; raise KUBEWATCH_QUEUE_SIZE / KUBEWATCH_WORKERS if this persists",
+		"shed_since_last_warning", n, "latest_kind", kind, "latest_namespace", namespace, "latest_name", name)
 }
 
 // readBody enforces POST + a 5 MB cap. Returns (body, true) on success,

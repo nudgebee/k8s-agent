@@ -1,6 +1,7 @@
 package alerts
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -257,5 +258,28 @@ func TestKubewatchIntake_MatcherPanicRecovered(t *testing.T) {
 	}
 	if got := m.get("pod:" + KubewatchOutcomePanic); got != 1 {
 		t.Errorf("panic outcome count = %d; want 1", got)
+	}
+}
+
+// A flood of sheds is visible at Warn, once per interval, with the count.
+func TestKubewatchIntake_ShedWarnsOncePerInterval(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewForwarder("", "", "", "", slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	for i := 0; i < 5; i++ {
+		f.warnKubewatchShed("Pod", "ns", fmt.Sprint(i))
+	}
+	if got := strings.Count(buf.String(), "events shed"); got != 1 {
+		t.Fatalf("got %d shed warnings for one burst; want 1:\n%s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("shed warning not at Warn:\n%s", buf.String())
+	}
+
+	// After the interval, the next warning reports the sheds it covers.
+	f.kwShedWarn.Store(time.Now().Add(-2 * kubewatchShedWarnInterval).UnixNano())
+	buf.Reset()
+	f.warnKubewatchShed("Pod", "ns", "x")
+	if !strings.Contains(buf.String(), "shed_since_last_warning=5") {
+		t.Errorf("want the 4 suppressed sheds plus this one counted:\n%s", buf.String())
 	}
 }
