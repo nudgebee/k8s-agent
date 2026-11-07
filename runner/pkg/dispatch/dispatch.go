@@ -25,6 +25,10 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
+// maxRelayTimeout bounds the relay_timeout_ms a message may set. The relay's
+// own limits are minutes; anything larger is not a real deadline.
+const maxRelayTimeout = 24 * time.Hour
+
 // Handler is one action implementation. It receives a request-scoped context
 // (already wrapped with the 180s deadline) and the action_params map.
 // Return either data (success) or an error (will become status_code 500).
@@ -229,8 +233,20 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 		Method    string           `json:"method,omitempty"`
 		URL       string           `json:"url,omitempty"`
 		RequestID string           `json:"request_id,omitempty"`
+		// RelayTimeoutMS is how much longer the relay will wait for this
+		// reply. Relays that predate it leave it unset.
+		RelayTimeoutMS int64 `json:"relay_timeout_ms,omitempty"`
 	}
 	_ = json.Unmarshal(msg, &probe) // tolerant; downstream paths will reject bad JSON
+
+	// Past the relay's deadline nobody receives the reply, so stop working on
+	// the request then instead of running out our own, longer, timeout. Values
+	// beyond maxRelayTimeout are ignored rather than overflowing the Duration.
+	if probe.RelayTimeoutMS > 0 && probe.RelayTimeoutMS <= maxRelayTimeout.Milliseconds() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(probe.RelayTimeoutMS)*time.Millisecond)
+		defer cancel()
+	}
 
 	switch {
 	// Only an action envelope carries a body *object*. A proxy request carries
