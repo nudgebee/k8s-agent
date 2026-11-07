@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"k8s.io/client-go/dynamic"
@@ -580,6 +581,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			lightActions[name] = struct{}{}
 		}
 		logger.Info("kube primitives enabled", "actions", len(kh), "kubectl_allow_write", cfg.KubectlAllowWrite)
+
+		// list_helm_releases decodes Helm release Secrets here and returns chart
+		// metadata only — the release values and manifests stay in the cluster.
+		// Needs the cluster-wide secrets list that runner.helmReleaseDiscovery
+		// grants; without it the call returns ErrHelmReleaseDiscoveryDisabled.
+		if typedKube != nil {
+			handlers["list_helm_releases"] = func(ctx context.Context, p map[string]any) (any, error) {
+				ns, _ := p["namespace"].(string)
+				rels, err := discovery.ListHelmReleases(ctx, typedKube, ns)
+				if err != nil {
+					return nil, err
+				}
+				block, err := enrichers.JSONBlock(rels)
+				if err != nil {
+					return nil, err
+				}
+				return enrichers.FindingResponse(cfg.AccountID, uuid.Nil, block)
+			}
+			lightActions["list_helm_releases"] = struct{}{}
+		}
 	}
 
 	if cfg.ScannersEnabled {

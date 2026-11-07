@@ -241,19 +241,27 @@ runner:
   mutateEnabled: true
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
-  # Job. On by default: an image scan runs the target image as its own
-  # container, and the node-local copy it reuses is often already gone at scan
-  # time, so without the workload's credentials every private image is
-  # permanently unscannable. The copies live only in the release namespace and
-  # are owned by the scan Job, so they are garbage-collected with it, and this
-  # also grants the runner secret update/patch/delete in the release namespace
-  # (for GC of the copies) — see runner-service-account.yaml.
+  # Job. An image scan runs the target image as its own container, and the
+  # node-local copy it reuses is often already gone at scan time, so without
+  # the workload's credentials a private image may be unscannable.
   #
-  # Set to false to keep the agent from reading any registry credential;
-  # private-image scans then rely on whatever pull secrets the runner service
-  # account already carries (runnerServiceAccount.imagePullSecrets).
+  # Off by default because it needs Secrets access: `get` on secrets in every
+  # namespace (to read the scanned pod's registry credentials; no list/watch),
+  # plus create/update/patch/delete in the release namespace, where the copies
+  # live, owned by the scan Job and garbage-collected with it. See
+  # runner-service-account.yaml. While off, private-image scans rely on the
+  # pull secrets the runner service account carries
+  # (runnerServiceAccount.imagePullSecrets).
   # runner.readOnly=true forces it off regardless of this setting.
-  scannerAutoCopyPullSecrets: true
+  scannerAutoCopyPullSecrets: false
+  # Let the agent report Helm releases (chart, version, kubeVersion, status) for
+  # the Kubernetes upgrade compatibility check. Helm stores each release in a
+  # Secret, so this grants `list` on secrets in every namespace — RBAC cannot
+  # narrow that to Helm's Secrets. The agent decodes the releases itself and
+  # returns chart metadata only; release values and manifests never leave the
+  # cluster. Off by default: the upgrade check then reports Helm release
+  # compatibility as unknown. Also applies under runner.readOnly.
+  helmReleaseDiscovery: false
   customClusterRoleRules: []
   imagePullSecrets: []
   # Extra volumes on the runner pod. The common use is trusting a private CA
