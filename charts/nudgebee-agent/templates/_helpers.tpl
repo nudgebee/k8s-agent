@@ -220,13 +220,11 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     # SCANNER_AUTO_COPY_PULL_SECRETS lets an image scan pull a private workload
     # image by copying that workload's imagePullSecrets into this namespace for
-    # the life of the scan Job. Default on — the node-local image the scan reuses
-    # is often gone by scan time, and an unauthenticated re-pull leaves every
-    # private image unscannable. Forced off under runner.readOnly, which has no
-    # Secrets access at all. The `eq ... false` pattern is intentional: `default
-    # true` would treat an explicit false as unset and re-enable the copy.
+    # the life of the scan Job. Opt-in: it needs read access to registry
+    # Secrets in every namespace a scanned workload runs in. Forced off under
+    # runner.readOnly, which has no Secrets access at all.
     - name: SCANNER_AUTO_COPY_PULL_SECRETS
-      value: {{ if or .Values.runner.readOnly (eq .Values.runner.scannerAutoCopyPullSecrets false) }}"false"{{ else }}"true"{{ end }}
+      value: {{ if and .Values.runner.scannerAutoCopyPullSecrets (not .Values.runner.readOnly) }}"true"{{ else }}"false"{{ end }}
     {{- with .Values.runner.scaling }}
     {{- if hasKey . "snapshotBatching" }}
     - name: DISCOVERY_SNAPSHOT_BATCHING
