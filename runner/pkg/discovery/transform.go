@@ -83,10 +83,10 @@ func discoveryTransform(obj any) (any, error) {
 // biggest single win across every type and is never emitted on the wire.
 //
 // NOTE: annotations are deliberately NOT touched — the workload/node/namespace
-// converters emit the full annotation map (config.annotations), so removing any
-// annotation key (even the bulky last-applied-configuration) would change the
-// wire output. Keeping the transform strictly output-preserving is what lets it
-// run unconditionally; trimming annotations would require collector agreement.
+// converters emit the annotation map (config.annotations) through
+// wireAnnotations, which drops only the applied-copy keys, so removing any
+// other key here would change the wire output. Keeping the transform strictly
+// output-preserving is what lets it run unconditionally.
 func trimMeta(m *metav1.ObjectMeta) {
 	m.ManagedFields = nil
 }

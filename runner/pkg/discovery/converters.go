@@ -450,7 +450,7 @@ func serviceDict(
 			"volumes":         volumesFromTemplate(tpl),
 			"toleration":      tolerationsFromTemplate(tpl),
 			"affinity":        affinityFromTemplate(tpl),
-			"annotations":     nonNilLabels(meta.Annotations),
+			"annotations":     wireAnnotations(meta.Annotations),
 			"service_account": tpl.Spec.ServiceAccountName,
 			"qos_class":       qosClass,
 			"ip":              ip,
@@ -524,6 +524,36 @@ func nonNilLabels(m map[string]string) map[string]string {
 	return m
 }
 
+// appliedCopyAnnotations each hold a full copy of the object they sit on:
+// `kubectl apply`'s last-applied-configuration (inline env values included)
+// and Rancher/k3s's gzipped objectset.rio.cattle.io/applied. Nothing on the
+// backend reads them, and they can carry credentials, so discovery never
+// sends them. The collector drops the same two keys from what it stores.
+var appliedCopyAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+	"objectset.rio.cattle.io/applied",
+}
+
+// wireAnnotations is nonNilLabels for annotations: never nil, and without
+// appliedCopyAnnotations. m is the informer cache's own map, so it copies
+// before dropping anything and returns m unchanged when there is nothing to
+// drop.
+func wireAnnotations(m map[string]string) map[string]string {
+	for _, k := range appliedCopyAnnotations {
+		if _, ok := m[k]; ok {
+			out := make(map[string]string, len(m))
+			for key, v := range m {
+				out[key] = v
+			}
+			for _, drop := range appliedCopyAnnotations {
+				delete(out, drop)
+			}
+			return out
+		}
+	}
+	return nonNilLabels(m)
+}
+
 // convertNode produces the NodeInfo wire shape the backend expects.
 // Several fields (memory_allocated, cpu_allocated, pods, pods_count,
 // memory_limits, cpu_limits) require cross-resource aggregation (sum over
@@ -589,7 +619,7 @@ func convertNamespace(obj any) (any, bool) {
 		"resource_version": parseResourceVersion(n.ObjectMeta),
 		"phase":            string(n.Status.Phase),
 		"labels":           nonNilLabels(n.Labels),
-		"annotations":      nonNilLabels(n.Annotations),
+		"annotations":      wireAnnotations(n.Annotations),
 	}, true
 }
 
@@ -675,7 +705,7 @@ func nodeInfoMap(n *corev1.Node) map[string]any {
 			"boot_id":                   n.Status.NodeInfo.BootID,
 		},
 		"labels":      nonNilLabels(n.Labels),
-		"annotations": nonNilLabels(n.Annotations),
+		"annotations": wireAnnotations(n.Annotations),
 		"addresses":   addrs,
 	}
 }
