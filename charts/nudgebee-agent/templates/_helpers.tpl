@@ -172,12 +172,53 @@ report can't disagree with what the chart deploys.
 {{- end -}}
 
 {{/*
+Point an image ref at runner.image_registry. Only refs under ghcr.io/nudgebee
+move, so a repository the operator already set to their own registry is left
+alone. Usage: include "nudgebee.imageRef" (dict "root" . "ref" "<repository>:<tag>")
+*/}}
+{{- define "nudgebee.imageRef" -}}
+{{- $registry := trimSuffix "/" (default "" .root.Values.runner.image_registry) -}}
+{{- if and $registry (hasPrefix "ghcr.io/nudgebee/" .ref) -}}
+{{- printf "%s/%s" $registry (trimPrefix "ghcr.io/nudgebee/" .ref) -}}
+{{- else -}}
+{{- .ref -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Refuse to render when runner.image_registry is set but an enabled subchart still
+pulls from ghcr. Subchart values cannot be computed here, so without this check
+those images would stay on ghcr with nothing to say so.
+*/}}
+{{- define "nudgebee.validateImageRegistry" -}}
+{{- if .Values.runner.image_registry -}}
+{{- $registry := trimSuffix "/" .Values.runner.image_registry -}}
+{{- $missing := list -}}
+{{- $otel := index .Values "opentelemetry-collector" -}}
+{{- if and $otel.enabled (hasPrefix "ghcr.io/nudgebee/" $otel.image.repository) -}}
+{{- $missing = append $missing (printf "opentelemetry-collector.image.repository=%s/opentelemetry-collector-contrib" $registry) -}}
+{{- end -}}
+{{- if and $otel.enabled .Values.clickhouse.enabled (eq .Values.clickhouse.image.registry "ghcr.io") -}}
+{{- $missing = append $missing (printf "clickhouse.image.registry=%s" $registry) -}}
+{{- $missing = append $missing "clickhouse.image.repository=clickhouse" -}}
+{{- end -}}
+{{- if and .Values.opencost.enabled (eq .Values.opencost.opencost.exporter.image.registry "ghcr.io") -}}
+{{- $missing = append $missing (printf "opencost.opencost.exporter.image.registry=%s" $registry) -}}
+{{- $missing = append $missing "opencost.opencost.exporter.image.repository=opencost" -}}
+{{- end -}}
+{{- if $missing -}}
+{{- fail (printf "runner.image_registry is set, but these enabled subcharts still pull from ghcr. Set: --set %s" (join " --set " $missing)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
 {{- $logsCollection := include "nudgebee-agent.logsCollection" . }}
 - name: runner
-  image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
+  image: {{ include "nudgebee.imageRef" (dict "root" . "ref" (printf "%s:%v" .Values.runner.image.repository (.Values.runner.image.tag | default .Chart.AppVersion))) | quote }}
   imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
   securityContext:
     allowPrivilegeEscalation: false
@@ -269,7 +310,22 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- end }}
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE
-      value: {{ .Values.runner.profilerImage | quote }}
+      value: {{ include "nudgebee.imageRef" (dict "root" . "ref" .Values.runner.profilerImage) | quote }}
+    {{- end }}
+    {{- if .Values.runner.image_registry }}
+    {{- $moverSet := false }}
+    {{- if kindIs "slice" .Values.runner.additional_env_vars }}
+      {{- range .Values.runner.additional_env_vars }}
+        {{- if and (kindIs "map" .) (eq (toString (get . "name")) "MOVER_IMAGE") }}
+          {{- $moverSet = true }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if not $moverSet }}
+    {{- /* The PVC mover defaults to Docker Hub "ubuntu", which has no ghcr prefix to rewrite. */}}
+    - name: MOVER_IMAGE
+      value: {{ printf "%s/ubuntu" (trimSuffix "/" .Values.runner.image_registry) | quote }}
+    {{- end }}
     {{- end }}
     {{- if .Values.runner.triggerRateLimits }}
     - name: TRIGGER_RATE_LIMITS

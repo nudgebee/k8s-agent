@@ -69,6 +69,12 @@ spec:
       restartPolicy: Never
       # The job only talks to clickhouse, never the K8s API.
       automountServiceAccountToken: false
+      {{- with .Values.clickhouse.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ if kindIs "map" . }}{{ .name }}{{ else }}{{ . }}{{ end }}
+        {{- end }}
+      {{- end }}
       containers:
         - name: schema-upgrade
           image: "{{ .Values.clickhouse.image.registry }}/{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
