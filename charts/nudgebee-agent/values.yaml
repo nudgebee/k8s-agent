@@ -29,6 +29,12 @@ globalConfig:
   prometheus_url: ""
   # Optional headers (semicolon-separated "Header: value" pairs, e.g. "X-Scope-OrgID: t1; Authorization: Bearer x"). Surfaces as PROMETHEUS_HEADERS.
   prometheus_headers: ""
+  # Alertmanager the runner reads and writes silences on. Surfaces as ALERTMANAGER_URL.
+  # Leave empty to let the agent auto-discover one in the cluster; set it for an
+  # Alertmanager outside the cluster.
+  alertmanager_url: ""
+  # Optional headers, same format as prometheus_headers. Surfaces as ALERTMANAGER_HEADERS.
+  alertmanager_headers: ""
   # Optional labels appended to every PromQL query (legacy multi-cluster parity).
   # A YAML map, e.g. {k8s_cluster: aws-prod}. Surfaces as PROMETHEUS_ADDITIONAL_LABELS
   # in the "key=value,key=value" form the runner expects.
