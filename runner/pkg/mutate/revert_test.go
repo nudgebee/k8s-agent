@@ -504,3 +504,16 @@ func TestReplaceWorkload_RefusesARedactedManifest(t *testing.T) {
 		t.Fatalf("the workload must be untouched; image = %v", got)
 	}
 }
+
+// The check runs on the normalized object, so a raw JSON body and the create path are covered.
+func TestCreateAndReplace_RefuseARedactedManifestInAnyBodyShape(t *testing.T) {
+	m, _ := redactedRevertMutator(t)
+	raw := []byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"shop"},` +
+		`"spec":{"template":{"spec":{"containers":[{"name":"web","env":[{"name":"P","value":"[redacted:3f9a0c11b2d4]"}]}]}}}}`)
+	if _, err := m.ReplaceWorkload(context.Background(), "Deployment", "shop", "web", raw); err == nil || !strings.Contains(err.Error(), "redacted") {
+		t.Errorf("replace with a []byte body: want a refusal, got %v", err)
+	}
+	if _, err := m.CreateWorkload(context.Background(), "Deployment", "shop", "web2", raw); err == nil || !strings.Contains(err.Error(), "redacted") {
+		t.Errorf("create: want a refusal, got %v", err)
+	}
+}
