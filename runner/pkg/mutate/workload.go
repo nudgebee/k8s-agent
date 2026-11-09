@@ -213,6 +213,12 @@ func (m *Mutator) ReplaceWorkload(ctx context.Context, kind, namespace, name str
 	if entry.namespaced && namespace == "" {
 		return nil, fmt.Errorf("mutate: namespace required for %s", kind)
 	}
+	// A recorded manifest with redacted values is not the object as it was; replacing the
+	// workload with it would write the markers in (see redactionMarker).
+	if containsRedactionMarker(body) {
+		return nil, fmt.Errorf("mutate: replace_workload %s/%s: the manifest holds a redacted value; "+
+			"roll it back with `kubectl rollout undo` or the tool that deploys it", kind, name)
+	}
 
 	u, err := unstructuredFromBody(body)
 	if err != nil {

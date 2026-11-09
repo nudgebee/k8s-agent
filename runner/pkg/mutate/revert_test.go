@@ -3,9 +3,12 @@ package mutate
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -422,4 +425,82 @@ func annotations(o map[string]any) map[string]any {
 
 func container0(o map[string]any) map[string]any {
 	return o["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+}
+
+// ---------- redacted recorded values ----------
+
+func redactedRevertMutator(t *testing.T) (*Mutator, func() map[string]any) {
+	t.Helper()
+	existing := &unstructured.Unstructured{Object: livePodSpecObject()}
+	existing.SetResourceVersion("100")
+	dyn := dynamicfake.NewSimpleDynamicClient(workloadScheme(), existing)
+	m := New(fake.NewClientset(), "", nil)
+	m.SetDynamic(dyn)
+	live := func() map[string]any {
+		got, err := dyn.Resource(appsv1Deployments).Namespace("shop").Get(context.Background(), "web", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get live: %v", err)
+		}
+		return got.Object
+	}
+	return m, live
+}
+
+var appsv1Deployments = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+
+// Nudgebee stores a marker in place of every inline env value. Writing it back would set the env
+// var to the marker in the customer's pods, so the revert is refused before anything is written.
+func TestHandleRevertWorkload_RefusesARedactedValue(t *testing.T) {
+	m, live := redactedRevertMutator(t)
+	for _, old := range []any{
+		"[redacted:3f9a0c11b2d4]",
+		map[string]any{"name": "DB_PASSWORD", "value": "[redacted:3f9a0c11b2d4]"},
+		"postgres://app:[redacted:3f9a0c11b2d4]@db/app",
+	} {
+		_, err := Handlers(m)["revert_workload"](context.Background(), map[string]any{
+			"kind":      "Deployment",
+			"name":      "web",
+			"namespace": "shop",
+			"revert_paths": []any{
+				map[string]any{"path": "spec.template.spec.containers[0].image", "old": "registry/app:old"},
+				map[string]any{"path": "spec.template.spec.containers[0].env[0]", "old": old},
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "redacted") {
+			t.Fatalf("old=%v: want a redacted-value refusal, got %v", old, err)
+		}
+		if got := container0(live())["image"]; got != "registry/app:new" {
+			t.Fatalf("old=%v: nothing may be written when one value is refused; image = %v", old, got)
+		}
+	}
+}
+
+// Reverting a change that ADDED a field removes it, which needs no recorded value.
+func TestHandleRevertWorkload_RemovingAnAddedFieldNeedsNoValue(t *testing.T) {
+	m, _ := redactedRevertMutator(t)
+	_, err := Handlers(m)["revert_workload"](context.Background(), map[string]any{
+		"kind":         "Deployment",
+		"name":         "web",
+		"namespace":    "shop",
+		"revert_paths": []any{map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": nil}},
+	})
+	if err != nil {
+		t.Fatalf("removing an added field: %v", err)
+	}
+}
+
+func TestReplaceWorkload_RefusesARedactedManifest(t *testing.T) {
+	m, live := redactedRevertMutator(t)
+	manifest := livePodSpecObject()
+	container := manifest["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["image"] = "registry/app:old"
+	container["env"] = []any{map[string]any{"name": "DB_PASSWORD", "value": "[redacted:3f9a0c11b2d4]"}}
+
+	_, err := m.ReplaceWorkload(context.Background(), "Deployment", "shop", "web", manifest)
+	if err == nil || !strings.Contains(err.Error(), "redacted") {
+		t.Fatalf("want a redacted-manifest refusal, got %v", err)
+	}
+	if got := container0(live())["image"]; got != "registry/app:new" {
+		t.Fatalf("the workload must be untouched; image = %v", got)
+	}
 }
