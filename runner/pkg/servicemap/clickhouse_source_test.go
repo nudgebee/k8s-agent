@@ -162,6 +162,7 @@ type fakeClickHouse struct {
 	logSince    time.Time          // system.query_views_log's creation; zero: a day before testEnd
 	logEngine   string             // system.query_views_log's engine_full; empty: no TTL
 	noRawTables bool               // the collector has not created otel_metrics_* yet
+	dropFails   bool               // DROP statements are refused, as for a user without DROP
 	delay       time.Duration      // every query takes this long
 	block       chan struct{}      // when set, the coverage query waits for it
 	edgeCalls   atomic.Int64
@@ -191,6 +192,10 @@ func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	if f.delay > 0 {
 		time.Sleep(f.delay)
+	}
+	if f.dropFails && strings.HasPrefix(strings.TrimSpace(sql), "DROP ") {
+		http.Error(w, "Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)", http.StatusInternalServerError)
+		return
 	}
 	var data [][]any
 	switch {
@@ -397,6 +402,16 @@ func TestCheckCoverage(t *testing.T) {
 	for _, a := range []string{"10.0.0.3:9100", "10.0.0.4:9100"} {
 		scaleUp[a] = keepBuckets(scaleUp[a], func(b time.Time) bool { return !b.Before(mid) })
 	}
+	// A node went away and a new node's agent took its IP: two pods, one IP.
+	reusedIP := fullBuckets(testEnd, 3)
+	first := reusedIP["10.0.0.1:9100"]
+	delete(reusedIP, "10.0.0.1:9100")
+	reusedIP["10.0.0.1:9100/pod-a"] = keepBuckets(first, func(b time.Time) bool { return b.Before(mid) })
+	reusedIP["10.0.0.1:9100/pod-b"] = keepBuckets(first, func(b time.Time) bool { return b.After(mid) })
+	// The same, scraped without pod discovery: no uid to tell the pods apart.
+	noUIDGap := fullBuckets(testEnd, 3)
+	noUIDGap["10.0.0.1:9100/"] = keepBuckets(noUIDGap["10.0.0.1:9100"], func(b time.Time) bool { return !b.Equal(mid) })
+	delete(noUIDGap, "10.0.0.1:9100")
 	agents := func(n int, err error) NodeAgentCounter {
 		return func(context.Context, time.Time) (int, error) { return n, err }
 	}
@@ -413,6 +428,8 @@ func TestCheckCoverage(t *testing.T) {
 		{"an agent not scraped mid-window", &fakeClickHouse{buckets: agentGap}, nil, false},
 		{"nodes scaled down", &fakeClickHouse{buckets: scaleDown}, agents(2, nil), true},
 		{"nodes scaled up", &fakeClickHouse{buckets: scaleUp}, agents(4, nil), true},
+		{"a new pod reused a gone pod's IP", &fakeClickHouse{buckets: reusedIP}, agents(3, nil), true},
+		{"an agent without a pod uid has a gap", &fakeClickHouse{buckets: noUIDGap}, nil, false},
 		{"a running agent stopped being scraped", &fakeClickHouse{buckets: scaleDown}, agents(3, nil), false},
 		{"an agent never scraped", &fakeClickHouse{buckets: fullBuckets(testEnd, 3)}, agents(4, nil), false},
 		{"cannot count agents", &fakeClickHouse{buckets: fullBuckets(testEnd, 3)}, agents(0, errors.New("forbidden")), false},
@@ -441,6 +458,20 @@ func TestCheckCoverage(t *testing.T) {
 				t.Errorf("err = %v; want errNotCovered", err)
 			}
 		})
+	}
+}
+
+// A gap in an agent scraped without pod discovery names the missing uid, so
+// the fallback it causes is visible in the log.
+func TestCheckCoverageNoPodUID(t *testing.T) {
+	mid := testEnd.Add(-30 * time.Minute)
+	buckets := fullBuckets(testEnd, 1)
+	buckets["10.0.0.1:9100/"] = keepBuckets(buckets["10.0.0.1:9100"], func(b time.Time) bool { return !b.Equal(mid) })
+	delete(buckets, "10.0.0.1:9100")
+	err := checkCoverage(context.Background(), newTestClient(t, &fakeClickHouse{buckets: buckets}), testEnd.Add(-time.Hour), testEnd, nil)
+	if !errors.Is(err, errNotCovered) || !strings.Contains(err.Error(), "node agent 10.0.0.1:9100 has no rows for") ||
+		!strings.Contains(err.Error(), "no pod uid") {
+		t.Errorf("err = %v; want a gap that names the missing pod uid", err)
 	}
 }
 
