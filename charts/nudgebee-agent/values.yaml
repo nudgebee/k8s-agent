@@ -29,6 +29,12 @@ globalConfig:
   prometheus_url: ""
   # Optional headers (semicolon-separated "Header: value" pairs, e.g. "X-Scope-OrgID: t1; Authorization: Bearer x"). Surfaces as PROMETHEUS_HEADERS.
   prometheus_headers: ""
+  # Alertmanager the runner reads and writes silences on. Surfaces as ALERTMANAGER_URL.
+  # Leave empty to let the agent auto-discover one in the cluster; set it for an
+  # Alertmanager outside the cluster.
+  alertmanager_url: ""
+  # Optional headers, same format as prometheus_headers. Surfaces as ALERTMANAGER_HEADERS.
+  alertmanager_headers: ""
   # Optional labels appended to every PromQL query (legacy multi-cluster parity).
   # A YAML map, e.g. {k8s_cluster: aws-prod}. Surfaces as PROMETHEUS_ADDITIONAL_LABELS
   # in the "key=value,key=value" form the runner expects.
@@ -38,19 +44,33 @@ enableServiceMonitors: true
 kubewatch:
   image:
     repository: ghcr.io/nudgebee/kubewatch
-    tag: 2.14.1-nb.3
+    tag: 2.14.1-nb.4
   imagePullPolicy: IfNotPresent
   # UID the forwarder container runs as. Not set on OpenShift (detected, or
   # openshift.enabled=true): there the namespace's UID range / the SCC assigns
   # it, and a hardcoded UID is rejected by restricted-v2. Set to ~ to never set it.
   runAsUser: 1000
   pprof: true
+  # SIZING: kubewatch caches every object of each enabled kind below and holds
+  # the not-yet-sent changes, so memory follows the cluster's object count, not
+  # its traffic. The memory limit equals requests.memory. Raise it with the
+  # watched object count (pods + configmaps dominate):
+  #   <2k pods      : 512Mi
+  #   ~5k pods      : 1Gi
+  #   ~10k+ pods    : 2Gi
+  # A sustained rise in kubewatch_workqueue_depth{name="Pod"} means the agent
+  # is not keeping up; kubewatch_events_dropped_total counts what the queue
+  # limit (config.queue.maxPending) shed.
   resources:
     requests:
-      cpu: 10m
+      cpu: 50m
       memory: 512Mi
     limits:
       cpu: ~
+  # GOMEMLIMIT for kubewatch, derived from the memory limit like the runner's.
+  goMemLimitRatio: 0.8
+  # Explicit GOMEMLIMIT override; skips the derivation when non-empty.
+  goMemLimit: ""
   additional_env_vars: []
   tolerations: []
   annotations: {}
@@ -58,25 +78,36 @@ kubewatch:
   imagePullSecrets: []
   config:
     namespace: ""
+    # Send queue per watched kind (kubewatch builds that predate it ignore
+    # this). workers send concurrently; events for one object stay in order.
+    # maxPending caps the objects waiting per kind; past it the longest-waiting
+    # objects' changes are dropped and counted instead of growing until OOM.
+    queue:
+      workers: 4
+      maxPending: 5000
+    # Watch only the kinds the runner's alert matchers read. Each enabled kind
+    # is cached in full and every change to it is sent to the runner, so a
+    # kind nothing reads costs memory and CPU for no alert. Kinds marked "not
+    # read" can be turned back on, but the runner drops their events.
     resource:
       deployment: true
       replicationcontroller: false # 0.10.12 disabled because not supported on the runner
-      replicaset: true
+      replicaset: false # not read; the highest-churn kind after events
       daemonset: true
       statefulset: true
       services: true
       pod: true
       job: true
       node: true
-      hpa: true
-      clusterrole: true
-      clusterrolebinding: true
-      serviceaccount: true
-      persistentvolume: true
-      namespace: true
+      hpa: false # not read
+      clusterrole: false # not read
+      clusterrolebinding: false # not read
+      serviceaccount: false # not read
+      persistentvolume: false # not read
+      namespace: false # not read
       configmap: true # 0.9.17
       secret: false # disabled for security reasons
-      event: true # updated on kubewatch 2.5
+      event: false # not read; Finding event tables come from the runner's own cache
       coreevent: false # added on kubewatch 2.5
       ingress: true # full support on kubewatch 2.4 (earlier versions have ingress bugs)
       rollout: true
@@ -172,8 +203,12 @@ runner:
     batchSize: 1000 # items per snapshot batch when snapshotBatching is on
     incrementalBatchSize: 100 # coalesce N informer events per incremental POST (>1 needs collector to iterate data)
     emitTombstones: true # emit deleted:true on delete (needs collector incremental-delete support)
-  # forwardPoolSize: 64          # bound concurrent event-forward goroutines
-  # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
+    # forwardPoolSize: 64          # bound concurrent event-forward goroutines
+    # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
+    # kubewatchWorkers: 8          # workers matching kubewatch events off the request path
+    # kubewatchQueueSize: 2048     # kubewatch events allowed to wait; beyond it they are shed and counted
+    # kubewatchQueueMaxBytes: 67108864  # bytes of waiting kubewatch events (64 MiB); beyond it they are shed
+    # eventsCache: true            # serve Finding event tables from an Event informer instead of API Lists
   tolerations: []
   annotations: {}
   nodeSelector: ~
@@ -212,19 +247,27 @@ runner:
   mutateEnabled: true
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
-  # Job. On by default: an image scan runs the target image as its own
-  # container, and the node-local copy it reuses is often already gone at scan
-  # time, so without the workload's credentials every private image is
-  # permanently unscannable. The copies live only in the release namespace and
-  # are owned by the scan Job, so they are garbage-collected with it, and this
-  # also grants the runner secret update/patch/delete in the release namespace
-  # (for GC of the copies) — see runner-service-account.yaml.
+  # Job. An image scan runs the target image as its own container, and the
+  # node-local copy it reuses is often already gone at scan time, so without
+  # the workload's credentials a private image may be unscannable.
   #
-  # Set to false to keep the agent from reading any registry credential;
-  # private-image scans then rely on whatever pull secrets the runner service
-  # account already carries (runnerServiceAccount.imagePullSecrets).
+  # Off by default because it needs Secrets access: `get` on secrets in every
+  # namespace (to read the scanned pod's registry credentials; no list/watch),
+  # plus create/update/patch/delete in the release namespace, where the copies
+  # live, owned by the scan Job and garbage-collected with it. See
+  # runner-service-account.yaml. While off, private-image scans rely on the
+  # pull secrets the runner service account carries
+  # (runnerServiceAccount.imagePullSecrets).
   # runner.readOnly=true forces it off regardless of this setting.
-  scannerAutoCopyPullSecrets: true
+  scannerAutoCopyPullSecrets: false
+  # Let the agent report Helm releases (chart, version, kubeVersion, status) for
+  # the Kubernetes upgrade compatibility check. Helm stores each release in a
+  # Secret, so this grants `list` on secrets in every namespace — RBAC cannot
+  # narrow that to Helm's Secrets. The agent decodes the releases itself and
+  # returns chart metadata only; release values and manifests never leave the
+  # cluster. Off by default: the upgrade check then reports Helm release
+  # compatibility as unknown. Also applies under runner.readOnly.
+  helmReleaseDiscovery: false
   customClusterRoleRules: []
   imagePullSecrets: []
   # Extra volumes on the runner pod. The common use is trusting a private CA
@@ -415,7 +458,7 @@ nodeAgent:
   image:
     repository: ghcr.io/nudgebee/node-agent
     pullPolicy: IfNotPresent
-    tag: 0.1.14
+    tag: 0.1.15
   resources:
     requests:
       cpu: "100m"

@@ -117,6 +117,12 @@ stringData:
   {{- if .Values.globalConfig.prometheus_headers }}
   PROMETHEUS_HEADERS: {{ .Values.globalConfig.prometheus_headers | quote }}
   {{- end }}
+  {{- if .Values.globalConfig.alertmanager_url }}
+  ALERTMANAGER_URL: {{ .Values.globalConfig.alertmanager_url | quote }}
+  {{- end }}
+  {{- if .Values.globalConfig.alertmanager_headers }}
+  ALERTMANAGER_HEADERS: {{ .Values.globalConfig.alertmanager_headers | quote }}
+  {{- end }}
   {{- with .Values.globalConfig.prometheus_additional_labels }}
   {{- $p := list }}{{ range $k, $v := . }}{{ $p = append $p (printf "%s=%v" $k $v) }}{{ end }}
   PROMETHEUS_ADDITIONAL_LABELS: {{ join "," $p | quote }}

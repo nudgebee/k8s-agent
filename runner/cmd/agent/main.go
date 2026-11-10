@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"k8s.io/client-go/dynamic"
@@ -106,6 +107,8 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 	}
 	return out
 }
+
+func (a *triggerAdapter) HandlesKind(kind string) bool { return a.e.HandlesKind(kind) }
 
 // promDiscoveryInterval is how often the agent re-looks for a Prometheus
 // Service when it started without one. Five minutes keeps a freshly installed
@@ -578,6 +581,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			lightActions[name] = struct{}{}
 		}
 		logger.Info("kube primitives enabled", "actions", len(kh), "kubectl_allow_write", cfg.KubectlAllowWrite)
+
+		// list_helm_releases decodes Helm release Secrets here and returns chart
+		// metadata only — the release values and manifests stay in the cluster.
+		// Needs the cluster-wide secrets list that runner.helmReleaseDiscovery
+		// grants; without it the call returns ErrHelmReleaseDiscoveryDisabled.
+		if typedKube != nil {
+			handlers["list_helm_releases"] = func(ctx context.Context, p map[string]any) (any, error) {
+				ns, _ := p["namespace"].(string)
+				rels, err := discovery.ListHelmReleases(ctx, typedKube, ns)
+				if err != nil {
+					return nil, err
+				}
+				block, err := enrichers.JSONBlock(rels)
+				if err != nil {
+					return nil, err
+				}
+				return enrichers.FindingResponse(cfg.AccountID, uuid.Nil, block)
+			}
+			lightActions["list_helm_releases"] = struct{}{}
+		}
 	}
 
 	if cfg.ScannersEnabled {
@@ -920,6 +943,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		fwd.SetKubewatchQueue(cfg.KubewatchWorkers, cfg.KubewatchQueueSize, cfg.KubewatchQueueMaxBytes)
+		fwd.KubewatchMetrics = mreg
+		mreg.RegisterKubewatchQueueDepth(func() float64 { return float64(fwd.KubewatchQueueDepth()) })
 		// Lets the forwarder report a node-exporter alert against the node it
 		// describes rather than the exporter pod that emitted it. Opportunistic:
 		// without a typed client the correction falls back to the alert's own
@@ -968,7 +994,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
-			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
+			eventsLister := newK8sEventsLister(typedKube)
+			if cfg.TriggerEventsCache {
+				cached, err := newCachedEventsLister(typedKube, eventsLister)
+				if err != nil {
+					logger.Warn("events cache unavailable; evidence tables use live List calls", "err", err)
+				} else {
+					g.Go(func() error {
+						cached.Run(gctx)
+						return nil
+					})
+					eventsLister = cached
+				}
+			}
+			eng = eng.WithEventsLister(eventsLister)
 			// Service-backends lister lets service_no_endpoints resolve a
 			// Service's selector against live pods + workload templates.
 			// Without it (no K8s client) that matcher never fires. The

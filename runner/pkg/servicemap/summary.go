@@ -34,7 +34,7 @@ import (
 const (
 	summaryEdgesTable   = "nb_service_map_edges_v1"
 	summaryLatencyTable = "nb_service_map_latency_v1"
-	summaryAgentsTable  = "nb_service_map_agents_v1"
+	summaryAgentsTable  = "nb_service_map_agents_v2"
 	summaryPodsTable    = "nb_service_map_pods_v1"
 	summaryMVSuffix     = "_mv"
 	// summaryTTL matches the collector's 168h TTL on the raw tables.
@@ -49,6 +49,11 @@ var (
 	summaryRetry   = time.Minute
 	summaryRecheck = 10 * time.Minute
 )
+
+// retiredSummaryTables are earlier versions whose MVs and tables the setup
+// drops: _v1 keyed agents by pod IP, so a new pod that took a gone pod's IP
+// read as one agent with a gap and failed every window spanning both.
+var retiredSummaryTables = []string{"nb_service_map_agents_v1"}
 
 func summaryTables() []string {
 	return []string{summaryEdgesTable, summaryLatencyTable, summaryAgentsTable, summaryPodsTable}
@@ -154,7 +159,8 @@ func summaryDDL(db string) []string {
 			attrColumns(), table(db, rawHistogramTable), sqlList(latencyMetrics()), deltaHistograms, by),
 
 		fmt.Sprintf(`CREATE MATERIALIZED VIEW IF NOT EXISTS %s TO %s AS
-	SELECT toStartOfMinute(TimeUnix) AS minute, ResourceAttributes['service.instance.id'] AS agent, count() AS rows
+	SELECT toStartOfMinute(TimeUnix) AS minute,
+	       concat(ResourceAttributes['service.instance.id'], '/', ResourceAttributes['k8s.pod.uid']) AS agent, count() AS rows
 	FROM %s
 	WHERE MetricName = %s AND %s
 	GROUP BY minute, agent`,
@@ -172,6 +178,18 @@ func summaryDDL(db string) []string {
 			table(db, rawSumTable), sqlString(coverageMetric), deltaCounters),
 	}
 	return append(tables, mvs...)
+}
+
+// retiredSummaryDDL drops the retired versions, each MV before its table so
+// no insert writes into a missing table.
+func retiredSummaryDDL(db string) []string {
+	var stmts []string
+	for _, t := range retiredSummaryTables {
+		stmts = append(stmts,
+			fmt.Sprintf("DROP VIEW IF EXISTS %s", table(db, t+summaryMVSuffix)),
+			fmt.Sprintf("DROP TABLE IF EXISTS %s", table(db, t)))
+	}
+	return stmts
 }
 
 // rawTablesExist reports whether the collector has created both source tables
@@ -203,6 +221,18 @@ func ensureSummary(ctx context.Context, c *chclient.Client) error {
 	return nil
 }
 
+// dropRetiredSummary drops the retired versions. It is cleanup only: the new
+// version does not need it, so a failure (say, a user that may CREATE but not
+// DROP) must not keep the summary from being ready.
+func dropRetiredSummary(ctx context.Context, c *chclient.Client) error {
+	for _, stmt := range retiredSummaryDDL(c.Database) {
+		if _, err := chRows(ctx, c, stmt); err != nil {
+			return fmt.Errorf("servicemap: drop retired summary: %w", err)
+		}
+	}
+	return nil
+}
+
 // StartSummary creates the summary tables in the background and marks them
 // ready for Build, then keeps re-running the (idempotent) setup until ctx
 // ends, so tables or MVs that disappear — say ClickHouse restarted on an
@@ -210,6 +240,10 @@ func ensureSummary(ctx context.Context, c *chclient.Client) error {
 // the coverage check confirms every MV exists and dates the summary from the
 // newest one. It does nothing for the prometheus source, so a default install
 // creates nothing in ClickHouse.
+//
+// The retired versions are dropped once, after the first successful setup,
+// not on every recheck: during a rolling update or a rollback an older runner
+// re-creates them, and dropping on every pass would make the two fight.
 func (s *Service) StartSummary(ctx context.Context) {
 	if s.CH == nil || s.Source == "" || s.Source == SourcePrometheus {
 		return
@@ -219,7 +253,7 @@ func (s *Service) StartSummary(ctx context.Context) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	go func() {
-		failing := false
+		failing, dropped := false, false
 		for {
 			err := ensureSummary(ctx, s.CH)
 			wait := summaryRecheck
@@ -228,6 +262,12 @@ func (s *Service) StartSummary(ctx context.Context) {
 				failing = false
 				if !s.summaryReady.Swap(true) {
 					logger.Info("service map summary tables ready", "edges", summaryEdgesTable)
+				}
+				if !dropped {
+					dropped = true
+					if err := dropRetiredSummary(ctx, s.CH); err != nil {
+						logger.Warn("cannot drop retired service map summary tables; leaving them", "err", err)
+					}
 				}
 			case errors.Is(err, errSummaryNotReady):
 				s.summaryReady.Store(false)

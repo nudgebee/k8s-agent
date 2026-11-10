@@ -140,6 +140,17 @@ type Config struct {
 	// (kubewatch + AlertManager intake). Excess is shed (HTTP 202 already
 	// returned). Default 64.
 	ForwardPoolSize int
+	// KubewatchWorkers / KubewatchQueueSize / KubewatchQueueMaxBytes size the
+	// kubewatch intake in pkg/alerts: workers matching events, and how many
+	// events (and bytes of them) may wait. Over either bound, events are shed
+	// and counted. Defaults 8 / 2048 / 64 MiB.
+	KubewatchWorkers       int
+	KubewatchQueueSize     int
+	KubewatchQueueMaxBytes int64
+	// TriggerEventsCache serves the evidence tables on a matched Finding
+	// (recent subject / node / namespace events) from a trimmed Event
+	// informer instead of three API List calls per match. Default true.
+	TriggerEventsCache bool
 	// RelayHandlerPoolSize bounds concurrent inbound WS handler goroutines in
 	// pkg/relay as a soft outer guard against goroutine pile-up. Default 32.
 	RelayHandlerPoolSize int
@@ -321,6 +332,10 @@ func FromEnv() (*Config, error) {
 		IncrementalBatchWindow:    parseDuration(os.Getenv("DISCOVERY_INCREMENTAL_BATCH_WINDOW"), 0),
 		EmitTombstones:            envBool("DISCOVERY_EMIT_TOMBSTONES", false),
 		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
+		KubewatchWorkers:          envInt("KUBEWATCH_WORKERS", 8),
+		KubewatchQueueSize:        envInt("KUBEWATCH_QUEUE_SIZE", 2048),
+		KubewatchQueueMaxBytes:    int64(envInt("KUBEWATCH_QUEUE_MAX_BYTES", 64<<20)),
+		TriggerEventsCache:        envBool("TRIGGER_EVENTS_CACHE", true),
 		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
 		TriggerRateLimits:         ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
 		KubeEnabled:               envBool("KUBE_ENABLED", true),

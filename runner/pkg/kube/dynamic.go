@@ -178,7 +178,12 @@ func (c *Client) listOne(ctx context.Context, gvr schema.GroupVersionResource, p
 		if len(p.Namespaces) > 0 && item.GetNamespace() != "" && !contains(p.Namespaces, item.GetNamespace()) {
 			continue
 		}
-		out = append(out, item.UnstructuredContent())
+		obj := item.UnstructuredContent()
+		// Secret values never leave the cluster: callers get keys, not values.
+		if gvr.Group == "" && gvr.Resource == "secrets" {
+			redactSecretData(obj)
+		}
+		out = append(out, obj)
 	}
 	return out, nil
 }

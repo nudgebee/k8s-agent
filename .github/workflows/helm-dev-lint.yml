@@ -402,6 +402,42 @@ jobs:
           fi
           echo 'ok: a chart version bump leaves the ClickHouse pod template unchanged'
 
+      # The runner's Secrets access is opt-in only. A default or write-mode render
+      # must not grant any Secrets verb (or a wildcard resource) to anything;
+      # each opt-in must add exactly its own narrow grant.
+      - name: Assert Secrets RBAC is opt-in only
+        run: |
+          pip install pyyaml
+          check() { # <expected-grants> <helm-args...>
+            expected="$1"; shift
+            helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@" > /tmp/rbac.yaml
+            actual="$(python - /tmp/rbac.yaml <<'PY'
+          import sys, yaml
+          out = []
+          for d in yaml.safe_load_all(open(sys.argv[1])):
+              if not d or d.get('kind') not in ('Role', 'ClusterRole'):
+                  continue
+              for r in d.get('rules') or []:
+                  if {'secrets', '*'} & set(r.get('resources') or []):
+                      out.append(f"{d['kind']}/{d['metadata']['name']}:{','.join(sorted(r['verbs']))}")
+          print(' '.join(sorted(out)))
+          PY
+            )"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: Secrets grants [$actual], expected [$expected]"
+              exit 1
+            fi
+          }
+          check ''
+          check '' --set runner.enableWritePermissions=true
+          check '' --set runner.readOnly=true
+          check 'ClusterRole/nudgebee-agent-runner-scanner-pullsecrets-read:get Role/nudgebee-agent-runner-scanner-pullsecrets:create,delete,patch,update' \
+            --set runner.scannerAutoCopyPullSecrets=true
+          check 'ClusterRole/nudgebee-agent-runner-helm-releases:list' --set runner.helmReleaseDiscovery=true
+          check 'ClusterRole/nudgebee-agent-runner-helm-releases:list' \
+            --set runner.readOnly=true --set runner.helmReleaseDiscovery=true --set runner.scannerAutoCopyPullSecrets=true
+          echo 'ok: no Secrets access outside the two opt-ins'
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz

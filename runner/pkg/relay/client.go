@@ -3,9 +3,12 @@
 // loops reading inbound ExternalActionRequest envelopes and writing
 // back Response envelopes.
 //
-// Reconnect strategy: after any read/write error or close, sleep
-// ReconnectDelay seconds and dial again. Matches the legacy
-// run_forever loop.
+// Reconnect strategy: after any read/write error or close, wait and dial
+// again. The wait is random — anywhere from zero up to ReconnectDelay,
+// doubling after each attempt that does not hold a session, up to
+// MaxReconnectDelay — so the agents of a relay that restarts do not all
+// redial it at the same instant and then retry in step. A session that
+// stays up for MaxReconnectDelay resets the doubling.
 //
 // Liveness: a bare ReadMessage loop cannot detect a half-open connection.
 // If the TCP connection dies without a FIN/RST reaching us (LB idle timeout,
@@ -27,6 +30,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"sync"
@@ -52,8 +57,11 @@ type Config struct {
 	URL            string        // ws://relay:8080/register
 	AuthSecretKey  string        // NUDGEBEE_AUTH_SECRET_KEY (Basic-Auth)
 	Greeting       Greeting      // sent on every (re)connect
-	ReconnectDelay time.Duration // default 3s
-	WriteTimeout   time.Duration // default 30s
+	ReconnectDelay time.Duration // first reconnect waits up to this; default 3s
+	// MaxReconnectDelay caps the reconnect wait as it doubles. Default 10s:
+	// once the relay is back, no agent waits more than this to rejoin it.
+	MaxReconnectDelay time.Duration
+	WriteTimeout      time.Duration // default 30s
 	// PingInterval is how often we send a WebSocket ping. Default 30s.
 	PingInterval time.Duration
 	// PongWait is the read deadline, refreshed on every frame the relay
@@ -91,11 +99,18 @@ type Client struct {
 
 	sem  *semaphore.Weighted // nil = unbounded
 	shed atomic.Uint64
+
+	// connectedAt is when the current session was established; zero
+	// while dialing. Written by runOnce and read by Run, on one goroutine.
+	connectedAt time.Time
 }
 
 func NewClient(cfg Config, h Handler) *Client {
 	if cfg.ReconnectDelay == 0 {
 		cfg.ReconnectDelay = 3 * time.Second
+	}
+	if cfg.MaxReconnectDelay == 0 {
+		cfg.MaxReconnectDelay = 10 * time.Second
 	}
 	if cfg.WriteTimeout == 0 {
 		cfg.WriteTimeout = 30 * time.Second
@@ -122,22 +137,51 @@ func (c *Client) Shed() uint64 { return c.shed.Load() }
 
 // Run blocks, dialing the relay and reconnecting until ctx is cancelled.
 func (c *Client) Run(ctx context.Context) error {
+	attempt := 0 // reconnects since the last session that held
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := c.runOnce(ctx); err != nil {
-			c.cfg.Logger.Warn("relay session ended", "err", err)
+		c.connectedAt = time.Time{}
+		err := c.runOnce(ctx)
+		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= c.cfg.MaxReconnectDelay {
+			attempt = 0
+		}
+		wait := reconnectWait(c.cfg.ReconnectDelay, c.cfg.MaxReconnectDelay, attempt, rand.Int64N)
+		attempt++
+		if err != nil {
+			c.cfg.Logger.Warn("relay session ended", "err", err, "reconnect_in", wait.Round(time.Millisecond))
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(c.cfg.ReconnectDelay):
+		case <-time.After(wait):
 			if c.cfg.OnReconnect != nil {
 				c.cfg.OnReconnect()
 			}
 		}
 	}
+}
+
+// reconnectWait is how long to wait before reconnect number attempt
+// (0-based): a uniformly random duration up to base doubled attempt times,
+// capped at limit ("full jitter"). randN returns a value in [0, n).
+func reconnectWait(base, limit time.Duration, attempt int, randN func(n int64) int64) time.Duration {
+	ceiling := min(base, limit)
+	for i := 0; i < attempt && ceiling < limit; i++ {
+		if ceiling > limit/2 { // doubling would pass limit, or overflow
+			ceiling = limit
+			break
+		}
+		ceiling *= 2
+	}
+	if ceiling <= 0 {
+		return 0
+	}
+	if ceiling == math.MaxInt64 {
+		return time.Duration(randN(math.MaxInt64))
+	}
+	return time.Duration(randN(int64(ceiling) + 1))
 }
 
 func (c *Client) runOnce(ctx context.Context) error {
@@ -157,6 +201,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		}
 		return fmt.Errorf("dial %s: %w", c.cfg.URL, err)
 	}
+	c.connectedAt = time.Now()
 	c.cfg.Logger.Info("relay connected", "url", c.cfg.URL)
 	if c.cfg.OnConnect != nil {
 		c.cfg.OnConnect()
@@ -210,10 +255,17 @@ func (c *Client) runOnce(ctx context.Context) error {
 	// deferred Close above runs, so it never writes to a closed conn.
 	sessionCtx, endSession := context.WithCancel(ctx)
 	var pinger sync.WaitGroup
-	pinger.Add(1)
+	pinger.Add(2)
 	go func() {
 		defer pinger.Done()
 		c.pingLoop(sessionCtx, conn)
+	}()
+	// Shed replies go through one worker and a bounded queue so a flood of shed
+	// messages cannot pile up goroutines blocked on the write lock.
+	shedQ := make(chan string, shedReplyQueue)
+	go func() {
+		defer pinger.Done()
+		c.shedReplyLoop(sessionCtx, shedQ)
 	}()
 	defer func() {
 		endSession()
@@ -243,23 +295,63 @@ func (c *Client) runOnce(ctx context.Context) error {
 		}
 		resetDeadline()
 		if c.sem == nil {
-			go c.handler(ctx, msg, send)
+			go c.handler(sessionCtx, msg, send)
 			continue
 		}
 		if !c.sem.TryAcquire(1) {
 			// Pool saturated — shed rather than pile up unbounded goroutines.
-			// The backend will time out / retry; better than OOM under overload.
+			// Answer 503 so the caller fails fast instead of waiting out its timeout.
 			c.shed.Add(1)
 			if c.cfg.OnShed != nil {
 				c.cfg.OnShed()
 			}
 			c.cfg.Logger.Warn("relay handler pool saturated; shedding message", "shed_total", c.shed.Load())
+			c.enqueueShedReply(shedQ, msg)
 			continue
 		}
 		go func() {
 			defer c.sem.Release(1)
-			c.handler(ctx, msg, send)
+			c.handler(sessionCtx, msg, send)
 		}()
+	}
+}
+
+// shedReplyQueue bounds pending 503 replies per session; beyond it the reply is
+// dropped and the caller falls back to its own timeout.
+const shedReplyQueue = 256
+
+// enqueueShedReply queues a 503 reply for a shed message so the caller does not
+// block until its own timeout. Messages without a request_id are
+// fire-and-forget. Never blocks the read loop.
+func (c *Client) enqueueShedReply(q chan<- string, msg []byte) {
+	var probe struct {
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(msg, &probe) != nil || probe.RequestID == "" {
+		return
+	}
+	select {
+	case q <- probe.RequestID:
+	default:
+	}
+}
+
+func (c *Client) shedReplyLoop(ctx context.Context, q <-chan string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-q:
+			if err := c.send(&Response{
+				Action:     "response",
+				RequestID:  id,
+				StatusCode: 503,
+				Data:       map[string]any{"error": "agent overloaded"},
+				OutputType: "actions",
+			}); err != nil {
+				c.cfg.Logger.Warn("relay shed reply failed", "err", err)
+			}
+		}
 	}
 }
 

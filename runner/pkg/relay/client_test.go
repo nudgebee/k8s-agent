@@ -295,3 +295,50 @@ func TestClient_ReconnectsWhenRelayStopsReading(t *testing.T) {
 		}
 	}
 }
+
+// A message shed because the handler pool is full must be answered with 503,
+// not dropped: the caller is blocked on its request_id.
+func TestClient_ShedRepliesWith503(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	got := make(chan Response, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var g Greeting
+		if err := conn.ReadJSON(&g); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"request_id":"busy-1"}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"request_id":"shed-1"}`))
+		var resp Response
+		if err := conn.ReadJSON(&resp); err != nil {
+			t.Logf("read: %v", err)
+		} else {
+			got <- resp
+		}
+	}))
+	defer srv.Close()
+
+	release := make(chan struct{})
+	defer close(release)
+	c := NewClient(Config{
+		URL:             "ws" + strings.TrimPrefix(srv.URL, "http"),
+		HandlerPoolSize: 1,
+	}, func(ctx context.Context, msg []byte, send SendFunc) { <-release })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	select {
+	case r := <-got:
+		if r.RequestID != "shed-1" || r.StatusCode != 503 {
+			t.Fatalf("reply = %+v; want request_id=shed-1 status=503", r)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply for shed message")
+	}
+}

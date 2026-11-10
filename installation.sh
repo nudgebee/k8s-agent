@@ -18,7 +18,6 @@ prometheus_org_id=""
 relay_address=""
 relay_signing_public_key=""
 collector_endpoint=""
-image_registry=""
 disable_opencost=""
 disable_otel=""
 disable_prometheus_stack=""
@@ -31,20 +30,19 @@ usage() {
   echo "Options:"
   echo "  -a <auth_key>           Authentication key (required)"
   echo "  -k <k8s_context>        Kubernetes context"
-  echo "  -o <openshift_enable>   OpenShift enable option"
+  echo "  -o <openshift_enable>   Enable OpenShift support (true/false)"
   echo "  -p <prometheus_url>     Prometheus URL"
   echo "  -s <additional_secret>  Additional secret"
   echo "  -n <namespace>          Namespace"
   echo "  -z <agent_name>         Agent_name"
   echo "  -h <help>               Help"
-  echo "  -d <disable_node_agent> Disable node agent"
+  echo "  -d <disable_node_agent> Disable node agent (true/false)"
   echo "  -f <values> values yaml"
   echo "  -m <alert_manager_url> Alert manager URL"
   echo "  -r <prometheus-org-id> Prometheus org id"
   echo "  -w <relay_address>    WebSocket relay address (self-hosted)"
   echo "  -S <relay_signing_public_key> Relay Ed25519 public key (authorizes UI workload mutations)"
   echo "  -c <collector_endpoint> Collector endpoint URL (self-hosted)"
-  echo "  -i <image_registry>   Image registry (air-gapped/on-prem)"
   echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
@@ -102,7 +100,14 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
       collector_endpoint="$OPTARG"
       ;;
     i)
-      image_registry="$OPTARG"
+      # The chart has no single registry setting: each image's registry is part of
+      # its own values key, so -i used to be accepted and silently ignored.
+      echo "Error: -i is not supported. To pull from a private registry, pass a values file with -f that" >&2
+      echo "points every ghcr.io image at it: runner.image.repository, runner.profilerImage," >&2
+      echo "kubewatch.image.repository, nodeAgent.image.repository, opentelemetry-collector.image.repository," >&2
+      echo "clickhouse.image.registry and opencost.opencost.exporter.image.registry." >&2
+      echo "List them for your chart version with: helm show values nudgebee-agent/nudgebee-agent | grep ghcr.io" >&2
+      exit 1
       ;;
     x)
       disable_opencost="$OPTARG"
@@ -130,9 +135,23 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
   esac
 done
 
+# Boolean flags take true or false. Anything else used to be read silently as
+# true (-d, -o) or false (-x, -t, -g).
+check_bool_flag() {
+  if [ -n "$2" ] && [ "$2" != "true" ] && [ "$2" != "false" ]; then
+    echo "Error: -$1 takes true or false, got '$2'." >&2
+    exit 1
+  fi
+}
+check_bool_flag d "$disable_node_agent"
+check_bool_flag o "$openshift_enable"
+check_bool_flag x "$disable_opencost"
+check_bool_flag t "$disable_otel"
+check_bool_flag g "$disable_prometheus_stack"
+
 # Check if an access key is provided
 if [ -z "$auth_key" ]; then
-  echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."
+  echo "Error: Access key not provided. Please provide an access key using -a <auth_key>."
   exit 1
 fi
 
@@ -187,9 +206,16 @@ NODE_KERNEL_VERSIONS=$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo
 MIN_KERNEL_VERSION="4.16"
 
 for kernel_version in $NODE_KERNEL_VERSIONS; do
-    KERNEL_MAJOR_MINOR=$(echo "$kernel_version" | cut -d. -f1-2)
-    if (( $(echo "$KERNEL_MAJOR_MINOR < $MIN_KERNEL_VERSION" | bc -l) )); then
-        echo "Error: Node with kernel version $kernel_version is less than $MIN_KERNEL_VERSION. Node Agent will not be installed on this node."
+    # Integer compare in bash: the old `bc` compare passed every node when bc
+    # was missing, and read 4.9 as newer than 4.16.
+    kernel_major=${kernel_version%%.*}
+    kernel_minor=${kernel_version#*.}
+    kernel_minor=${kernel_minor%%[!0-9]*}
+    if ! [[ $kernel_major =~ ^[0-9]+$ && $kernel_minor =~ ^[0-9]+$ ]]; then
+        echo "Warning: could not read kernel version $kernel_version; skipping the check for this node."
+    elif (( kernel_major < 4 || (kernel_major == 4 && kernel_minor < 16) )); then
+        # The node agent is one DaemonSet, so one old node turns it off everywhere.
+        echo "Error: Node with kernel version $kernel_version is less than $MIN_KERNEL_VERSION. Node Agent will not be installed on any node."
         disable_node_agent="true"
     else
         echo "Node kernel version $kernel_version is compatible."
@@ -302,8 +328,9 @@ else
             installed_prometheus_stack=true
             grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
         else
-            echo "Prometheus installation not requested. Exiting."
-            exit 0
+            echo "Error: Prometheus installation not requested, so nothing was installed." >&2
+            echo "Re-run with -p <prometheus_url> to use an existing Prometheus, or -g true to install without the Prometheus stack." >&2
+            exit 1
         fi
     else
         existingPrometheus=true
@@ -379,7 +406,7 @@ if [ -n "$additional_secret" ]; then
 fi
 
 openshift_enable_args=()
-if [ -n "$openshift_enable" ]; then
+if [ "$openshift_enable" == "true" ]; then
   openshift_enable_args=(
     --set "openshift.enabled=true"
     --set "openshift.createScc=true"
@@ -390,7 +417,7 @@ if [ -n "$openshift_enable" ]; then
 fi
 
 disable_node_agent_args=()
-if [ -n "$disable_node_agent" ]; then
+if [ "$disable_node_agent" == "true" ]; then
   disable_node_agent_args=(--set "nodeAgent.enabled=false")
 fi
 
@@ -437,11 +464,6 @@ fi
 collector_endpoint_args=()
 if [ -n "$collector_endpoint" ]; then
   collector_endpoint_args=(--set "runner.nudgebee.endpoint=$collector_endpoint")
-fi
-
-image_registry_args=()
-if [ -n "$image_registry" ]; then
-  image_registry_args=(--set "runner.image_registry=$image_registry")
 fi
 
 disable_opencost_args=()
@@ -494,7 +516,6 @@ helm_args+=(
   "${relay_address_args[@]}"
   "${relay_signing_public_key_args[@]}"
   "${collector_endpoint_args[@]}"
-  "${image_registry_args[@]}"
   "${disable_opencost_args[@]}"
   "${disable_otel_args[@]}"
   "${disable_prometheus_stack_args[@]}"

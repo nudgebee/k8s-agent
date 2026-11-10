@@ -81,7 +81,17 @@ override with an explicit value and skip the derivation entirely.
 {{- if .Values.runner.goMemLimit -}}
 {{- .Values.runner.goMemLimit -}}
 {{- else -}}
-{{- $lim := (dig "resources" "limits" "memory" "" .Values.runner) | toString -}}
+{{- include "nudgebee-agent.goMemLimitFrom" (dict "limit" (dig "resources" "limits" "memory" "" .Values.runner) "ratio" .Values.runner.goMemLimitRatio) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+GOMEMLIMIT bytes for a memory limit string: limit x ratio (default 0.8).
+Takes (dict "limit" <quantity> "ratio" <float>). Emits nothing for an empty or
+unparseable limit.
+*/}}
+{{- define "nudgebee-agent.goMemLimitFrom" -}}
+{{- $lim := .limit | toString -}}
 {{- $num := regexFind "^[0-9.]+" $lim -}}
 {{- if $num -}}
 {{- $mult := 1.0 -}}
@@ -94,10 +104,17 @@ override with an explicit value and skip the derivation entirely.
 {{- else if hasSuffix "G" $lim -}}{{- $mult = 1000000000.0 -}}
 {{- else if hasSuffix "T" $lim -}}{{- $mult = 1000000000000.0 -}}
 {{- end -}}
-{{- $ratio := .Values.runner.goMemLimitRatio | default 0.8 -}}
+{{- $ratio := .ratio | default 0.8 -}}
 {{- printf "%d" (int64 (mulf (float64 $num) $mult $ratio)) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Memory limit of the forwarder (kubewatch) container. The limit equals the
+request: kubewatch's footprint is its informer caches, which do not burst.
+*/}}
+{{- define "nudgebee-agent.kubewatchMemory" -}}
+{{- if .Values.isSmallCluster -}}64Mi{{- else -}}{{- .Values.kubewatch.resources.requests.memory -}}{{- end -}}
 {{- end -}}
 
 {{/*
@@ -193,13 +210,11 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     # SCANNER_AUTO_COPY_PULL_SECRETS lets an image scan pull a private workload
     # image by copying that workload's imagePullSecrets into this namespace for
-    # the life of the scan Job. Default on — the node-local image the scan reuses
-    # is often gone by scan time, and an unauthenticated re-pull leaves every
-    # private image unscannable. Forced off under runner.readOnly, which has no
-    # Secrets access at all. The `eq ... false` pattern is intentional: `default
-    # true` would treat an explicit false as unset and re-enable the copy.
+    # the life of the scan Job. Opt-in: it needs read access to registry
+    # Secrets in every namespace a scanned workload runs in. Forced off under
+    # runner.readOnly, which has no Secrets access at all.
     - name: SCANNER_AUTO_COPY_PULL_SECRETS
-      value: {{ if or .Values.runner.readOnly (eq .Values.runner.scannerAutoCopyPullSecrets false) }}"false"{{ else }}"true"{{ end }}
+      value: {{ if and .Values.runner.scannerAutoCopyPullSecrets (not .Values.runner.readOnly) }}"true"{{ else }}"false"{{ end }}
     {{- with .Values.runner.scaling }}
     {{- if hasKey . "snapshotBatching" }}
     - name: DISCOVERY_SNAPSHOT_BATCHING
@@ -224,6 +239,22 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- if .relayHandlerPoolSize }}
     - name: RELAY_HANDLER_POOL_SIZE
       value: {{ .relayHandlerPoolSize | quote }}
+    {{- end }}
+    {{- if .kubewatchWorkers }}
+    - name: KUBEWATCH_WORKERS
+      value: {{ .kubewatchWorkers | quote }}
+    {{- end }}
+    {{- if .kubewatchQueueSize }}
+    - name: KUBEWATCH_QUEUE_SIZE
+      value: {{ .kubewatchQueueSize | quote }}
+    {{- end }}
+    {{- if .kubewatchQueueMaxBytes }}
+    - name: KUBEWATCH_QUEUE_MAX_BYTES
+      value: {{ .kubewatchQueueMaxBytes | int64 | quote }}
+    {{- end }}
+    {{- if hasKey . "eventsCache" }}
+    - name: TRIGGER_EVENTS_CACHE
+      value: {{ .eventsCache | quote }}
     {{- end }}
     {{- end }}
     {{- if .Values.runner.profilerImage }}
