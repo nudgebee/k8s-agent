@@ -722,15 +722,25 @@ clickhouse:
   # mounted by the extraVolumes / extraVolumeMounts entries below. If you set
   # your own lists, keep both nudgebee-reader-users entries or drop both (a
   # mount without its volume fails the StatefulSet); without them query_data
-  # uses the admin user. Changed limits apply after the ClickHouse pod restarts.
+  # uses the admin user. Changed limits apply after the ClickHouse pod restarts,
+  # and helm upgrade doesn't restart it: run
+  # kubectl rollout restart statefulset/<release>-clickhouse-shard0.
   reader:
     enabled: true
     maxExecutionTime: 60        # seconds, when a query sets none
     maxExecutionTimeCeiling: 600
     maxRowsToRead: 2000000000
-    # Bytes per query. The pod's limit is 2000Mi, so ClickHouse allows about
-    # 1.8GB in all; this leaves room for inserts and merges. Raise both together.
-    maxMemoryUsage: 1500000000
+    # Bytes per query. Kept below maxMemoryUsageForUser so one wide query
+    # leaves room for the small ones (traces, pickers) running next to it.
+    maxMemoryUsage: 1000000000
+    # Bytes for all of this user's queries running at once. The pod's limit is
+    # 2000Mi, so ClickHouse allows about 1.8GB in all; this leaves room for
+    # inserts and merges. Raise it, maxMemoryUsage and the pod's limit together.
+    maxMemoryUsageForUser: 1500000000
+    # Queries this user runs at once; ClickHouse refuses the next one
+    # (TOO_MANY_SIMULTANEOUS_QUERIES) instead of queueing it. A starting point,
+    # not a measured peak: raise it if that error shows up under normal use.
+    maxConcurrentQueries: 8
     # A sort or GROUP BY past this many bytes spills to disk rather than
     # reaching maxMemoryUsage.
     maxBytesBeforeSpill: 500000000
