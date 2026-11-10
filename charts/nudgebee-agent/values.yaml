@@ -672,10 +672,14 @@ opentelemetry-collector:
           receivers: [otlp]
 clickhouse:
   enabled: true
+  # The official clickhouse/clickhouse-server image, mirrored with OS patches
+  # (nudgebee/nudgebee: deploy/kubernetes/nudgebee-mirrors/clickhouse-official).
+  # Same ClickHouse version as the Bitnami-based image (24.12.4-debian-12-r0-nb-3)
+  # earlier charts ran, so an existing data volume is read as it is.
   image:
     registry: ghcr.io
     repository: nudgebee/clickhouse
-    tag: 24.12.4-debian-12-r0-nb-3
+    tag: 24.12.4-nb-1
   nameOverride: ""
   fullnameOverride: ""
   persistence:
@@ -684,17 +688,24 @@ clickhouse:
     # StorageClass; "-" disables dynamic provisioning. Only consulted when
     # `global.storageClass` is empty.
     storageClass: ""
-  replicaCount: 1
-  shards: 1
-  zookeeper:
-    enabled: false
   auth:
     username: default
-    # Leave empty to let the Bitnami subchart auto-generate a random password
-    # on first install (persisted in the `<release>-clickhouse` Secret under
-    # key `admin-password`). To pin a value, set it here or pass via
-    # `--set clickhouse.auth.password=...`.
+    # Leave empty to generate a random password on first install. It is kept in
+    # the `<release>-clickhouse` Secret under `admin-password`, and an upgrade
+    # keeps the password already in that Secret. To pin a value, set it here or
+    # pass `--set clickhouse.auth.password=...` (it applies when the Secret is
+    # first created).
     password: ""
+    # Use a Secret you manage instead. The chart then creates no Secret.
+    existingSecret: ""
+    existingSecretKey: ""     # default: admin-password
+  # Pod and container security contexts. OpenShift turns both off so its SCC
+  # assigns the UID (see openshift-values.yaml). Elsewhere ClickHouse runs as
+  # UID 1001, the owner of the files on volumes the Bitnami image created.
+  podSecurityContext:
+    enabled: true
+  containerSecurityContext:
+    enabled: true
   # Most system logs are off to save disk. query_views_log stays: the runner's
   # ClickHouse service map reads failed summary-view runs from it, and serves
   # only windows it still covers (without it every map read falls back to
@@ -719,10 +730,9 @@ clickhouse:
   # set them to 0. It shares the admin password (the
   # runner holds that one anyway); schema changes and the collector's inserts
   # keep the admin user. Defined in templates/clickhouse-reader-users.yaml and
-  # mounted by the extraVolumes / extraVolumeMounts entries below. If you set
-  # your own lists, keep both nudgebee-reader-users entries or drop both (a
-  # mount without its volume fails the StatefulSet); without them query_data
-  # uses the admin user. Changed limits apply after the ClickHouse pod restarts.
+  # mounted into ClickHouse's users.d by the StatefulSet. Set enabled: false to
+  # drop it; query_data then uses the admin user. Changed limits apply after the
+  # ClickHouse pod restarts.
   reader:
     enabled: true
     maxExecutionTime: 60        # seconds, when a query sets none
@@ -734,27 +744,20 @@ clickhouse:
     # A sort or GROUP BY past this many bytes spills to disk rather than
     # reaching maxMemoryUsage.
     maxBytesBeforeSpill: 500000000
-  extraVolumes:
-    - name: nudgebee-reader-users
-      configMap:
-        name: '{{ include "common.names.fullname" . }}-reader-users'
-        optional: true
-  extraVolumeMounts:
-    - name: nudgebee-reader-users
-      # The image copies files under /bitnami/clickhouse/etc/users.d/*/ into
-      # ClickHouse's users.d.
-      mountPath: /bitnami/clickhouse/etc/users.d/nudgebee-reader
+  # More volumes and mounts for the ClickHouse container. Both go through tpl.
+  # The reader user is no longer mounted from here: an entry named
+  # nudgebee-reader-users (from values written for earlier charts) is skipped.
+  extraVolumes: []
+  extraVolumeMounts: []
   resources:
     requests:
       cpu: 100m
       memory: 2000Mi
     limits:
       memory: 2000Mi
-  # The ClickHouse ServiceMonitor is rendered by this chart
-  # (templates/clickhouse-servicemonitor.yaml), not by the Bitnami subchart: a
-  # parent cannot add a condition to a subchart's template, and the subchart's
-  # copy failed installs on clusters with no Prometheus operator. This chart's
-  # copy is gated like its other monitoring CRs, so on such a cluster the one
+  # The ClickHouse ServiceMonitor (templates/clickhouse-servicemonitor.yaml) is
+  # gated like the chart's other monitoring CRs, so on a cluster with no
+  # Prometheus operator the one
   # setting needed is `--set enablePrometheusStack=false` (installation.sh sets
   # it when the operator's CRDs are absent). Set nudgebeeServiceMonitor.enabled
   # to false to drop the scrape target entirely.
@@ -764,13 +767,13 @@ clickhouse:
     # Also opens the http-metrics port the ServiceMonitor scrapes; keep it on.
     enabled: true
     serviceMonitor:
-      # The subchart's own copy, ungated. Leave false; interval and
-      # scrapeTimeout below are still read by this chart's copy.
+      # Kept for values written for earlier charts, where it turned on the
+      # Bitnami subchart's own copy: true now also renders this chart's copy.
+      # interval and scrapeTimeout below are read either way.
       enabled: false
       interval: 30s
       scrapeTimeout: 10s
-    # Rendered by this chart (templates/clickhouse-prometheusrule.yaml), not by
-    # the Bitnami subchart, which has no PrometheusRule template. Each expr goes
+    # Rendered by templates/clickhouse-prometheusrule.yaml. Each expr goes
     # through tpl: nudgebee-agent.clickhouse.target expands to this release's
     # scrape target (namespace="...",service="..."), so the rules never match
     # another release's ClickHouse in the same Prometheus.
