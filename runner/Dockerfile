@@ -1,8 +1,11 @@
 # Multi-stage build. The final image is Red Hat UBI 9 micro (Red Hat container
 # certification). Both the agent and kubectl are static Go binaries, so the only
-# OS content they need beyond ubi-micro is the CA bundle and the zoneinfo
-# database. Those are installed in a throwaway stage and only their files are
-# copied over, so ubi-micro's own package database and files stay untouched.
+# OS content they need beyond ubi-micro is the CA bundle. It is installed in a
+# throwaway stage and only its files are copied over, so ubi-micro's own package
+# database and files stay untouched. Timezone data is embedded in the agent
+# binary (-tags timetzdata) instead of copied: ubi-micro's rpmdb lists tzdata
+# but its zoneinfo files are stripped, and adding them back is flagged by
+# preflight's HasModifiedFiles.
 # The kubectl_command_executor action shells out to kubectl (pkg/kube/exec.go),
 # not to a shell; ubi-micro does ship bash.
 #
@@ -25,7 +28,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build \
+RUN go build -tags timetzdata \
 	-ldflags="-s -w \
 		-X github.com/nudgebee/nudgebee-agent/pkg/version.Version=${VERSION} \
 		-X github.com/nudgebee/nudgebee-agent/pkg/version.Commit=${COMMIT} \
@@ -78,10 +81,10 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-# Throwaway stage: bring the CA trust store and zoneinfo up to date. Only their
-# files are copied into the final image (never /var/lib/rpm or system binaries).
+# Throwaway stage: bring the CA trust store up to date. Only its files are
+# copied into the final image (never /var/lib/rpm or system binaries).
 FROM registry.access.redhat.com/ubi9@sha256:87f66688da4e206d5a1877088626c542288a5ccd97898cf363b588d57817e6be AS pkgs
-RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates tzdata \
+RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates \
  && dnf clean all
 
 FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:d3499a0896e2d6a1642f922615831bc5c2fd513bbb34f3446cabba530d9d54a2
@@ -97,7 +100,6 @@ LABEL name="nudgebee-agent" \
 # Go reads /etc/pki/tls/certs/ca-bundle.crt (a symlink into ca-trust/extracted).
 COPY --from=pkgs /etc/pki/ca-trust/extracted /etc/pki/ca-trust/extracted
 COPY --from=pkgs /etc/pki/tls/certs /etc/pki/tls/certs
-COPY --from=pkgs /usr/share/zoneinfo /usr/share/zoneinfo
 # Red Hat certification (HasLicense): license text must be under /licenses.
 COPY --from=repo LICENSE /licenses/LICENSE
 # The agent writes nothing itself; /tmp is the one world-writable path for kubectl's
