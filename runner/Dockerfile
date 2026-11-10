@@ -1,8 +1,10 @@
 # Multi-stage build. The final image is Red Hat UBI 9 micro (Red Hat container
-# certification, #40411). Both the agent and kubectl are static Go binaries, so
-# the only OS content they need is the CA bundle and tzdata, installed into
-# /rootfs below. The kubectl_command_executor action shells out to kubectl
-# (pkg/kube/exec.go); nothing in the image needs a shell.
+# certification). Both the agent and kubectl are static Go binaries, so the only
+# OS content they need beyond ubi-micro is the CA bundle and the zoneinfo
+# database. Those are installed in a throwaway stage and only their files are
+# copied over, so ubi-micro's own package database and files stay untouched.
+# The kubectl_command_executor action shells out to kubectl (pkg/kube/exec.go),
+# not to a shell; ubi-micro does ship bash.
 #
 # Build with the repo root as a named context so the LICENSE can be copied in:
 #   docker buildx build --build-context repo=. -f runner/Dockerfile runner
@@ -76,17 +78,13 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-# Everything the runtime installs from packages is assembled under /rootfs here.
-# Bump OS_PKG_EPOCH (ISO week) to change this layer's cache key so a registry
-# cache can't serve a stale package layer.
-FROM registry.access.redhat.com/ubi9 AS rootfs-builder
-ARG OS_PKG_EPOCH=2026-W45
-RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
- && dnf install -y --installroot /rootfs --releasever 9 --setopt=install_weak_deps=false --nodocs \
-      ca-certificates tzdata \
- && dnf --installroot /rootfs clean all && rm -rf /rootfs/var/cache/*
+# Throwaway stage: bring the CA trust store and zoneinfo up to date. Only their
+# files are copied into the final image (never /var/lib/rpm or system binaries).
+FROM registry.access.redhat.com/ubi9@sha256:87f66688da4e206d5a1877088626c542288a5ccd97898cf363b588d57817e6be AS pkgs
+RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates tzdata \
+ && dnf clean all
 
-FROM registry.access.redhat.com/ubi9/ubi-micro
+FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:d3499a0896e2d6a1642f922615831bc5c2fd513bbb34f3446cabba530d9d54a2
 ARG IMAGE_VERSION=0.0.0
 ARG IMAGE_RELEASE=1
 LABEL name="nudgebee-agent" \
@@ -96,7 +94,10 @@ LABEL name="nudgebee-agent" \
       release="${IMAGE_RELEASE}" \
       summary="Nudgebee Kubernetes agent" \
       description="Runs Nudgebee actions and enrichers inside a customer cluster."
-COPY --from=rootfs-builder /rootfs/ /
+# Go reads /etc/pki/tls/certs/ca-bundle.crt (a symlink into ca-trust/extracted).
+COPY --from=pkgs /etc/pki/ca-trust/extracted /etc/pki/ca-trust/extracted
+COPY --from=pkgs /etc/pki/tls/certs /etc/pki/tls/certs
+COPY --from=pkgs /usr/share/zoneinfo /usr/share/zoneinfo
 # Red Hat certification (HasLicense): license text must be under /licenses.
 COPY --from=repo LICENSE /licenses/LICENSE
 # The agent writes nothing itself; /tmp is the one world-writable path for kubectl's
