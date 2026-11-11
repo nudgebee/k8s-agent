@@ -269,6 +269,18 @@ func (e *Engine) HandlesKind(kind string) bool {
 	return false
 }
 
+// Handles reports whether any matcher reads changes of this kind and
+// operation. The runner's own watch uses it to skip encoding changes nothing
+// would match: every built-in matcher reads updates only.
+func (e *Engine) Handles(kind, operation string) bool {
+	for i := range e.specs {
+		if kindMatches(e.specs[i].Kind, kind) && operationMatches(e.specs[i].Operations, operation) {
+			return true
+		}
+	}
+	return false
+}
+
 // kindMatches compares a spec's Kind against the kind kubewatch reported.
 // Case-insensitive: kubewatch's per-resource handlers are not consistent
 // about casing across kinds ("Deployment" but "configmap"), and a spec

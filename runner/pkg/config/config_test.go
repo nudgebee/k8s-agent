@@ -72,6 +72,8 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		KubewatchQueueSize:             2048,
 		KubewatchQueueMaxBytes:         64 << 20,
 		TriggerEventsCache:             true,
+		K8sWatchWorkers:                8,
+		K8sWatchMaxPending:             10000,
 		RelayHandlerPoolSize:           32,
 		TriggerRateLimits:              map[string]time.Duration{},
 		KubeEnabled:                    true,

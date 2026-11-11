@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
@@ -185,4 +186,111 @@ func TestDiscoveryTransform_PassThrough(t *testing.T) {
 	if out2 != cm {
 		t.Error("unknown type not passed through unchanged")
 	}
+}
+
+// fatTemplate is a pod template with every field the config-change matcher
+// diffs and the discovery transform strips.
+func fatTemplate() corev1.PodTemplateSpec {
+	c := corev1.Container{
+		Name:          "web",
+		Image:         "nginx",
+		Env:           []corev1.EnvVar{{Name: "X", Value: "y"}},
+		VolumeMounts:  []corev1.VolumeMount{{Name: "data", MountPath: "/d"}},
+		LivenessProbe: &corev1.Probe{InitialDelaySeconds: 5},
+	}
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "api"}},
+		Spec: corev1.PodSpec{
+			Volumes:        []corev1.Volume{{Name: "data"}},
+			InitContainers: []corev1.Container{{Name: "migrate", Image: "migrate:1"}},
+			Containers:     []corev1.Container{c},
+		},
+	}
+}
+
+// With the matchers sharing the factory, the transform keeps whole pod
+// templates on workloads and trimmed init containers on pods — and discovery
+// still emits exactly what it emits with its own transform.
+func TestTransformForMatchers_KeepsWhatMatchersReadAndDiscoveryOutputIsUnchanged(t *testing.T) {
+	forMatchers := TransformFunc(true)
+	meta := metav1.ObjectMeta{Name: "api", Namespace: "ns", ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "x"}}}
+	sel := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}
+
+	type workload struct {
+		name    string
+		obj     func() any
+		convert func(any) (any, bool)
+		tmpl    func(any) corev1.PodTemplateSpec
+	}
+	cases := []workload{
+		{"deployment",
+			func() any {
+				return &appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Replicas: ptr.To(int32(2)), Selector: sel, Template: fatTemplate()}}
+			},
+			convertDeployment,
+			func(o any) corev1.PodTemplateSpec { return o.(*appsv1.Deployment).Spec.Template }},
+		{"statefulset",
+			func() any {
+				return &appsv1.StatefulSet{ObjectMeta: meta, Spec: appsv1.StatefulSetSpec{Replicas: ptr.To(int32(1)), Selector: sel, Template: fatTemplate()}}
+			},
+			convertStatefulSet,
+			func(o any) corev1.PodTemplateSpec { return o.(*appsv1.StatefulSet).Spec.Template }},
+		{"daemonset",
+			func() any {
+				return &appsv1.DaemonSet{ObjectMeta: meta, Spec: appsv1.DaemonSetSpec{Selector: sel, Template: fatTemplate()}}
+			},
+			convertDaemonSet,
+			func(o any) corev1.PodTemplateSpec { return o.(*appsv1.DaemonSet).Spec.Template }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kept, err := forMatchers(tc.obj())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(tc.tmpl(kept), fatTemplate()) {
+				t.Error("pod template not kept whole")
+			}
+			trimmed, _ := discoveryTransform(tc.obj())
+			want, _ := tc.convert(trimmed)
+			got, _ := tc.convert(kept)
+			stripVolatile(want)
+			stripVolatile(got)
+			if !reflect.DeepEqual(want, got) {
+				t.Errorf("discovery output changed:\n want %+v\n got  %+v", want, got)
+			}
+		})
+	}
+
+	t.Run("pod", func(t *testing.T) {
+		p := fatPod()
+		p.Spec.InitContainers = []corev1.Container{{
+			Name: "init", Image: "init:1", Env: []corev1.EnvVar{{Name: "A", Value: "b"}},
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")}},
+		}}
+		kept, _ := forMatchers(p.DeepCopy())
+		kp := kept.(*corev1.Pod)
+		if len(kp.Spec.InitContainers) != 1 || kp.Spec.InitContainers[0].Resources.Limits.Memory().String() != "64Mi" {
+			t.Error("init container memory limit not kept (the OOM matcher reads it)")
+		}
+		if kp.Spec.InitContainers[0].Env != nil || kp.Spec.Containers[0].Env != nil || kp.ManagedFields != nil {
+			t.Error("pod not trimmed like discovery trims it")
+		}
+		trimmed, _ := discoveryTransform(p.DeepCopy())
+		want, _ := convertPod(trimmed)
+		got, _ := convertPod(kept)
+		stripVolatile(want)
+		stripVolatile(got)
+		if !reflect.DeepEqual(want, got) {
+			t.Errorf("discovery pod output changed:\n want %+v\n got  %+v", want, got)
+		}
+	})
+
+	t.Run("off is discoveryTransform", func(t *testing.T) {
+		d := &appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Selector: sel, Template: fatTemplate()}}
+		out, _ := TransformFunc(false)(d)
+		if out.(*appsv1.Deployment).Spec.Template.Spec.Containers[0].Env != nil {
+			t.Error("with the watch off, workload templates should still be trimmed")
+		}
+	})
 }

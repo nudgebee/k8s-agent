@@ -147,6 +147,14 @@ type Config struct {
 	KubewatchWorkers       int
 	KubewatchQueueSize     int
 	KubewatchQueueMaxBytes int64
+	// K8sWatchEnabled feeds the trigger matchers from the runner's own
+	// informers (pkg/k8swatch) instead of kubewatch, and makes /api/handle
+	// ignore kubewatch so a change is never matched twice. K8sWatchWorkers
+	// match in parallel; K8sWatchMaxPending bounds the objects with changes
+	// waiting (updates to one object coalesce). Defaults false / 8 / 10000.
+	K8sWatchEnabled    bool
+	K8sWatchWorkers    int
+	K8sWatchMaxPending int
 	// TriggerEventsCache serves the evidence tables on a matched Finding
 	// (recent subject / node / namespace events) from a trimmed Event
 	// informer instead of three API List calls per match. Default true.
@@ -346,6 +354,9 @@ func FromEnv() (*Config, error) {
 		KubewatchQueueSize:             envInt("KUBEWATCH_QUEUE_SIZE", 2048),
 		KubewatchQueueMaxBytes:         int64(envInt("KUBEWATCH_QUEUE_MAX_BYTES", 64<<20)),
 		TriggerEventsCache:             envBool("TRIGGER_EVENTS_CACHE", true),
+		K8sWatchEnabled:                envBool("K8S_WATCH_ENABLED", false),
+		K8sWatchWorkers:                envInt("K8S_WATCH_WORKERS", 8),
+		K8sWatchMaxPending:             envInt("K8S_WATCH_MAX_PENDING", 10000),
 		RelayHandlerPoolSize:           envInt("RELAY_HANDLER_POOL_SIZE", 32),
 		TriggerRateLimits:              ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
 		KubeEnabled:                    envBool("KUBE_ENABLED", true),

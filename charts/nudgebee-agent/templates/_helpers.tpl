@@ -257,6 +257,20 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .eventsCache | quote }}
     {{- end }}
     {{- end }}
+    {{- with .Values.runner.k8sWatch }}
+    {{- if .enabled }}
+    - name: K8S_WATCH_ENABLED
+      value: "true"
+    {{- if .workers }}
+    - name: K8S_WATCH_WORKERS
+      value: {{ .workers | quote }}
+    {{- end }}
+    {{- if .maxPending }}
+    - name: K8S_WATCH_MAX_PENDING
+      value: {{ .maxPending | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
