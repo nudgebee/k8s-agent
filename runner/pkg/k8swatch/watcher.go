@@ -227,7 +227,7 @@ func (w *Watcher) onAdd(s source, obj any) {
 	}
 	// The initial list delivers every existing object as an add. kubewatch
 	// sent a create only for objects created after it started; same here.
-	if !m.GetCreationTimestamp().Time.After(w.cfg.StartTime) {
+	if !m.GetCreationTimestamp().After(w.cfg.StartTime) {
 		w.count(s.kind, OutcomeBeforeStart)
 		return
 	}

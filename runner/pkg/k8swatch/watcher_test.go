@@ -78,9 +78,9 @@ func pod(name, rv string, created time.Time, restarts int32) *corev1.Pod {
 type kubewatchData struct {
 	Operation   string         `json:"operation"`
 	Kind        string         `json:"kind"`
-	ClusterUid  string         `json:"clusterUid"`
+	ClusterUID  string         `json:"clusterUid"`
 	Description string         `json:"description"`
-	ApiVersion  string         `json:"apiVersion"`
+	APIVersion  string         `json:"apiVersion"`
 	Obj         runtime.Object `json:"obj"`
 	OldObj      runtime.Object `json:"oldObj"`
 }
@@ -93,7 +93,7 @@ func TestEncode_MatchesKubewatchBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	want, _ := json.Marshal(kubewatchData{
-		Operation: "update", Kind: "Pod", ApiVersion: "v1",
+		Operation: "update", Kind: "Pod", APIVersion: "v1",
 		Description: "A `Pod` in namespace `app` has been `Updated`:\n`web-0`",
 		Obj:         cur, OldObj: old,
 	})
