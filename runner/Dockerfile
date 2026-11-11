@@ -87,7 +87,7 @@ FROM registry.access.redhat.com/ubi9@sha256:87f66688da4e206d5a1877088626c542288a
 RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates \
  && dnf clean all
 
-FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:d3499a0896e2d6a1642f922615831bc5c2fd513bbb34f3446cabba530d9d54a2
+FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:b59ac4f291d86027c2681f7a7b1cbf7448972fc55a6cb8e25cab5aa5eef5ce5f
 ARG IMAGE_VERSION=0.0.0
 ARG IMAGE_RELEASE=1
 LABEL name="nudgebee-agent" \
