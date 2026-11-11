@@ -277,6 +277,16 @@ func (c *Client) eachItem(ctx context.Context, gvr schema.GroupVersionResource, 
 	if err != nil && p.Namespace != "" && apierrors.IsNotFound(err) {
 		cluster := p
 		cluster.Namespace = ""
+		// The retry can list the whole cluster. Take a slot for it unless the
+		// request already holds one (acquireList skips only scoped requests):
+		// taking a second would deadlock a limit of 1.
+		if p.isScoped() {
+			release, err := c.acquireList(ctx, cluster)
+			if err != nil {
+				return err
+			}
+			defer release()
+		}
 		ri = c.resourceInterface(gvr, cluster)
 		list, err = ri.List(ctx, opts)
 	}

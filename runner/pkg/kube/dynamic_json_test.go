@@ -255,3 +255,79 @@ func TestGetResource_QueuedListHonoursCancellation(t *testing.T) {
 		t.Errorf("err = %v; want a deadline error", err)
 	}
 }
+
+// clusterScopedFake answers a namespaced list of nodes with 404, as the API
+// server does for a cluster-scoped kind, and counts the lists that went out.
+func clusterScopedFake(t *testing.T) (*Client, *int) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{{Version: "v1", Resource: "nodes"}: "NodeList"})
+	lists := 0
+	dyn.PrependReactor("list", "nodes", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		lists++
+		if a.GetNamespace() != "" {
+			return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "nodes"}, "")
+		}
+		return false, nil, nil
+	})
+	return NewClient(dyn, nil), &lists
+}
+
+// A cluster-scoped kind asked for with a namespace falls back to a
+// cluster-wide list, so that fallback takes a slot like any other.
+func TestGetResource_ClusterScopedFallbackTakesASlot(t *testing.T) {
+	c, lists := clusterScopedFake(t)
+	c.SetUnscopedListLimit(1)
+	hold, err := c.acquireList(context.Background(), GetParams{Version: "v1", ResourceType: "pods"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = c.GetResourceJSON(ctx, GetParams{Version: "v1", ResourceType: "nodes", Namespace: "default"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v; want the fallback to wait for the held slot", err)
+	}
+	if *lists != 1 {
+		t.Errorf("lists = %d; want only the namespaced attempt while the slot is held", *lists)
+	}
+
+	hold()
+	if _, err := c.GetResourceJSON(context.Background(), GetParams{Version: "v1", ResourceType: "nodes", Namespace: "default"}); err != nil {
+		t.Fatalf("after the slot frees: %v", err)
+	}
+}
+
+// A request that already holds the slot (all_namespaces with a namespace)
+// must not wait for a second one in the fallback: with a limit of 1 that
+// would never return. A type that is not installed answers 404 to every list,
+// so it reaches the fallback while holding the slot.
+func TestGetResource_FallbackDoesNotTakeASecondSlot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{{Group: "example.com", Version: "v1", Resource: "widgets"}: "WidgetList"})
+	lists := 0
+	dyn.PrependReactor("list", "widgets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		lists++
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: "example.com", Resource: "widgets"}, "")
+	})
+	c := NewClient(dyn, nil)
+	c.SetUnscopedListLimit(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	p := GetParams{Group: "example.com", Version: "v1", ResourceType: "widgets", Namespace: "default", AllNamespaces: true}
+	_, err := c.GetResourceJSON(ctx, p)
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("the fallback waited for a second slot")
+	}
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("err = %v; want the 404", err)
+	}
+	if lists != 2 {
+		t.Errorf("lists = %d; want the first attempt and the fallback", lists)
+	}
+}
