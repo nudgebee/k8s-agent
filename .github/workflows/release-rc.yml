@@ -75,7 +75,6 @@ jobs:
 
       - name: Add dependency chart repos
         run: |
-          helm repo add opencost https://opencost.github.io/opencost-helm-chart
           helm repo add opentelemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm repo update
 

@@ -685,22 +685,6 @@ OpenTelemetry Collector service name - handles fullnameOverride/nameOverride for
 {{- end -}}
 
 {{/*
-OpenCost service name - handles fullnameOverride/nameOverride for opencost subchart
-*/}}
-{{- define "nudgebee-agent.opencost.servicename" -}}
-{{- if .Values.opencost.fullnameOverride -}}
-{{- .Values.opencost.fullnameOverride | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- $name := default "opencost" .Values.opencost.nameOverride -}}
-{{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
 kubewatch is deployed only while the runner does not watch the cluster itself:
 with runner.k8sWatch.enabled the runner ignores kubewatch's posts anyway.
 */}}
