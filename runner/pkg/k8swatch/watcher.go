@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -85,6 +86,9 @@ type Watcher struct {
 
 	synced     []cache.InformerSynced
 	startFuncs []func(stop <-chan struct{})
+
+	shedSince atomic.Int64
+	shedWarn  atomic.Int64
 }
 
 // New builds a watcher. Register the sources, then call Run.
@@ -272,6 +276,24 @@ type pendingChanges struct {
 	changes []change
 }
 
+// shedWarnInterval spaces the shed warnings: a shed loses alerts, so it must
+// show at the default log level, but sheds come in floods.
+const shedWarnInterval = 30 * time.Second
+
+// warnShed logs a shed at Warn at most once per interval, with the number of
+// changes shed since the previous warning.
+func (w *Watcher) warnShed(key string) {
+	n := w.shedSince.Add(1)
+	now := time.Now().UnixNano()
+	last := w.shedWarn.Load()
+	if now-last < int64(shedWarnInterval) || !w.shedWarn.CompareAndSwap(last, now) {
+		return
+	}
+	w.shedSince.Add(-n)
+	w.logger.Warn("k8s watch: changes shed: too many objects waiting to be matched; raise K8S_WATCH_MAX_PENDING / K8S_WATCH_WORKERS if this persists",
+		"shed_since_last_warning", n, "latest", key)
+}
+
 func (w *Watcher) enqueue(s source, operation string, obj, old any) {
 	if !w.handles(s.kind, operation) {
 		w.count(s.kind, OutcomeNoMatcher)
@@ -289,6 +311,7 @@ func (w *Watcher) enqueue(s source, operation string, obj, old any) {
 		if len(w.pending) >= w.cfg.MaxPending {
 			w.mu.Unlock()
 			w.count(s.kind, OutcomeShed)
+			w.warnShed(key)
 			return
 		}
 		p = &pendingChanges{}

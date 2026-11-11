@@ -3,6 +3,7 @@ package k8swatch
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -256,5 +257,17 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met in 5s")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWatcher_WarnsOnShedAtMostOncePerInterval(t *testing.T) {
+	var buf strings.Builder
+	w := New(Config{MaxPending: 1}, &recordingSink{}, updatesOnly, nil, slog.New(slog.NewTextHandler(&buf, nil)))
+	s := source{kind: "Pod", apiVersion: "v1"}
+	for _, name := range []string{"a", "b", "c", "d"} {
+		w.onUpdate(s, pod(name, "1", time.Now(), 0), pod(name, "2", time.Now(), 1))
+	}
+	if got := strings.Count(buf.String(), "changes shed"); got != 1 {
+		t.Errorf("shed warnings = %d; want 1 for a burst of three sheds\n%s", got, buf.String())
 	}
 }
