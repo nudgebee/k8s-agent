@@ -152,17 +152,36 @@ func NewService(cs kubernetes.Interface, sink *Sink, resync time.Duration, logge
 	if resync <= 0 {
 		resync = 30 * time.Minute
 	}
-	if logger == nil {
-		logger = slog.Default()
-	}
 	// One factory shared across all resources; each resource registers its
 	// own informer + handler. SharedInformerFactory dedups list/watch traffic.
 	// WithTransform strips fields no converter reads BEFORE objects enter the
 	// cache — the single biggest per-object memory win at 100k+ pods. See
 	// discoveryTransform; it is verified to preserve every field the converters
 	// read, so it's safe to apply unconditionally.
-	factory := informers.NewSharedInformerFactoryWithOptions(cs, resync,
-		informers.WithTransform(discoveryTransform))
+	return NewServiceWithFactory(cs, sink, NewFactory(cs, resync, false), resync, logger)
+}
+
+// NewFactory builds the informer factory discovery runs on, with the
+// transform TransformFunc(forMatchers) returns. Build it once and pass it to
+// NewServiceWithFactory and to anything else that should share its caches.
+func NewFactory(cs kubernetes.Interface, resync time.Duration, forMatchers bool) informers.SharedInformerFactory {
+	if resync <= 0 {
+		resync = 30 * time.Minute
+	}
+	return informers.NewSharedInformerFactoryWithOptions(cs, resync,
+		informers.WithTransform(TransformFunc(forMatchers)))
+}
+
+// NewServiceWithFactory is NewService on a factory the caller built with
+// NewFactory, so other consumers can share its informers. Run starts the
+// factory; starting it again elsewhere is harmless.
+func NewServiceWithFactory(cs kubernetes.Interface, sink *Sink, factory informers.SharedInformerFactory, resync time.Duration, logger *slog.Logger) *Service {
+	if resync <= 0 {
+		resync = 30 * time.Minute
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		cs:               cs,
 		sink:             sink,

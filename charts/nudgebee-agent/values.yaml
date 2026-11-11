@@ -42,6 +42,13 @@ globalConfig:
 enableServiceMonitors: true
 # parameters for the nudgebee forwarder deployment
 kubewatch:
+  # Deploys kubewatch (the `forwarder` Deployment, its ServiceAccount,
+  # ClusterRole, ClusterRoleBinding and ConfigMap), which posts every
+  # Kubernetes change to the runner for alert matching. Not deployed when
+  # runner.k8sWatch.enabled=true, where the runner watches the cluster itself;
+  # config.namespace and config.resource below then apply to that watch.
+  # Setting both false is rejected: nothing would raise change alerts.
+  enabled: true
   image:
     repository: ghcr.io/nudgebee/kubewatch
     tag: 2.14.1-nb.4
@@ -209,6 +216,16 @@ runner:
     # kubewatchQueueSize: 2048     # kubewatch events allowed to wait; beyond it they are shed and counted
     # kubewatchQueueMaxBytes: 67108864  # bytes of waiting kubewatch events (64 MiB); beyond it they are shed
     # eventsCache: true            # serve Finding event tables from an Event informer instead of API Lists
+  # The runner watches the Kubernetes objects its alert matchers read, with its
+  # own informers, instead of receiving them from kubewatch. While on, the
+  # runner ignores kubewatch's posts, so set kubewatch.enabled=false with it.
+  # The runner watches the cluster itself and matches changes, instead of
+  # kubewatch posting them; kubewatch is then not deployed. Covers the same
+  # namespace and kinds as kubewatch.config.namespace / kubewatch.config.resource.
+  k8sWatch:
+    enabled: false
+    # workers: 8          # workers matching changes; one object is never matched by two at once
+    # maxPending: 10000   # objects with changes waiting; updates to one object coalesce; beyond it changes are shed and counted
   tolerations: []
   annotations: {}
   nodeSelector: ~

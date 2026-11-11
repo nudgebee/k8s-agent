@@ -72,6 +72,8 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		KubewatchQueueSize:             2048,
 		KubewatchQueueMaxBytes:         64 << 20,
 		TriggerEventsCache:             true,
+		K8sWatchWorkers:                8,
+		K8sWatchMaxPending:             10000,
 		RelayHandlerPoolSize:           32,
 		TriggerRateLimits:              map[string]time.Duration{},
 		KubeEnabled:                    true,
@@ -372,5 +374,23 @@ func TestFromEnv_ClickHouseLogsCollected(t *testing.T) {
 	}
 	if !c.ClickHouseLogsCollected {
 		t.Error("ClickHouseLogsCollected = false with CLICKHOUSE_LOGS_COLLECTED=true")
+	}
+}
+
+func TestFromEnv_K8sWatchScope(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("K8S_WATCH_NAMESPACE", " app ")
+	t.Setenv("K8S_WATCH_KINDS", "Pod, node,,configmap")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.K8sWatchNamespace != "app" || !reflect.DeepEqual(c.K8sWatchKinds, []string{"pod", "node", "configmap"}) {
+		t.Errorf("namespace %q kinds %v", c.K8sWatchNamespace, c.K8sWatchKinds)
+	}
+	t.Setenv("K8S_WATCH_KINDS", "")
+	if c, _ = FromEnv(); c.K8sWatchKinds == nil || len(c.K8sWatchKinds) != 0 {
+		t.Errorf("set but empty = %v; want an empty, non-nil list", c.K8sWatchKinds)
 	}
 }

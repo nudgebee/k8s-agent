@@ -32,6 +32,8 @@ type Registry struct {
 	KubewatchHandle    prometheus.Histogram     // /api/handle time held from the sender
 	KubewatchQueueWait prometheus.Histogram     // time an event waited for a worker
 	KubewatchMatch     *prometheus.HistogramVec // labels: kind; predicates + evidence lookups
+	K8sWatchEvents     *prometheus.CounterVec   // labels: kind, outcome; the runner's own watch (pkg/k8swatch)
+	K8sWatchPending    prometheus.Gauge         // objects with changes waiting to be matched
 }
 
 // New builds the registry and pre-registers all collectors.
@@ -114,6 +116,17 @@ func New() *Registry {
 		Buckets:   []float64{.0001, .001, .005, .01, .05, .1, .5, 1, 3, 10},
 	}, []string{"kind"})
 
+	reg.K8sWatchEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "k8s_watch_events_total",
+		Help:      "Kubernetes changes seen by the runner's own watch, by kind and outcome (queued, coalesced, shed, dropped_existing, dropped_no_matcher, encode_failed; unchanged also counts relisted updates, which are queued too). Match outcomes are in kubewatch_events_total.",
+	}, []string{"kind", "outcome"})
+	reg.K8sWatchPending = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "k8s_watch_pending",
+		Help:      "Objects with changes waiting to be matched by the runner's own watch.",
+	})
+
 	r.MustRegister(
 		reg.ActionsTotal,
 		reg.ActionDuration,
@@ -128,6 +141,8 @@ func New() *Registry {
 		reg.KubewatchHandle,
 		reg.KubewatchQueueWait,
 		reg.KubewatchMatch,
+		reg.K8sWatchEvents,
+		reg.K8sWatchPending,
 	)
 	return reg
 }
@@ -179,6 +194,14 @@ func (r *Registry) OnRelayConnected(connected bool) {
 	}
 	r.RelayConnected.Set(0)
 }
+
+// OnK8sWatchEvent satisfies k8swatch.Metrics.
+func (r *Registry) OnK8sWatchEvent(kind, outcome string) {
+	r.K8sWatchEvents.WithLabelValues(kind, outcome).Inc()
+}
+
+// SetK8sWatchPending satisfies k8swatch.Metrics.
+func (r *Registry) SetK8sWatchPending(n int) { r.K8sWatchPending.Set(float64(n)) }
 
 // OnKubewatchEvent satisfies alerts.KubewatchMetrics.
 func (r *Registry) OnKubewatchEvent(kind, outcome string) {

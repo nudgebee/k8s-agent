@@ -30,6 +30,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -43,6 +44,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/enrichers"
 	"github.com/nudgebee/nudgebee-agent/pkg/grafana"
+	"github.com/nudgebee/nudgebee-agent/pkg/k8swatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/kube"
 	"github.com/nudgebee/nudgebee-agent/pkg/metrics"
 	"github.com/nudgebee/nudgebee-agent/pkg/mutate"
@@ -145,6 +147,9 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
+	// When this process started: the runner's own watch sends a create only
+	// for objects created after it, as kubewatch did.
+	processStart := time.Now()
 	handlers := map[string]dispatch.Handler{
 		"ping":   dispatch.SimpleHandler(handlePing),
 		"echo":   dispatch.SimpleHandler(handleEcho),
@@ -213,6 +218,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		cfg.PodExecEnabled = false
 		cfg.ScannersEnabled = false
 		cfg.MutateEnabled = false
+		cfg.K8sWatchEnabled = false
 	}
 
 	// Service-discovery: only fills blank URLs, never overrides env. Mirrors
@@ -902,6 +908,21 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
+	// One informer factory for discovery and the runner's own watch (when
+	// on), so the objects both read are cached once. With the watch on, the
+	// transform keeps the pod template fields the matchers diff.
+	// The watch feeds the trigger engine, which runs only with the HTTP
+	// listener and a backend to send Findings to. Without them the watch never
+	// starts, so the shared cache must not keep whole objects for it.
+	if cfg.K8sWatchEnabled && (cfg.HTTPListenAddr == "" || cfg.BackendEndpoint == "") {
+		logger.Warn("K8S_WATCH_ENABLED ignored: the trigger engine needs HTTP_LISTEN_ADDR and NUDGEBEE_ENDPOINT")
+		cfg.K8sWatchEnabled = false
+	}
+	var sharedFactory informers.SharedInformerFactory
+	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
+		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
+	}
+
 	// Keep looking for a Prometheus we could not find at boot, and point the
 	// client at the first one that appears. Everything downstream reads the URL
 	// per request, so no restart and no re-registration is needed.
@@ -1018,6 +1039,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(specs))
+		if cfg.K8sWatchEnabled {
+			// The runner watches Kubernetes itself and kubewatch's posts are
+			// ignored; see pkg/k8swatch.
+			fwd.KubewatchSuperseded = true
+			kw := k8swatch.New(k8swatch.Config{
+				Workers:    cfg.K8sWatchWorkers,
+				MaxPending: cfg.K8sWatchMaxPending,
+				StartTime:  processStart,
+				Namespace:  cfg.K8sWatchNamespace,
+				Kinds:      kindSet(cfg.K8sWatchKinds),
+				Skip: func(kind, namespace, name string) bool {
+					return kind == "ConfigMap" && triggers.ConfigMapIgnored(namespace, name)
+				},
+			}, fwd, eng.Handles, mreg, logger)
+			kw.RegisterShared(sharedFactory)
+			kw.RegisterOwn(typedKube)
+			kw.RegisterRollouts(gctx, typedKube, dynamicKube)
+			g.Go(func() error {
+				logger.Info("starting k8s watch (kubewatch posts are ignored)")
+				if err := kw.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+					return fmt.Errorf("k8s watch: %w", err)
+				}
+				return nil
+			})
+		}
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
@@ -1263,7 +1309,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discoverySink.Metrics = mreg
-		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
+		discSvc := discovery.NewServiceWithFactory(typedKube, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
 			BatchSize:         cfg.DiscoveryBatchSize,
@@ -1795,4 +1841,17 @@ func installNamespace(cfg *config.Config) string {
 		return ns
 	}
 	return cfg.ScannerNamespace
+}
+
+// kindSet turns K8S_WATCH_KINDS into the watcher's kind filter; nil (unset)
+// means every kind.
+func kindSet(kinds []string) map[string]bool {
+	if kinds == nil {
+		return nil
+	}
+	m := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		m[k] = true
+	}
+	return m
 }

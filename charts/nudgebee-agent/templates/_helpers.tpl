@@ -257,6 +257,31 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .eventsCache | quote }}
     {{- end }}
     {{- end }}
+    {{- if and (not .Values.kubewatch.enabled) (not .Values.runner.k8sWatch.enabled) }}
+    {{- fail "\n\nkubewatch.enabled=false with runner.k8sWatch.enabled=false leaves nothing watching the cluster, so no Kubernetes change alerts are raised. Set runner.k8sWatch.enabled=true (the runner watches the cluster itself) or leave kubewatch.enabled=true." }}
+    {{- end }}
+    {{- with .Values.runner.k8sWatch }}
+    {{- if .enabled }}
+    - name: K8S_WATCH_ENABLED
+      value: "true"
+    {{- with $.Values.kubewatch.config }}
+    {{- if .namespace }}
+    - name: K8S_WATCH_NAMESPACE
+      value: {{ .namespace | quote }}
+    {{- end }}
+    {{- end }}
+    - name: K8S_WATCH_KINDS
+      value: {{ include "nudgebee-agent.k8sWatchKinds" $ | quote }}
+    {{- if .workers }}
+    - name: K8S_WATCH_WORKERS
+      value: {{ .workers | quote }}
+    {{- end }}
+    {{- if .maxPending }}
+    - name: K8S_WATCH_MAX_PENDING
+      value: {{ .maxPending | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
     {{- if .Values.runner.profilerImage }}
     - name: PROFILER_IMAGE
       value: {{ .Values.runner.profilerImage | quote }}
@@ -674,3 +699,27 @@ OpenCost service name - handles fullnameOverride/nameOverride for opencost subch
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+kubewatch is deployed only while the runner does not watch the cluster itself:
+with runner.k8sWatch.enabled the runner ignores kubewatch's posts anyway.
+*/}}
+{{- define "nudgebee-agent.kubewatchDeployed" -}}
+{{- if and .Values.kubewatch.enabled (not .Values.runner.k8sWatch.enabled) }}true{{ end -}}
+{{- end }}
+
+{{/*
+The kinds the runner's own watch covers, from kubewatch.config.resource, so
+switching from kubewatch keeps the same kinds. Kinds missing from the map count
+as on, as in the chart defaults.
+*/}}
+{{- define "nudgebee-agent.k8sWatchKinds" -}}
+{{- $r := default dict .Values.kubewatch.config.resource -}}
+{{- $kinds := list -}}
+{{- range $key, $kind := dict "pod" "pod" "job" "job" "node" "node" "deployment" "deployment" "daemonset" "daemonset" "statefulset" "statefulset" "services" "service" "configmap" "configmap" "ingress" "ingress" "rollout" "rollout" -}}
+{{- if (ne (toString (index $r $key)) "false") -}}
+{{- $kinds = append $kinds $kind -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $kinds -}}
+{{- end }}

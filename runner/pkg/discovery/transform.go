@@ -79,6 +79,31 @@ func discoveryTransform(obj any) (any, error) {
 	return obj, nil
 }
 
+// TransformFunc returns the transform for the informer factory discovery
+// runs on. With forMatchers false it is discoveryTransform. With it true the
+// factory is shared with the trigger matchers (pkg/k8swatch), which ship the
+// cached objects as Finding evidence. Those evidence objects must be exactly
+// what kubewatch sent, and kubewatch only strips managedFields, so the kinds
+// the matchers read (Pods, Jobs, Nodes, Deployments, StatefulSets,
+// DaemonSets) lose managedFields and nothing else. Other kinds keep
+// discoveryTransform.
+//
+// Discovery's converters read named fields only, so its output is the same
+// either way.
+func TransformFunc(forMatchers bool) func(any) (any, error) {
+	if !forMatchers {
+		return discoveryTransform
+	}
+	return func(obj any) (any, error) {
+		switch obj.(type) {
+		case *corev1.Pod, *batchv1.Job, *corev1.Node, *appsv1.Deployment, *appsv1.StatefulSet, *appsv1.DaemonSet:
+			obj.(metav1.Object).SetManagedFields(nil)
+			return obj, nil
+		}
+		return discoveryTransform(obj)
+	}
+}
+
 // trimMeta drops the metadata fields no converter reads. ManagedFields is the
 // biggest single win across every type and is never emitted on the wire.
 //
