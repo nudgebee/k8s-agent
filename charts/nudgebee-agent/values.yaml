@@ -44,9 +44,10 @@ enableServiceMonitors: true
 kubewatch:
   # Deploys kubewatch (the `forwarder` Deployment, its ServiceAccount,
   # ClusterRole, ClusterRoleBinding and ConfigMap), which posts every
-  # Kubernetes change to the runner for alert matching. Set false together
-  # with runner.k8sWatch.enabled=true, where the runner watches the cluster
-  # itself and kubewatch is not needed.
+  # Kubernetes change to the runner for alert matching. Not deployed when
+  # runner.k8sWatch.enabled=true, where the runner watches the cluster itself;
+  # config.namespace and config.resource below then apply to that watch.
+  # Setting both false is rejected: nothing would raise change alerts.
   enabled: true
   image:
     repository: ghcr.io/nudgebee/kubewatch
@@ -218,6 +219,9 @@ runner:
   # The runner watches the Kubernetes objects its alert matchers read, with its
   # own informers, instead of receiving them from kubewatch. While on, the
   # runner ignores kubewatch's posts, so set kubewatch.enabled=false with it.
+  # The runner watches the cluster itself and matches changes, instead of
+  # kubewatch posting them; kubewatch is then not deployed. Covers the same
+  # namespace and kinds as kubewatch.config.namespace / kubewatch.config.resource.
   k8sWatch:
     enabled: false
     # workers: 8          # workers matching changes; one object is never matched by two at once

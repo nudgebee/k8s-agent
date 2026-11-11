@@ -155,6 +155,11 @@ type Config struct {
 	K8sWatchEnabled    bool
 	K8sWatchWorkers    int
 	K8sWatchMaxPending int
+	// K8sWatchNamespace and K8sWatchKinds carry kubewatch's `namespace` and
+	// `resource` settings over: one namespace (empty: all) and the kinds to
+	// watch, lower-case (nil: every kind a matcher reads).
+	K8sWatchNamespace string
+	K8sWatchKinds     []string
 	// TriggerEventsCache serves the evidence tables on a matched Finding
 	// (recent subject / node / namespace events) from a trimmed Event
 	// informer instead of three API List calls per match. Default true.
@@ -357,6 +362,8 @@ func FromEnv() (*Config, error) {
 		K8sWatchEnabled:                envBool("K8S_WATCH_ENABLED", false),
 		K8sWatchWorkers:                envInt("K8S_WATCH_WORKERS", 8),
 		K8sWatchMaxPending:             envInt("K8S_WATCH_MAX_PENDING", 10000),
+		K8sWatchNamespace:              strings.TrimSpace(os.Getenv("K8S_WATCH_NAMESPACE")),
+		K8sWatchKinds:                  envList("K8S_WATCH_KINDS"),
 		RelayHandlerPoolSize:           envInt("RELAY_HANDLER_POOL_SIZE", 32),
 		TriggerRateLimits:              ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
 		KubeEnabled:                    envBool("KUBE_ENABLED", true),
@@ -442,6 +449,22 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// envList reads a comma-separated, lower-cased list. Unset gives nil; set but
+// empty gives an empty, non-nil list.
+func envList(name string) []string {
+	s, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.ToLower(strings.TrimSpace(part)); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {

@@ -52,7 +52,9 @@ const (
 	// queue outcome, since it is matched like any other update.
 	OutcomeUnchanged    = "unchanged"
 	OutcomeBeforeStart  = "dropped_existing"
-	OutcomeNoMatcher    = "dropped_no_matcher" // no matcher reads this kind and operation
+	OutcomeNoMatcher    = "dropped_no_matcher"   // no matcher reads this kind and operation
+	OutcomeOutOfScope   = "dropped_out_of_scope" // outside Config.Namespace
+	OutcomeSkipped      = "dropped_skipped"      // Config.Skip: a change every matcher discards
 	OutcomeEncodeFailed = "encode_failed"
 )
 
@@ -69,6 +71,20 @@ type Config struct {
 	// time before it is one the informer's initial list found, not a new one,
 	// and is not sent as a create — kubewatch's rule.
 	StartTime time.Time
+	// Namespace limits the namespaced kinds to one namespace, as kubewatch's
+	// `namespace` setting did. Cluster-scoped kinds (Nodes) are unaffected.
+	// Empty means every namespace.
+	Namespace string
+	// Kinds limits the watched kinds (lower-case kind names, "service" for
+	// Services), as kubewatch's `resource` switches did. Nil means every kind
+	// a matcher reads.
+	Kinds map[string]bool
+	// Skip reports a change every matcher would discard (ConfigMaps in the
+	// excluded namespaces), so it is not encoded and matched for nothing.
+	Skip func(kind, namespace, name string) bool
+	// SyncWarnAfter is how long a kind may take to sync before a warning
+	// names it. Default 2 minutes.
+	SyncWarnAfter time.Duration
 }
 
 // Handles reports whether any matcher reads changes of this kind and
@@ -87,7 +103,7 @@ type Watcher struct {
 	mu      sync.Mutex
 	pending map[string]*pendingChanges
 
-	synced     []cache.InformerSynced
+	synced     []syncedKind
 	startFuncs []func(stop <-chan struct{})
 
 	shedSince atomic.Int64
@@ -101,6 +117,9 @@ func New(cfg Config, sink Sink, handles Handles, metrics Metrics, logger *slog.L
 	}
 	if cfg.MaxPending <= 0 {
 		cfg.MaxPending = 10000
+	}
+	if cfg.SyncWarnAfter <= 0 {
+		cfg.SyncWarnAfter = 2 * time.Minute
 	}
 	if cfg.StartTime.IsZero() {
 		cfg.StartTime = time.Now()
@@ -117,6 +136,11 @@ func New(cfg Config, sink Sink, handles Handles, metrics Metrics, logger *slog.L
 		queue:   workqueue.NewTyped[string](),
 		pending: map[string]*pendingChanges{},
 	}
+}
+
+type syncedKind struct {
+	kind   string
+	synced cache.InformerSynced
 }
 
 // source is one watched kind: kubewatch's `kind` and `apiVersion` strings for
@@ -153,9 +177,11 @@ func (w *Watcher) RegisterShared(f informers.SharedInformerFactory) {
 }
 
 // RegisterOwn watches the kinds only the matchers read, on a factory of the
-// watcher's own (ConfigMaps, Services, Ingresses), with OwnTransform applied.
+// watcher's own (ConfigMaps, Services, Ingresses), with OwnTransform applied
+// and limited to Config.Namespace.
 func (w *Watcher) RegisterOwn(cs kubernetes.Interface) {
-	f := informers.NewSharedInformerFactoryWithOptions(cs, 0, informers.WithTransform(OwnTransform))
+	f := informers.NewSharedInformerFactoryWithOptions(cs, 0,
+		informers.WithTransform(OwnTransform), informers.WithNamespace(w.cfg.Namespace))
 	w.register(
 		sourceDef{"ConfigMap", "v1", f.Core().V1().ConfigMaps().Informer},
 		sourceDef{"Service", "v1", f.Core().V1().Services().Informer},
@@ -181,11 +207,11 @@ func (w *Watcher) RegisterRollouts(ctx context.Context, cs kubernetes.Interface,
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if _, err := dyn.Resource(rolloutGVR).List(probeCtx, metav1.ListOptions{Limit: 1}); err != nil {
+	if _, err := dyn.Resource(rolloutGVR).Namespace(w.cfg.Namespace).List(probeCtx, metav1.ListOptions{Limit: 1}); err != nil {
 		w.logger.Warn("k8s watch: cannot list Argo Rollouts; not watching them", "err", err)
 		return false
 	}
-	f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, 0, "", nil)
+	f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, 0, w.cfg.Namespace, nil)
 	w.register(sourceDef{"Rollout", rolloutGVR.Version, func() cache.SharedIndexInformer {
 		inf := f.ForResource(rolloutGVR).Informer()
 		if err := inf.SetTransform(OwnTransform); err != nil {
@@ -198,6 +224,9 @@ func (w *Watcher) RegisterRollouts(ctx context.Context, cs kubernetes.Interface,
 }
 
 func (w *Watcher) handlesKind(kind string) bool {
+	if w.cfg.Kinds != nil && !w.cfg.Kinds[strings.ToLower(kind)] {
+		return false
+	}
 	for _, op := range []string{"create", "update", "delete"} {
 		if w.handles(kind, op) {
 			return true
@@ -223,7 +252,7 @@ func (w *Watcher) register(defs ...sourceDef) {
 			w.logger.Warn("k8s watch: handler not registered", "kind", s.kind, "err", err)
 			continue
 		}
-		w.synced = append(w.synced, s.informer.HasSynced)
+		w.synced = append(w.synced, syncedKind{s.kind, s.informer.HasSynced})
 	}
 }
 
@@ -303,6 +332,19 @@ func (w *Watcher) enqueue(s source, operation string, obj, old any) {
 		w.count(s.kind, OutcomeNoMatcher)
 		return
 	}
+	if m, err := meta.Accessor(obj); err == nil {
+		ns := m.GetNamespace()
+		// Shared informers are cluster-wide; this applies the namespace limit
+		// to them.
+		if w.cfg.Namespace != "" && ns != "" && ns != w.cfg.Namespace {
+			w.count(s.kind, OutcomeOutOfScope)
+			return
+		}
+		if w.cfg.Skip != nil && w.cfg.Skip(s.kind, ns, m.GetName()) {
+			w.count(s.kind, OutcomeSkipped)
+			return
+		}
+	}
 	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		return
@@ -328,13 +370,13 @@ func (w *Watcher) enqueue(s source, operation string, obj, old any) {
 	} else {
 		p.changes = append(p.changes, change{src: s, operation: operation, obj: obj, old: old})
 	}
-	size := len(w.pending)
+	if w.metrics != nil {
+		// Under the lock, so a later take() cannot be overwritten by this.
+		w.metrics.SetK8sWatchPending(len(w.pending))
+	}
 	w.mu.Unlock()
 
 	w.count(s.kind, outcome)
-	if w.metrics != nil {
-		w.metrics.SetK8sWatchPending(size)
-	}
 	// The queue holds each key once; a key added while a worker processes it
 	// is processed again afterwards, so nothing waiting is missed.
 	w.queue.Add(key)
@@ -355,8 +397,10 @@ func (w *Watcher) take(key string) []change {
 	return p.changes
 }
 
-// Run starts the informers, waits for them to sync, and matches changes until
-// ctx is done.
+// Run starts the informers and matches changes until ctx is done. Workers
+// start at once, not after every cache syncs: a kind that cannot be listed
+// (an RBAC gap) never syncs, and must not hold back the others' changes.
+// Objects from the initial lists are dropped as existing either way.
 func (w *Watcher) Run(ctx context.Context) error {
 	if len(w.synced) == 0 {
 		w.logger.Info("k8s watch: no kinds to watch")
@@ -366,10 +410,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	for _, start := range w.startFuncs {
 		start(ctx.Done())
 	}
-	if !cache.WaitForCacheSync(ctx.Done(), w.synced...) {
-		return fmt.Errorf("k8s watch: caches did not sync: %w", ctx.Err())
+	for _, k := range w.synced {
+		go w.reportSync(ctx, k)
 	}
-	w.logger.Info("k8s watch: caches synced", "informers", len(w.synced), "workers", w.cfg.Workers)
 
 	var wg sync.WaitGroup
 	for range w.cfg.Workers {
@@ -384,6 +427,25 @@ func (w *Watcher) Run(ctx context.Context) error {
 	w.queue.ShutDown()
 	wg.Wait()
 	return nil
+}
+
+// reportSync logs when a kind's cache syncs, and warns when it has not after
+// SyncWarnAfter: its changes are not seen until it does.
+func (w *Watcher) reportSync(ctx context.Context, k syncedKind) {
+	warnCtx, cancel := context.WithTimeout(ctx, w.cfg.SyncWarnAfter)
+	defer cancel()
+	if cache.WaitForCacheSync(warnCtx.Done(), k.synced) {
+		w.logger.Info("k8s watch: cache synced", "kind", k.kind)
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	w.logger.Warn("k8s watch: cache not synced; changes of this kind are not matched until it does (check the runner can list and watch it)",
+		"kind", k.kind, "after", w.cfg.SyncWarnAfter)
+	if cache.WaitForCacheSync(ctx.Done(), k.synced) {
+		w.logger.Info("k8s watch: cache synced", "kind", k.kind)
+	}
 }
 
 func (w *Watcher) processNext() bool {

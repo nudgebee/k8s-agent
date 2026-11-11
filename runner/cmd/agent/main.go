@@ -911,6 +911,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// One informer factory for discovery and the runner's own watch (when
 	// on), so the objects both read are cached once. With the watch on, the
 	// transform keeps the pod template fields the matchers diff.
+	// The watch feeds the trigger engine, which runs only with the HTTP
+	// listener and a backend to send Findings to. Without them the watch never
+	// starts, so the shared cache must not keep whole objects for it.
+	if cfg.K8sWatchEnabled && (cfg.HTTPListenAddr == "" || cfg.BackendEndpoint == "") {
+		logger.Warn("K8S_WATCH_ENABLED ignored: the trigger engine needs HTTP_LISTEN_ADDR and NUDGEBEE_ENDPOINT")
+		cfg.K8sWatchEnabled = false
+	}
 	var sharedFactory informers.SharedInformerFactory
 	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
 		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
@@ -1040,6 +1047,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				Workers:    cfg.K8sWatchWorkers,
 				MaxPending: cfg.K8sWatchMaxPending,
 				StartTime:  processStart,
+				Namespace:  cfg.K8sWatchNamespace,
+				Kinds:      kindSet(cfg.K8sWatchKinds),
+				Skip: func(kind, namespace, name string) bool {
+					return kind == "ConfigMap" && triggers.ConfigMapIgnored(namespace, name)
+				},
 			}, fwd, eng.Handles, mreg, logger)
 			kw.RegisterShared(sharedFactory)
 			kw.RegisterOwn(typedKube)
@@ -1829,4 +1841,17 @@ func installNamespace(cfg *config.Config) string {
 		return ns
 	}
 	return cfg.ScannerNamespace
+}
+
+// kindSet turns K8S_WATCH_KINDS into the watcher's kind filter; nil (unset)
+// means every kind.
+func kindSet(kinds []string) map[string]bool {
+	if kinds == nil {
+		return nil
+	}
+	m := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		m[k] = true
+	}
+	return m
 }

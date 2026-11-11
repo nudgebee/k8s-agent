@@ -272,3 +272,79 @@ func TestWatcher_WarnsOnShedAtMostOncePerInterval(t *testing.T) {
 		t.Errorf("shed warnings = %d; want 1 for a burst of three sheds\n%s", got, buf.String())
 	}
 }
+
+// kubewatch's `namespace` and `resource` settings carry over: other
+// namespaces and switched-off kinds are not matched; Nodes are cluster-scoped
+// and unaffected by the namespace.
+func TestWatcher_AppliesNamespaceKindsAndSkip(t *testing.T) {
+	m := &countingMetrics{}
+	w := New(Config{
+		Namespace: "app",
+		Kinds:     map[string]bool{"pod": true, "node": true},
+		Skip:      func(kind, ns, name string) bool { return name == "noisy" },
+	}, &recordingSink{}, updatesOnly, m, nil)
+	s := source{kind: "Pod", apiVersion: "v1"}
+
+	other := pod("web-0", "1", time.Now(), 0)
+	other.Namespace = "other"
+	newer := other.DeepCopy()
+	newer.ResourceVersion = "2"
+	w.onUpdate(s, other, newer)
+	w.onUpdate(s, pod("noisy", "1", time.Now(), 0), pod("noisy", "2", time.Now(), 1))
+	w.onUpdate(s, pod("web-0", "1", time.Now(), 0), pod("web-0", "2", time.Now(), 1))
+	w.onUpdate(source{kind: "Node", apiVersion: "v1"},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1", ResourceVersion: "1"}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1", ResourceVersion: "2"}})
+
+	if m.get("pod/"+OutcomeOutOfScope) != 1 || m.get("pod/"+OutcomeSkipped) != 1 ||
+		m.get("pod/"+OutcomeQueued) != 1 || m.get("node/"+OutcomeQueued) != 1 {
+		t.Errorf("outcomes = %v", m.n)
+	}
+	if w.handlesKind("Job") || !w.handlesKind("Pod") {
+		t.Error("Kinds not applied")
+	}
+}
+
+// A kind that never syncs (it cannot be listed) must not hold back the
+// changes of the others.
+func TestWatcher_UnsyncedKindDoesNotBlockOthers(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	f := informers.NewSharedInformerFactory(cs, 0)
+	sink := &recordingSink{}
+	w := New(Config{StartTime: time.Now().Add(-time.Hour), SyncWarnAfter: 50 * time.Millisecond}, sink, updatesOnly, nil, nil)
+	w.RegisterShared(f)
+	never := func() bool { return false }
+	w.synced = append(w.synced, syncedKind{"Blocked", never})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+	waitFor(t, func() bool { return f.Core().V1().Pods().Informer().HasSynced() })
+
+	p := pod("web-0", "1", time.Now().Add(-2*time.Hour), 0)
+	if _, err := cs.CoreV1().Pods("app").Create(ctx, p, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p.ResourceVersion = "2"
+	p.Status.ContainerStatuses[0].RestartCount = 4
+	if _, err := cs.CoreV1().Pods("app").UpdateStatus(ctx, p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(sink.snapshot()) == 1 })
+}
+
+func TestWatcher_PendingGaugeSettlesAtZero(t *testing.T) {
+	g := &gaugeMetrics{}
+	w := New(Config{}, &recordingSink{}, updatesOnly, g, nil)
+	s := source{kind: "Pod", apiVersion: "v1"}
+	w.onUpdate(s, pod("a", "1", time.Now(), 0), pod("a", "2", time.Now(), 1))
+	w.take("Pod/app/a")
+	if g.last.Load() != 0 {
+		t.Errorf("pending gauge = %d after the only object was taken", g.last.Load())
+	}
+}
+
+type gaugeMetrics struct{ last atomic.Int64 }
+
+func (g *gaugeMetrics) OnK8sWatchEvent(string, string) {}
+func (g *gaugeMetrics) SetK8sWatchPending(n int)       { g.last.Store(int64(n)) }
