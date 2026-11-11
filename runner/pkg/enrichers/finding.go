@@ -62,11 +62,17 @@ func JSONBlock(payload any) (Block, error) {
 	if err != nil {
 		return nil, err
 	}
+	return JSONBlockRaw(b), nil
+}
+
+// JSONBlockRaw is JSONBlock for a payload that is already encoded, so a large
+// one is not decoded into maps only to be encoded again.
+func JSONBlockRaw(encoded []byte) Block {
 	return Block{
 		"type":            "json",
-		"data":            string(b),
+		"data":            string(encoded),
 		"additional_info": nil,
-	}, nil
+	}
 }
 
 // FileBlock builds a FileBlock evidence element.

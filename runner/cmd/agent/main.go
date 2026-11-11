@@ -565,6 +565,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	if cfg.KubeEnabled {
 		kc := kube.NewClient(dynamicKube, typedKube)
+		kc.MaxResultBytes = cfg.GetResourceMaxBytes
+		kc.SetUnscopedListLimit(cfg.GetResourceUnscopedConcurrency)
 		// AllowWrite lifts the read-only verb allowlist; gated by the chart's
 		// runner.enableWritePermissions, which also grants the write RBAC.
 		kx := &kube.KubectlExecutor{AllowWrite: cfg.KubectlAllowWrite} // uses kubectl on PATH
