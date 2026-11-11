@@ -119,7 +119,7 @@ func New() *Registry {
 	reg.K8sWatchEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "nudgebee_agent",
 		Name:      "k8s_watch_events_total",
-		Help:      "Kubernetes changes seen by the runner's own watch, by kind and outcome (queued, coalesced, shed, dropped_resync, dropped_existing, dropped_no_matcher, encode_failed). Match outcomes are in kubewatch_events_total.",
+		Help:      "Kubernetes changes seen by the runner's own watch, by kind and outcome (queued, coalesced, shed, dropped_existing, dropped_no_matcher, encode_failed; unchanged also counts relisted updates, which are queued too). Match outcomes are in kubewatch_events_total.",
 	}, []string{"kind", "outcome"})
 	reg.K8sWatchPending = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "nudgebee_agent",

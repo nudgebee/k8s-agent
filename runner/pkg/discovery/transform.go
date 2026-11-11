@@ -81,14 +81,12 @@ func discoveryTransform(obj any) (any, error) {
 
 // TransformFunc returns the transform for the informer factory discovery
 // runs on. With forMatchers false it is discoveryTransform. With it true the
-// factory is shared with the trigger matchers (pkg/k8swatch), whose config-
-// change matcher diffs whole pod templates and whose evidence readers read
-// them, so the transform keeps more:
-//
-//   - Deployments, StatefulSets, DaemonSets keep their pod template whole
-//     (only managedFields goes). These are few next to Pods.
-//   - Pods keep init and ephemeral containers, trimmed like regular ones: the
-//     OOM matcher reads their memory requests and limits.
+// factory is shared with the trigger matchers (pkg/k8swatch), which ship the
+// cached objects as Finding evidence. Those evidence objects must be exactly
+// what kubewatch sent, and kubewatch only strips managedFields, so the kinds
+// the matchers read (Pods, Jobs, Nodes, Deployments, StatefulSets,
+// DaemonSets) lose managedFields and nothing else. Other kinds keep
+// discoveryTransform.
 //
 // Discovery's converters read named fields only, so its output is the same
 // either way.
@@ -97,47 +95,13 @@ func TransformFunc(forMatchers bool) func(any) (any, error) {
 		return discoveryTransform
 	}
 	return func(obj any) (any, error) {
-		switch o := obj.(type) {
-		case *appsv1.Deployment:
-			trimMeta(&o.ObjectMeta)
-			o.Spec.Template.ManagedFields = nil
-			return o, nil
-		case *appsv1.StatefulSet:
-			trimMeta(&o.ObjectMeta)
-			o.Spec.Template.ManagedFields = nil
-			return o, nil
-		case *appsv1.DaemonSet:
-			trimMeta(&o.ObjectMeta)
-			o.Spec.Template.ManagedFields = nil
-			return o, nil
-		case *corev1.Pod:
-			init, eph := o.Spec.InitContainers, o.Spec.EphemeralContainers
-			out, err := discoveryTransform(o)
-			o.Spec.InitContainers = init
-			for i := range o.Spec.InitContainers {
-				trimContainer(&o.Spec.InitContainers[i])
-			}
-			o.Spec.EphemeralContainers = eph
-			for i := range o.Spec.EphemeralContainers {
-				trimEphemeralContainer(&o.Spec.EphemeralContainers[i])
-			}
-			return out, err
+		switch obj.(type) {
+		case *corev1.Pod, *batchv1.Job, *corev1.Node, *appsv1.Deployment, *appsv1.StatefulSet, *appsv1.DaemonSet:
+			obj.(metav1.Object).SetManagedFields(nil)
+			return obj, nil
 		}
 		return discoveryTransform(obj)
 	}
-}
-
-// trimEphemeralContainer is trimContainer for an ephemeral container, which
-// carries the same fields under a different type.
-func trimEphemeralContainer(c *corev1.EphemeralContainer) {
-	c.Env = nil
-	c.EnvFrom = nil
-	c.VolumeMounts = nil
-	c.VolumeDevices = nil
-	c.LivenessProbe = nil
-	c.ReadinessProbe = nil
-	c.StartupProbe = nil
-	c.Lifecycle = nil
 }
 
 // trimMeta drops the metadata fields no converter reads. ManagedFields is the

@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
@@ -208,83 +208,68 @@ func fatTemplate() corev1.PodTemplateSpec {
 	}
 }
 
-// With the matchers sharing the factory, the transform keeps whole pod
-// templates on workloads and trimmed init containers on pods — and discovery
-// still emits exactly what it emits with its own transform.
-func TestTransformForMatchers_KeepsWhatMatchersReadAndDiscoveryOutputIsUnchanged(t *testing.T) {
+// With the watch on, the kinds the matchers read are cached as kubewatch
+// cached them (managedFields stripped, nothing else), and discovery's output
+// from them is the same as from the trimmed objects.
+func TestTransformForMatchers_KeepsObjectsWholeAndDiscoveryOutputIsUnchanged(t *testing.T) {
 	forMatchers := TransformFunc(true)
-	meta := metav1.ObjectMeta{Name: "api", Namespace: "ns", ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "x"}}}
+	meta := metav1.ObjectMeta{Name: "api", Namespace: "ns", ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "x"}},
+		Annotations: map[string]string{"a": "b"}, Labels: map[string]string{"app": "api"}}
 	sel := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}
+	pod := fatPod()
+	pod.ManagedFields = meta.ManagedFields
+	pod.Spec.InitContainers = []corev1.Container{{Name: "init", Image: "init:1", Env: []corev1.EnvVar{{Name: "A", Value: "b"}}}}
 
-	type workload struct {
+	cases := []struct {
 		name    string
-		obj     func() any
+		obj     func() metav1.Object
 		convert func(any) (any, bool)
-		tmpl    func(any) corev1.PodTemplateSpec
-	}
-	cases := []workload{
-		{"deployment",
-			func() any {
-				return &appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Replicas: ptr.To(int32(2)), Selector: sel, Template: fatTemplate()}}
-			},
-			convertDeployment,
-			func(o any) corev1.PodTemplateSpec { return o.(*appsv1.Deployment).Spec.Template }},
-		{"statefulset",
-			func() any {
-				return &appsv1.StatefulSet{ObjectMeta: meta, Spec: appsv1.StatefulSetSpec{Replicas: ptr.To(int32(1)), Selector: sel, Template: fatTemplate()}}
-			},
-			convertStatefulSet,
-			func(o any) corev1.PodTemplateSpec { return o.(*appsv1.StatefulSet).Spec.Template }},
-		{"daemonset",
-			func() any {
-				return &appsv1.DaemonSet{ObjectMeta: meta, Spec: appsv1.DaemonSetSpec{Selector: sel, Template: fatTemplate()}}
-			},
-			convertDaemonSet,
-			func(o any) corev1.PodTemplateSpec { return o.(*appsv1.DaemonSet).Spec.Template }},
+	}{
+		{"pod", func() metav1.Object { return pod.DeepCopy() }, convertPod},
+		{"job", func() metav1.Object {
+			return &batchv1.Job{ObjectMeta: meta, Spec: batchv1.JobSpec{Template: fatTemplate()},
+				Status: batchv1.JobStatus{Failed: 1}}
+		}, convertJob},
+		{"node", func() metav1.Object {
+			return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1", ManagedFields: meta.ManagedFields, Labels: meta.Labels},
+				Status: corev1.NodeStatus{
+					Images:          []corev1.ContainerImage{{Names: []string{"web:1"}, SizeBytes: 10}},
+					VolumesInUse:    []corev1.UniqueVolumeName{"v"},
+					VolumesAttached: []corev1.AttachedVolume{{Name: "v", DevicePath: "/dev/x"}},
+					Conditions:      []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+				}}
+		}, convertNode},
+		{"deployment", func() metav1.Object {
+			return &appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Replicas: ptr.To(int32(2)), Selector: sel, Template: fatTemplate()}}
+		}, convertDeployment},
+		{"statefulset", func() metav1.Object {
+			return &appsv1.StatefulSet{ObjectMeta: meta, Spec: appsv1.StatefulSetSpec{Replicas: ptr.To(int32(1)), Selector: sel, Template: fatTemplate()}}
+		}, convertStatefulSet},
+		{"daemonset", func() metav1.Object {
+			return &appsv1.DaemonSet{ObjectMeta: meta, Spec: appsv1.DaemonSetSpec{Selector: sel, Template: fatTemplate()}}
+		}, convertDaemonSet},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			want := tc.obj()
+			want.SetManagedFields(nil)
 			kept, err := forMatchers(tc.obj())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(tc.tmpl(kept), fatTemplate()) {
-				t.Error("pod template not kept whole")
+			if !reflect.DeepEqual(kept, want) {
+				t.Error("object changed beyond dropping managedFields")
 			}
 			trimmed, _ := discoveryTransform(tc.obj())
-			want, _ := tc.convert(trimmed)
-			got, _ := tc.convert(kept)
-			stripVolatile(want)
-			stripVolatile(got)
-			if !reflect.DeepEqual(want, got) {
-				t.Errorf("discovery output changed:\n want %+v\n got  %+v", want, got)
+			wantOut, _ := tc.convert(trimmed)
+			gotOut, _ := tc.convert(kept)
+			stripVolatile(wantOut)
+			stripVolatile(gotOut)
+			if !reflect.DeepEqual(wantOut, gotOut) {
+				t.Errorf("discovery output changed:\n want %+v\n got  %+v", wantOut, gotOut)
 			}
 		})
 	}
-
-	t.Run("pod", func(t *testing.T) {
-		p := fatPod()
-		p.Spec.InitContainers = []corev1.Container{{
-			Name: "init", Image: "init:1", Env: []corev1.EnvVar{{Name: "A", Value: "b"}},
-			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")}},
-		}}
-		kept, _ := forMatchers(p.DeepCopy())
-		kp := kept.(*corev1.Pod)
-		if len(kp.Spec.InitContainers) != 1 || kp.Spec.InitContainers[0].Resources.Limits.Memory().String() != "64Mi" {
-			t.Error("init container memory limit not kept (the OOM matcher reads it)")
-		}
-		if kp.Spec.InitContainers[0].Env != nil || kp.Spec.Containers[0].Env != nil || kp.ManagedFields != nil {
-			t.Error("pod not trimmed like discovery trims it")
-		}
-		trimmed, _ := discoveryTransform(p.DeepCopy())
-		want, _ := convertPod(trimmed)
-		got, _ := convertPod(kept)
-		stripVolatile(want)
-		stripVolatile(got)
-		if !reflect.DeepEqual(want, got) {
-			t.Errorf("discovery pod output changed:\n want %+v\n got  %+v", want, got)
-		}
-	})
 
 	t.Run("off is discoveryTransform", func(t *testing.T) {
 		d := &appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Selector: sel, Template: fatTemplate()}}

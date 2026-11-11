@@ -44,10 +44,13 @@ type Metrics interface {
 
 // Outcomes for Metrics.OnK8sWatchEvent.
 const (
-	OutcomeQueued       = "queued"         // queued for matching
-	OutcomeCoalesced    = "coalesced"      // merged into an update already waiting for the same object
-	OutcomeShed         = "shed"           // MaxPending objects already waiting; dropped
-	OutcomeResync       = "dropped_resync" // update with an unchanged resourceVersion
+	OutcomeQueued    = "queued"    // queued for matching
+	OutcomeCoalesced = "coalesced" // merged into an update already waiting for the same object
+	OutcomeShed      = "shed"      // MaxPending objects already waiting; dropped
+	// An update with an unchanged resourceVersion: a relist after a dropped
+	// watch replays every object as one. Counted here and again under its
+	// queue outcome, since it is matched like any other update.
+	OutcomeUnchanged    = "unchanged"
 	OutcomeBeforeStart  = "dropped_existing"
 	OutcomeNoMatcher    = "dropped_no_matcher" // no matcher reads this kind and operation
 	OutcomeEncodeFailed = "encode_failed"
@@ -245,9 +248,10 @@ func (w *Watcher) onUpdate(s source, oldObj, newObj any) {
 		return
 	}
 	// A relist after a dropped watch replays unchanged objects as updates.
+	// kubewatch sent those to the matchers, and the crash-loop recovery reset
+	// and rate limits are tuned on that, so they are matched too.
 	if om.GetResourceVersion() == nm.GetResourceVersion() {
-		w.count(s.kind, OutcomeResync)
-		return
+		w.count(s.kind, OutcomeUnchanged)
 	}
 	w.enqueue(s, "update", newObj, oldObj)
 }

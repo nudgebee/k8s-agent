@@ -111,7 +111,7 @@ func TestEncode_MatchesKubewatchBytes(t *testing.T) {
 	}
 }
 
-func TestWatcher_DropsExistingObjectsAndUnchangedUpdates(t *testing.T) {
+func TestWatcher_DropsExistingObjectsAndQueuesUnchangedUpdates(t *testing.T) {
 	start := time.Now()
 	m := &countingMetrics{}
 	w := New(Config{StartTime: start}, &recordingSink{}, func(string, string) bool { return true }, m, nil)
@@ -126,10 +126,11 @@ func TestWatcher_DropsExistingObjectsAndUnchangedUpdates(t *testing.T) {
 		t.Errorf("queued = %d; want 1 (the pod created after start)", got)
 	}
 
+	// An unchanged update (a relist replay) is matched, as kubewatch did.
 	p := pod("web-0", "7", start, 0)
 	w.onUpdate(s, p, p.DeepCopy())
-	if got := m.get("pod/" + OutcomeResync); got != 1 {
-		t.Errorf("dropped_resync = %d; want 1", got)
+	if m.get("pod/"+OutcomeUnchanged) != 1 || m.get("pod/"+OutcomeQueued) != 2 {
+		t.Errorf("outcomes = %v; want the unchanged update counted and queued", m.n)
 	}
 }
 
@@ -220,8 +221,8 @@ func TestWatcher_DeliversUpdatesAndNotResyncs(t *testing.T) {
 	if restarts(c.data["obj"]) != float64(3) || restarts(c.data["oldObj"]) != float64(0) {
 		t.Errorf("obj/oldObj restarts = %v/%v; want 3/0", restarts(c.data["obj"]), restarts(c.data["oldObj"]))
 	}
-	if m.get("pod/"+OutcomeResync) != 0 {
-		t.Errorf("dropped_resync = %d; resyncs should never reach the watcher's handler", m.get("pod/"+OutcomeResync))
+	if m.get("pod/"+OutcomeUnchanged) != 0 {
+		t.Errorf("unchanged = %d; the factory's resyncs should never reach the watcher's handler", m.get("pod/"+OutcomeUnchanged))
 	}
 	if m.get("pod/"+OutcomeBeforeStart) != 1 {
 		t.Error("the pod from the initial list should be dropped as existing")
