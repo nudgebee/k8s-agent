@@ -14,7 +14,7 @@
 
 # golang 1.27.3: 1.27.1 builds carry the stdlib CVEs GO-2026-6612 (critical) and
 # GO-2026-6603/6605/6607/6608/6610/6611/6613/6617 (high), fixed in 1.27.2.
-FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 WORKDIR /src
 
 ARG VERSION=dev
@@ -46,7 +46,7 @@ RUN go build -tags timetzdata \
 # `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
 # Pinned to BUILDPLATFORM: Go cross-compiles, so there is no reason to run this
 # emulated on the arm64 leg.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS kubectl
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS kubectl
 ARG TARGETARCH
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 ARG KUBECTL_VERSION=v1.36.6
