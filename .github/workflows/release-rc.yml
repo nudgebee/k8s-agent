@@ -11,7 +11,9 @@ jobs:
     permissions:
       contents: write
       id-token: write # keyless cosign signing of chart packages
-      packages: write # read GHCR tags to pin the runner image, push the chart
+      packages: read # read GHCR tags to pin the runner image
+    outputs:
+      has_packages: ${{ steps.stage.outputs.has_packages }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -203,18 +205,55 @@ jobs:
             gh release upload "$tag" "${pkg}.sigstore.json" --clobber
           done
 
-      # Runs after the classic release so a registry outage cannot block it.
-      # Recover a failure here with publish-chart-oci.yml.
-      - name: Log in to GHCR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-
-      - name: Publish chart packages to OCI
-        env:
-          COSIGN_YES: "true"
+      # Hand the packages to publish-oci, the only job allowed to push to GHCR.
+      # Copied out of .cr-release-packages because upload-artifact skips hidden
+      # directories.
+      - name: Stage chart packages for the OCI job
+        id: stage
         run: |
           shopt -s nullglob
-          .github/scripts/publish-chart-oci.sh .cr-release-packages/*.tgz
+          pkgs=(.cr-release-packages/*.tgz)
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "has_packages=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p oci-packages
+          cp "${pkgs[@]}" oci-packages/
+          echo "has_packages=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload chart packages
+        if: steps.stage.outputs.has_packages == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart-packages
+          path: oci-packages/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  # A job of its own so that only it holds packages:write: the job above runs
+  # chart-releaser and the image-pin script, and its token cannot push to GHCR,
+  # where the runner image also lives. It runs after the classic release, so a
+  # registry outage cannot block that. Recover a failure here with
+  # publish-chart-oci.yml.
+  publish-oci:
+    needs: release-rc
+    if: needs.release-rc.outputs.has_packages == 'true'
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing of the OCI artifact
+      packages: write # push the chart to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download chart packages
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: chart-packages
+          path: dist
+
+      - name: Publish chart packages to OCI
+        uses: ./.github/actions/publish-chart-oci
+        with:
+          packages: dist/*.tgz

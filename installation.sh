@@ -48,10 +48,10 @@ usage() {
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
   echo "  -C <storage_class>    StorageClass name for every PVC this script creates"
-  echo "  -R <oci_chart_ref>    Install from an OCI registry instead of the Helm repo (Helm 3.8+), e.g. oci://ghcr.io/nudgebee/charts/nudgebee-agent"
   echo "                        (ClickHouse, and Prometheus/Loki when installed here)."
   echo "                        Defaults to the cluster default StorageClass; required"
   echo "                        when the cluster has none. A name only, not '-'."
+  echo "  -R <oci_chart_ref>    Install from an OCI registry instead of the Helm repo (Helm 3.8+), e.g. oci://ghcr.io/nudgebee/charts/nudgebee-agent"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret -C gp3"
   exit 1
