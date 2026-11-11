@@ -7,7 +7,6 @@ k8s_context=""
 openshift_enable=""
 additional_secret=""
 prometheus_url=""
-opencost_service_url=""
 namespace="nudgebee-agent"
 agent_name="nudgebee-agent"
 env="prod"
@@ -18,7 +17,6 @@ prometheus_org_id=""
 relay_address=""
 relay_signing_public_key=""
 collector_endpoint=""
-disable_opencost=""
 disable_otel=""
 disable_prometheus_stack=""
 storage_class=""
@@ -43,7 +41,6 @@ usage() {
   echo "  -w <relay_address>    WebSocket relay address (self-hosted)"
   echo "  -S <relay_signing_public_key> Relay Ed25519 public key (authorizes UI workload mutations)"
   echo "  -c <collector_endpoint> Collector endpoint URL (self-hosted)"
-  echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
   echo "  -C <storage_class>    StorageClass name for every PVC this script creates"
@@ -105,12 +102,13 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
       echo "Error: -i is not supported. To pull from a private registry, pass a values file with -f that" >&2
       echo "points every ghcr.io image at it: runner.image.repository, runner.profilerImage," >&2
       echo "kubewatch.image.repository, nodeAgent.image.repository, opentelemetry-collector.image.repository," >&2
-      echo "clickhouse.image.registry and opencost.opencost.exporter.image.registry." >&2
+      echo "and clickhouse.image.registry." >&2
       echo "List them for your chart version with: helm show values nudgebee-agent/nudgebee-agent | grep ghcr.io" >&2
       exit 1
       ;;
     x)
-      disable_opencost="$OPTARG"
+      # Accepted and ignored: the agent no longer installs OpenCost, but install
+      # commands generated before that still pass -x true.
       ;;
     t)
       disable_otel="$OPTARG"
@@ -136,7 +134,7 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
 done
 
 # Boolean flags take true or false. Anything else used to be read silently as
-# true (-d, -o) or false (-x, -t, -g).
+# true (-d, -o) or false (-t, -g).
 check_bool_flag() {
   if [ -n "$2" ] && [ "$2" != "true" ] && [ "$2" != "false" ]; then
     echo "Error: -$1 takes true or false, got '$2'." >&2
@@ -145,7 +143,6 @@ check_bool_flag() {
 }
 check_bool_flag d "$disable_node_agent"
 check_bool_flag o "$openshift_enable"
-check_bool_flag x "$disable_opencost"
 check_bool_flag t "$disable_otel"
 check_bool_flag g "$disable_prometheus_stack"
 
@@ -393,7 +390,6 @@ helm_args=(
 if [ -n "$prometheus_url" ]; then
   helm_args+=(
     --set "globalConfig.prometheus_url=$prometheus_url"
-    --set "opencost.opencost.prometheus.external.url=$prometheus_url"
   )
 fi
 
@@ -445,7 +441,6 @@ if [ -n "$prometheus_org_id" ]; then
   prometheus_org_id_args=(
     --set "globalConfig.prometheus_headers=X-Scope-OrgID: $prometheus_org_id"
     --set "globalConfig.alertmanager_headers=X-Scope-OrgID: $prometheus_org_id"
-    --set "opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
   )
 fi
 
@@ -464,11 +459,6 @@ fi
 collector_endpoint_args=()
 if [ -n "$collector_endpoint" ]; then
   collector_endpoint_args=(--set "runner.nudgebee.endpoint=$collector_endpoint")
-fi
-
-disable_opencost_args=()
-if [ "$disable_opencost" == "true" ]; then
-  disable_opencost_args=(--set "opencost.enabled=false")
 fi
 
 disable_otel_args=()
@@ -516,7 +506,6 @@ helm_args+=(
   "${relay_address_args[@]}"
   "${relay_signing_public_key_args[@]}"
   "${collector_endpoint_args[@]}"
-  "${disable_opencost_args[@]}"
   "${disable_otel_args[@]}"
   "${disable_prometheus_stack_args[@]}"
   "${storage_class_args[@]}"

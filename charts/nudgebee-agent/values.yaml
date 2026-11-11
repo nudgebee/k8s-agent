@@ -8,9 +8,6 @@ global:
   # default StorageClass, set to a name (e.g. "gp3", "managed-csi") on clusters
   # that have no default, or to "-" to disable dynamic provisioning and bind a
   # pre-created PV. When set, this wins over `clickhouse.persistence.storageClass`.
-  # Helm propagates this to every subchart, but only subcharts that read it act
-  # on it — the OpenCost one does not, so if you enable its PVC set
-  # `opencost.opencost.exporter.persistence.storageClass` too.
   storageClass: ""
 enablePrometheusStack: true
 # Labels stamped onto the PrometheusRule, ServiceMonitor and PodMonitor this chart ships,
@@ -493,37 +490,6 @@ nodeAgent:
   env:
     - name: SENSITIVE_HEADERS
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
-# OpenCost is disabled by default: cost is computed centrally on the server side.
-# With opencost.enabled=false the agent ships no in-cluster OpenCost AND the runner
-# stops discovering/polling cost (see OPENCOST_ENABLED), so the server detects cost
-# is off and computes this cluster's allocations centrally (reaching its Prometheus
-# via the relay). To run OpenCost per-cluster in the agent, set
-# `--set opencost.enabled=true`.
-opencost:
-  enabled: false
-  nameOverride: ""
-  fullnameOverride: ""
-  opencost:
-    exporter:
-      image:
-        registry: ghcr.io
-        repository: nudgebee/opencost
-        tag: 1.114.0
-    prometheus:
-      external:
-        url: ""
-        enabled: true
-      internal:
-        enabled: false
-      serviceMonitor:
-        enabled: true
-      defaultRules:
-        create: true
-    service:
-      labels:
-        app: opencost
-    ui:
-      enabled: false
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:

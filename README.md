@@ -15,7 +15,6 @@ Helm chart for the NudgeBee Kubernetes agent. The agent runs in your cluster, co
 | `runner` | Connects to the NudgeBee backend over WebSocket; executes diagnostic and remediation actions in-cluster (source: [`runner/`](runner/)) |
 | `kubewatch` (forwarder) | Streams Kubernetes resource changes to the runner |
 | `node-agent` (DaemonSet) | Per-node logs, profiles, and traces collector (eBPF-based) |
-| `opencost` (subchart) | Kubernetes cost allocation metrics |
 | `opentelemetry-collector` (subchart) | Receives OTLP signals from `node-agent` and exports to ClickHouse |
 | `clickhouse` (StatefulSet) | Local store for traces / logs / metrics (7-day TTL by default), on the official ClickHouse image |
 | Prometheus rules / ServiceMonitors | Default alerting + scrape config for `kube-prometheus-stack` users |
@@ -181,10 +180,8 @@ runner:
 global:
   storageClass: ""
 
-# Subcharts can be disabled if not needed. ClickHouse is installed together
-# with the collector.
-opencost:
-  enabled: true
+# The collector subchart can be disabled if not needed. ClickHouse is installed
+# together with the collector.
 opentelemetry-collector:
   enabled: true
 ```
@@ -236,14 +233,6 @@ it on an already-installed release only affects PVCs created afterwards — dele
 the old PVC (losing the local traces/logs, which have a 7-day TTL) to move
 ClickHouse to a different class.
 
-`global.storageClass` is a Helm convention, not a guarantee: it reaches a
-subchart's PVCs only if that subchart reads it. The chart's own ClickHouse
-does. The OpenCost subchart does **not** — it writes
-`storageClassName` unconditionally, so leaving its class unset means
-`storageClassName: ""`, which *disables* dynamic provisioning rather than falling
-back to the cluster default. Its PVC is off by default; if you turn it on, set
-`opencost.opencost.exporter.persistence.storageClass` explicitly.
-
 The stacks `installation.sh` installs alongside the agent claim volumes of their
 own, and `-C` sets the class on those too:
 
@@ -283,7 +272,6 @@ By default, the agent forwards:
 
 - Kubernetes object state (deployments, pods, services, etc.) and events
 - Cluster and node metrics (via Prometheus scrape)
-- OpenCost allocation data
 - Logs, traces, and profiles from `node-agent` (configurable; sensitive HTTP headers are redacted via the `SENSITIVE_HEADERS` env var)
 
 Secrets are explicitly **not** watched by the kubewatch forwarder (`kubewatch.config.resource.secret: false`).

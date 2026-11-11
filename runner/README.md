@@ -101,7 +101,7 @@ Actions across 8 groups:
 | Control plane | `ping`, `echo`, `health`, `refresh_playbook` | 4 |
 | Discovery | Pod, Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, CronJob, Node, Namespace, HelmRelease | 10 resource types |
 
-Plus background subsystems: AlertManager forwarder, OpenCost publisher, task poller, Prometheus `/metrics`.
+Plus background subsystems: AlertManager forwarder, task poller, Prometheus `/metrics`.
 
 [Full action list with parameters →](docs/actions.md)
 
