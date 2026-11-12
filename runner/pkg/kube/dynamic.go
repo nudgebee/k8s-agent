@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"golang.org/x/sync/semaphore"
@@ -220,12 +221,25 @@ func (c *Client) eachResult(ctx context.Context, p GetParams, fn func(map[string
 		err := c.eachItem(ctx, schema.GroupVersionResource{
 			Group: p.Group, Version: p.Version, Resource: t,
 		}, p, fn)
-		// Tolerate a type whose list fails when caller asked for multiple types
-		// — it contributed nothing; continue. Return error otherwise. An error
-		// from fn (a result over the size cap) is never tolerated.
-		if err != nil && (len(types) == 1 || errors.Is(err, ErrResultTooLarge) || ctx.Err() != nil) {
-			return err
+		if err == nil {
+			continue
 		}
+		// With several types, one the cluster does not serve (a CRD that is not
+		// installed: the API server answers 404) contributed nothing and is
+		// skipped. Any other failure — forbidden, a timeout, a server error —
+		// fails the request: the caller would otherwise read the other types as
+		// the whole answer, as RBAC checks reading "roles,rolebindings" did with
+		// rolebindings missing. An error from fn (a result over the size cap) is
+		// never tolerated.
+		if len(types) > 1 && apierrors.IsNotFound(err) && ctx.Err() == nil {
+			slog.Debug("kube: resource type not served, skipping it", "resource", t, "group", p.Group, "version", p.Version)
+			continue
+		}
+		if len(types) > 1 {
+			slog.Warn("kube: listing one of several resource types failed, failing the request",
+				"resource", t, "resource_types", p.ResourceType, "err", err)
+		}
+		return err
 	}
 	return nil
 }

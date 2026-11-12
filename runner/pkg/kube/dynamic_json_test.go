@@ -87,14 +87,15 @@ func TestGetResourceJSON_FailsOverTheCapRatherThanTruncating(t *testing.T) {
 	}
 }
 
-// With several types asked for, one whose list fails is left out and the rest
-// still come back.
-func TestGetResourceJSON_SkipsATypeThatFailsWhenSeveralAreAsked(t *testing.T) {
+// With several types asked for, one the cluster does not serve (a CRD that is
+// not installed, which the API server answers with 404) is left out and the
+// rest still come back.
+func TestGetResourceJSON_SkipsATypeTheClusterDoesNotServe(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	dyn := dynamicfake.NewSimpleDynamicClient(scheme, newPod("keep", "app"))
 	dyn.PrependReactor("list", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewInternalError(errors.New("etcd went away"))
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "")
 	})
 	c := NewClient(dyn, nil)
 
@@ -109,8 +110,34 @@ func TestGetResourceJSON_SkipsATypeThatFailsWhenSeveralAreAsked(t *testing.T) {
 	if len(items) != 1 || items[0]["metadata"].(map[string]any)["name"] != "keep" {
 		t.Errorf("items = %s; want only the pod", got)
 	}
-	if _, err := c.GetResourceJSON(context.Background(), GetParams{Version: "v1", ResourceType: "configmaps"}); err == nil {
-		t.Error("a single failing type returned no error")
+}
+
+// Any other failure of one of several types fails the request: returning the
+// rest as the whole answer is how an RBAC check reading "roles,rolebindings"
+// passed with rolebindings forbidden.
+func TestGetResourceJSON_FailsWhenOneOfSeveralTypesFails(t *testing.T) {
+	for name, listErr := range map[string]error{
+		"forbidden":    apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "", errors.New("no list")),
+		"server error": apierrors.NewInternalError(errors.New("etcd went away")),
+		"timeout":      apierrors.NewTimeoutError("slow", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+			dyn := dynamicfake.NewSimpleDynamicClient(scheme, newPod("keep", "app"))
+			dyn.PrependReactor("list", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, listErr
+			})
+			c := NewClient(dyn, nil)
+
+			got, err := c.GetResourceJSON(context.Background(), GetParams{Version: "v1", ResourceType: "pods,configmaps"})
+			if err == nil {
+				t.Fatalf("got %s and no error; want the configmaps failure reported", got)
+			}
+			if !strings.Contains(err.Error(), "configmaps") {
+				t.Errorf("err = %v; want it to name the type that failed", err)
+			}
+		})
 	}
 }
 

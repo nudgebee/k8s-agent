@@ -2,9 +2,11 @@ package servicemap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -172,10 +174,13 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 
 	// ClickHouse is read over the same window the PromQL $RANGE spans.
 	start = end.Add(-window)
+	var failed queryFailures
 	fetch := func(ctx context.Context, keys map[string]string) map[string][]promResult {
-		return s.fetchProm(ctx, keys, endStr, func(q string) string {
+		metrics, bad := s.fetchProm(ctx, keys, endStr, func(q string) string {
 			return expandPlaceholders(q, rangeStr, srcFilter, dstFilter, podFilter, nsFilter, clusterFilter)
 		})
+		failed.add(bad)
+		return metrics
 	}
 
 	var metrics map[string][]promResult
@@ -187,6 +192,9 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if err := failed.err(s.logger()); err != nil {
+			return nil, err
+		}
 		apps := render(build(metrics))
 		s.maybeShadow(start, end, window, p, kubeKeys(metrics), apps)
 		return apps, nil
@@ -196,6 +204,9 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 	// Queries cut short by the caller's deadline are dropped, so the map would
 	// be empty or partial; report that instead of returning it as "no edges".
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := failed.err(s.logger()); err != nil {
 		return nil, err
 	}
 	return render(build(metrics)), nil
@@ -242,8 +253,9 @@ func (s *Service) fetchSummary(ctx context.Context, start, end time.Time, p Filt
 }
 
 // fetchProm runs the given queries in parallel, at most MaxParallel at a time.
-// A query that fails is left out rather than failing the whole map.
-func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, endStr string, expand func(string) string) map[string][]promResult {
+// A query that fails is left out of the result and its key returned in failed;
+// Build decides whether the map can be drawn without it.
+func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, endStr string, expand func(string) string) (metrics map[string][]promResult, failed []string) {
 	type fetchResult struct {
 		key  string
 		data []promResult
@@ -279,16 +291,71 @@ func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, en
 	wg.Wait()
 	close(resultsCh)
 
-	metrics := map[string][]promResult{}
+	metrics = map[string][]promResult{}
 	for r := range resultsCh {
 		if r.err != nil {
-			// Don't fail the whole map for one bad query — log via the
-			// caller. Continue with partial data.
+			s.logger().Warn("service map: prometheus query failed", "key", r.key, "err", r.err)
+			failed = append(failed, r.key)
 			continue
 		}
 		metrics[r.key] = r.data
 	}
-	return metrics
+	return metrics, failed
+}
+
+// optionalQueries only decorate applications that the other queries already
+// place: pod labels and container health. Without them the map is still right,
+// just less detailed, so their failure is logged and the map is drawn anyway.
+var optionalQueries = map[string]bool{
+	"kube_pod_labels":           true,
+	"container_oom_kills_total": true,
+	"container_restarts":        true,
+	"container_throttled_time":  true,
+	"container_volume_size":     true,
+	"container_volume_used":     true,
+}
+
+// errQueriesFailed is Build's error when a query the map's shape depends on
+// failed. A map drawn without it is missing applications or links but looks
+// complete, and the knowledge graph builds its CALLS edges from it.
+var errQueriesFailed = errors.New("servicemap: prometheus queries the map depends on failed")
+
+// queryFailures collects the keys of failed queries across the fetches of one
+// Build, which may run concurrently (see clickhouseMetrics).
+type queryFailures struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (f *queryFailures) add(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	f.mu.Lock()
+	f.keys = append(f.keys, keys...)
+	f.mu.Unlock()
+}
+
+// err is errQueriesFailed naming every required query that failed, or nil when
+// only optional ones did.
+func (f *queryFailures) err(logger *slog.Logger) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var required []string
+	for _, k := range f.keys {
+		if !optionalQueries[k] {
+			required = append(required, k)
+		}
+	}
+	if len(required) == 0 {
+		if len(f.keys) > 0 {
+			logger.Info("service map: drawn without optional queries that failed", "keys", f.keys)
+		}
+		return nil
+	}
+	sort.Strings(required)
+	logger.Error("service map: required prometheus queries failed, not drawing a partial map", "keys", required)
+	return fmt.Errorf("%w: %s", errQueriesFailed, strings.Join(required, ", "))
 }
 
 // kubeKeys keeps the kube-state-metrics entries of a query list or result
