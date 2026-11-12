@@ -464,6 +464,16 @@ nodeAgent:
     # Empty means the operator default (the PodMonitor's own namespace).
     # e.g. { matchNames: [ nudgebee ] } or { any: true }
     namespaceSelector: {}
+    # Relabeling for the node-agent scrape endpoint, rendered as-is into
+    # podMetricsEndpoints[0]. metricRelabelings run after the scrape and can
+    # drop series before Prometheus stores them, e.g. the DNS latency histogram:
+    #   metricRelabelings:
+    #     - sourceLabels: [__name__]
+    #       regex: container_dns_requests_duration_seconds_total_.*
+    #       action: drop
+    # relabelings run before the scrape, on the target's labels.
+    metricRelabelings: []
+    relabelings: []
   service:
     enabled: false
     annotations: {}
