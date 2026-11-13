@@ -27,9 +27,8 @@ spec:
         prometheus.io/port: '80'
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
-      {{- with .Values.nodeAgent.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.nodeAgent.imagePullSecrets "root" .) }}
+      {{- . | nindent 6 }}
       {{- end }}
       tolerations:
         - operator: Exists

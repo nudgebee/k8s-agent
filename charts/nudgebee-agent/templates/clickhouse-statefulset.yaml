@@ -70,6 +70,9 @@ spec:
         app.kubernetes.io/managed-by: {{ .Release.Service }}
     spec:
       serviceAccountName: {{ $fullname }}
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.clickhouse.image.pullSecrets "root" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       {{- if dig "podSecurityContext" "enabled" true $ch }}
       securityContext:
         fsGroup: 1001

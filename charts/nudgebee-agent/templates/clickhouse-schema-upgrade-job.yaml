@@ -74,6 +74,9 @@ spec:
       restartPolicy: Never
       # The job only talks to clickhouse, never the K8s API.
       automountServiceAccountToken: false
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.clickhouse.image.pullSecrets "root" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       containers:
         - name: schema-upgrade
           image: "{{ .Values.clickhouse.image.registry }}/{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
