@@ -287,12 +287,56 @@ runner:
   # cluster. Off by default: the upgrade check then reports Helm release
   # compatibility as unknown. Also applies under runner.readOnly.
   helmReleaseDiscovery: false
-  # Read access for the UI's CRDs tab: the CRD list, the built-in `view`
-  # ClusterRole (no Secrets by default), and named VictoriaMetrics / prometheus-operator
-  # kinds. Read-only; also applies under runner.readOnly. Off by default: the
-  # CRDs tab then shows "not allowed" until this is enabled. See
-  # templates/runner-custom-resource-read.yaml for what is left out and why.
-  customResourceRead: false
+  # Read access for the UI's CRDs tab. Read-only (get/list/watch); also
+  # applies under runner.readOnly. Off by default: the CRDs tab then shows
+  # "not allowed" until enabled. See templates/runner-custom-resource-read.yaml
+  # for what is left out and why.
+  customResourceRead:
+    enabled: false
+    # Bind the built-in `view` ClusterRole (no Secrets by default): built-in
+    # kinds plus every CRD whose operator aggregates to `view`.
+    viewRole: true
+    # API group -> resources to read. A map so an install can add a group
+    # without repeating these (Helm merges maps), e.g.
+    #   --set-json 'runner.customResourceRead.groups={"traefik.io":["ingressroutes"]}'
+    # and drop one with `<group>: null`. The core group, "*" and "secrets"
+    # fail the render.
+    groups:
+      # vmusers and vmalertmanagers are left out: they can carry credentials inline.
+      operator.victoriametrics.com:
+        - vlagents
+        - vlclusters
+        - vlogs
+        - vlsingles
+        - vmagents
+        - vmalertmanagerconfigs
+        - vmalerts
+        - vmanomalies
+        - vmanomalyconfigs
+        - vmauths
+        - vmclusters
+        - vmdistributed
+        - vmnodescrapes
+        - vmpodscrapes
+        - vmprobes
+        - vmrules
+        - vmscrapeconfigs
+        - vmservicescrapes
+        - vmsingles
+        - vmstaticscrapes
+        - vtclusters
+        - vtsingles
+      monitoring.coreos.com:
+        - alertmanagerconfigs
+        - alertmanagers
+        - podmonitors
+        - probes
+        - prometheusagents
+        - prometheuses
+        - prometheusrules
+        - scrapeconfigs
+        - servicemonitors
+        - thanosrulers
   customClusterRoleRules: []
   imagePullSecrets: []
   # Extra volumes on the runner pod. The common use is trusting a private CA
