@@ -20,6 +20,7 @@ collector_endpoint=""
 disable_otel=""
 disable_prometheus_stack=""
 storage_class=""
+chart_ref=""
 
 # Help function
 usage() {
@@ -47,12 +48,13 @@ usage() {
   echo "                        (ClickHouse, and Prometheus/Loki when installed here)."
   echo "                        Defaults to the cluster default StorageClass; required"
   echo "                        when the cluster has none. A name only, not '-'."
+  echo "  -R <oci_chart_ref>    Install from an OCI registry instead of the Helm repo (Helm 3.8+), e.g. oci://ghcr.io/nudgebee/charts/nudgebee-agent"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret -C gp3"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:R:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -118,6 +120,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
       ;;
     C)
       storage_class="$OPTARG"
+      ;;
+    R)
+      chart_ref="$OPTARG"
       ;;
     h)
       usage
@@ -231,6 +236,19 @@ if ! command -v helm &> /dev/null; then
     echo "Error: Helm is not installed. You can install it by following the instructions at:"
     echo "https://helm.sh/docs/intro/install/"
     exit 1
+fi
+
+if [ -n "$chart_ref" ]; then
+  if [[ "$chart_ref" != oci://* ]]; then
+    echo "Error: -R expects an oci:// chart reference, got: $chart_ref"
+    exit 1
+  fi
+  helm_version="$(helm version --template '{{.Version}}')"
+  IFS=. read -r helm_major helm_minor _ <<<"${helm_version#v}"
+  if [ "$helm_major" -lt 3 ] || { [ "$helm_major" -eq 3 ] && [ "$helm_minor" -lt 8 ]; }; then
+    echo "Error: OCI charts need Helm 3.8 or newer, found $helm_version. Drop -R to install from the Helm repo."
+    exit 1
+  fi
 fi
 
 # Storage preflight. Every PVC below is provisioned asynchronously, so a
@@ -373,15 +391,18 @@ if [ "$installed_prometheus_stack" == "true" ]; then
 fi
 
 echo "Installing nudgebee agent using helm"
-helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
-helm repo update > /dev/null 2>&1
+if [ -z "$chart_ref" ]; then
+  helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
+  helm repo update > /dev/null 2>&1
+  chart_ref="nudgebee-agent/nudgebee-agent"
+fi
 
 # Build the helm command as an array. Each optional flag becomes an
 # (empty or populated) sub-array; bash expands `"${arr[@]}"` correctly
 # even when empty, preserves spaces/quoting in values, and avoids
 # command-injection via eval.
 helm_args=(
-  upgrade --install "$agent_name" nudgebee-agent/nudgebee-agent
+  upgrade --install "$agent_name" "$chart_ref"
   --namespace "$namespace"
   --create-namespace
   --set "runner.nudgebee.auth_secret_key=$auth_key"
@@ -548,7 +569,7 @@ if [ -z "$loki_url" ]; then
         echo "Loki installation not requested. Node Agent will still be installed."
     fi
 else
-    echo "Please configure NudgeBee to connect to your existing Loki instance by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/logging/"
+    echo "Please configure NudgeBee to connect to your existing Loki instance by following the instructions at: https://docs.nudgebee.com/docs/installation/agent/connect/logging/"
 fi
 
 # Check for ClickHouse PVC requirements
@@ -572,6 +593,6 @@ for component in "${components[@]}"; do
         echo "1. Insufficient resources."
         echo "2. Missing dependencies."
         echo "3. Configuration errors."
-        echo "Please refer to the NudgeBee documentation for troubleshooting: https://app.nudgebee.com/help/docs/installation/agent/installation/"
+        echo "Please refer to the NudgeBee documentation for troubleshooting: https://docs.nudgebee.com/docs/installation/agent/installation/"
     fi
 done

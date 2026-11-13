@@ -1,0 +1,48 @@
+name: Publish Chart to OCI
+
+# Pushes already-released charts to the OCI registry: backfills older versions,
+# and recovers a release whose OCI step failed after chart-releaser succeeded.
+# Re-running for a version that is already published and signed is a no-op.
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Space-separated chart versions (e.g. 0.1.30 0.1.31)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing of the OCI artifact
+      packages: write # push the chart to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download released chart packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for version in $VERSIONS; do
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc-[0-9]+)?$ ]]; then
+              echo "::error::Invalid chart version: $version"
+              exit 1
+            fi
+            gh release download "nudgebee-agent-$version" \
+              --pattern "nudgebee-agent-$version.tgz" --dir dist
+          done
+
+      - name: Publish to OCI
+        uses: ./.github/actions/publish-chart-oci
+        with:
+          packages: dist/*.tgz

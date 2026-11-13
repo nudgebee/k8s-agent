@@ -22,7 +22,7 @@ annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Documentation
-      url: https://app.nudgebee.com/help/docs/installation/agent/installation/
+      url: https://docs.nudgebee.com/docs/installation/agent/installation/
     - name: Source
       url: https://github.com/nudgebee/k8s-agent
 # version and appVersion MUST stay identical. The agent reports appVersion to the
