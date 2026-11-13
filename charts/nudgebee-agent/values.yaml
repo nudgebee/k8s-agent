@@ -287,6 +287,12 @@ runner:
   # cluster. Off by default: the upgrade check then reports Helm release
   # compatibility as unknown. Also applies under runner.readOnly.
   helmReleaseDiscovery: false
+  # Read access for the UI's CRDs tab: the CRD list, the built-in `view`
+  # ClusterRole (no Secrets by default), and named VictoriaMetrics / prometheus-operator
+  # kinds. Read-only; also applies under runner.readOnly. Off by default: the
+  # CRDs tab then shows "not allowed" until this is enabled. See
+  # templates/runner-custom-resource-read.yaml for what is left out and why.
+  customResourceRead: false
   customClusterRoleRules: []
   imagePullSecrets: []
   # Extra volumes on the runner pod. The common use is trusting a private CA

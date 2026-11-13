@@ -455,6 +455,8 @@ jobs:
           check ''
           check '' --set runner.enableWritePermissions=true
           check '' --set runner.readOnly=true
+          check '' --set runner.customResourceRead=true
+          check '' --set runner.customResourceRead=true --set runner.readOnly=true
           check 'ClusterRole/nudgebee-agent-runner-scanner-pullsecrets-read:get Role/nudgebee-agent-runner-scanner-pullsecrets:create,delete,patch,update' \
             --set runner.scannerAutoCopyPullSecrets=true
           check 'ClusterRole/nudgebee-agent-runner-helm-releases:list' --set runner.helmReleaseDiscovery=true

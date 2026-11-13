@@ -1,0 +1,106 @@
+{{- /*
+Opt-in (runner.customResourceRead): read access behind the UI's CRDs tab,
+which lists the cluster's CRDs and, per CRD, its objects (get_resource,
+all namespaces). Read-only and rendered in both standard and read-only mode.
+
+  - customresourcedefinitions: the CRD list itself.
+  - The built-in `view` ClusterRole: read on built-in kinds plus every CRD
+    whose operator labels its roles aggregate-to-view (cert-manager, Argo,
+    Elastic, ...). The default `view` grants no Secrets; anything a cluster
+    later aggregates into `view` is granted to the runner too.
+  - Named VictoriaMetrics and prometheus-operator kinds, whose operators do
+    not aggregate to `view` and which Nudgebee itself runs. Named, not `*`:
+    vmusers (password/bearerToken may be inline) and vmalertmanagers
+    (configRawYaml may embed receiver credentials) are left out on purpose.
+
+CRDs outside these stay unreadable; grant them with
+runner.customClusterRoleRules. Secret-bearing kinds are refused by the
+runner itself (pkg/kube/secretpolicy.go) whatever RBAC allows.
+*/}}
+{{- if .Values.runner.customResourceRead }}
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-custom-resource-read
+rules:
+  - apiGroups:
+      - "apiextensions.k8s.io"
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "operator.victoriametrics.com"
+    resources:
+      - vlagents
+      - vlclusters
+      - vlogs
+      - vlsingles
+      - vmagents
+      - vmalertmanagerconfigs
+      - vmalerts
+      - vmanomalies
+      - vmanomalyconfigs
+      - vmauths
+      - vmclusters
+      - vmdistributed
+      - vmnodescrapes
+      - vmpodscrapes
+      - vmprobes
+      - vmrules
+      - vmscrapeconfigs
+      - vmservicescrapes
+      - vmsingles
+      - vmstaticscrapes
+      - vtclusters
+      - vtsingles
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "monitoring.coreos.com"
+    resources:
+      - alertmanagerconfigs
+      - alertmanagers
+      - podmonitors
+      - probes
+      - prometheusagents
+      - prometheuses
+      - prometheusrules
+      - scrapeconfigs
+      - servicemonitors
+      - thanosrulers
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-custom-resource-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-custom-resource-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+{{- end }}
