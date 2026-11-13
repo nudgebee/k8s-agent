@@ -9,6 +9,11 @@ global:
   # that have no default, or to "-" to disable dynamic provisioning and bind a
   # pre-created PV. When set, this wins over `clickhouse.persistence.storageClass`.
   storageClass: ""
+  # Pull secrets added to every pod this chart renders and to the runner's
+  # ServiceAccount, after each component's own list. Secret names or
+  # {name: ...} entries. The opentelemetry-collector subchart reads only its
+  # own opentelemetry-collector.imagePullSecrets.
+  imagePullSecrets: []
 enablePrometheusStack: true
 # Labels stamped onto the PrometheusRule, ServiceMonitor and PodMonitor this chart ships,
 # so the cluster's Prometheus will actually select them. Must match the Prometheus CR's
@@ -673,6 +678,9 @@ clickhouse:
     registry: ghcr.io
     repository: nudgebee/clickhouse
     tag: 24.12.4-nb-1
+    # Secrets for pulling the image from a private registry, as secret names
+    # or {name: ...} entries. Used by the ClickHouse pod and the schema job.
+    pullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
   persistence:

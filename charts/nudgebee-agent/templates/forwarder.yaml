@@ -27,9 +27,8 @@ spec:
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-forwarder-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
-      {{- if .Values.kubewatch.imagePullSecrets }}
-      imagePullSecrets:
-      {{- toYaml .Values.kubewatch.imagePullSecrets | nindent 6 }}
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.kubewatch.imagePullSecrets "root" .) }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
       - name: kubewatch

@@ -193,6 +193,31 @@ jobs:
           assert 'storageClassName:""' --set global.storageClass=- --set clickhouse.persistence.storageClass=ci-local
           echo 'ok: storageClass precedence and "-" handling intact'
 
+      # Every pod the chart renders, and the runner's ServiceAccount, must carry
+      # global.imagePullSecrets after the component's own list, or a
+      # private-registry install leaves that pod in ImagePullBackOff.
+      # clickhouse.image.pullSecrets takes names and {name: ...} entries.
+      - name: Assert pull secrets reach every pod
+        run: |
+          rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent \
+            --set 'global.imagePullSecrets[0].name=ci-global' \
+            --set 'clickhouse.image.pullSecrets[0].name=ci-map' \
+            --set 'clickhouse.image.pullSecrets[1]=ci-plain')"
+          got="$(printf '%s\n' "$rendered" | yq -N 'select(.kind) | [.kind, .metadata.name, ((.spec.template.spec.imagePullSecrets // .imagePullSecrets // []) | map(.name) | join(","))] | join(" ")')"
+          expect() { # <kind> <name> <secrets>
+            if ! printf '%s\n' "$got" | grep -qx "$1 $2 $3"; then
+              echo "$1 $2: want imagePullSecrets $3, got: $(printf '%s\n' "$got" | grep "^$1 $2 " || echo none)"
+              exit 1
+            fi
+          }
+          expect Deployment nudgebee-agent-runner ci-global
+          expect Deployment nudgebee-agent-forwarder ci-global
+          expect DaemonSet nudgebee-agent-node-agent ci-global
+          expect ServiceAccount nudgebee-agent-runner-service-account ci-global
+          expect StatefulSet nudgebee-agent-clickhouse-shard0 ci-map,ci-plain,ci-global
+          expect Job nudgebee-agent-ch-schema-upgrade ci-map,ci-plain,ci-global
+          echo 'ok: every pod carries its own and the global pull secrets'
+
       # The runner's ClickHouse logs check must look where the bundled exporter
       # writes. With the collector off nothing is set and the runner falls back
       # to otel_logs in CLICKHOUSE_DB; an operator's own env var wins.

@@ -482,10 +482,7 @@ volumes:
 Runner imagePullSecrets template. Invoked with root context.
 */}}
 {{- define "nudgebee.runner.imagePullSecrets" -}}
-{{- with .Values.runner.imagePullSecrets }}
-imagePullSecrets:
-{{- toYaml . | nindent 0 }}
-{{- end }}
+{{- include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.runner.imagePullSecrets "root" .) }}
 {{- end }}
 
 {{/*
@@ -587,6 +584,27 @@ had, so turning the chart upgrade on installs exactly what it did before.
 {{- define "nudgebee-agent.clickhouse.installed" -}}
 {{- if index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+imagePullSecrets for a pod spec or ServiceAccount: the component's own list
+followed by global.imagePullSecrets, as the Bitnami charts combined them.
+Called with (dict "secrets" <component list> "root" $). Entries are a secret
+name or a {name: ...} map. Empty entries and duplicates are dropped; renders
+nothing when no name is left.
+*/}}
+{{- define "nudgebee-agent.imagePullSecrets" -}}
+{{- $names := list }}
+{{- $global := (default (dict) .root.Values.global).imagePullSecrets }}
+{{- range concat (default list .secrets) (default list $global) }}
+{{- if kindIs "map" . }}{{ with .name }}{{ $names = append $names . }}{{ end }}{{ else if . }}{{ $names = append $names . }}{{ end }}
+{{- end }}
+{{- with $names | uniq -}}
+imagePullSecrets:
+{{- range . }}
+  - name: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
 
 {{/*
 app.kubernetes.io/name of the ClickHouse objects. nameOverride changes it, as it
