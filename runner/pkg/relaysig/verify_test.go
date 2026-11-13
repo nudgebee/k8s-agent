@@ -3,6 +3,7 @@ package relaysig
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -109,8 +110,12 @@ func TestVerifyBody_Replay(t *testing.T) {
 	}
 	// Same nonce again → replay rejection.
 	env2 := freshEnv(priv, body, "dup")
-	if err := v.VerifyBody(body, env2); err == nil {
+	err := v.VerifyBody(body, env2)
+	if err == nil {
 		t.Fatal("replayed nonce verified; want failure")
+	}
+	if !errors.Is(err, ErrReplay) {
+		t.Fatalf("err = %v; want ErrReplay so a duplicate delivery can be told from a bad signature", err)
 	}
 }
 
