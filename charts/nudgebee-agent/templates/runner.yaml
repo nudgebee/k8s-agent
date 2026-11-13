@@ -248,3 +248,6 @@ stringData:
   {{- if .Values.runner.serviceMapSource }}
   SERVICE_MAP_SOURCE: {{ .Values.runner.serviceMapSource | quote }}
   {{- end }}
+  {{- with .Values.runner.serviceMapInventory }}
+  SERVICE_MAP_INVENTORY: {{ . | quote }}
+  {{- end }}
