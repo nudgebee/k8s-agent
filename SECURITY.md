@@ -37,5 +37,5 @@ In scope:
 
 Out of scope (report upstream):
 
-- Vulnerabilities in third-party subcharts (`opencost`, `clickhouse`, `opentelemetry-collector`) — report to those projects.
+- Vulnerabilities in third-party subcharts (`opentelemetry-collector`) — report to that project.
 - Issues in the container images themselves (`nudgebee-agent`, `node-agent`, `kubewatch`) — these live in separate repos.

@@ -1,5 +1,5 @@
 // Package telemetry posts a periodic ClusterStatus snapshot to the backend so
-// the UI can show "Prometheus / AlertManager / Loki / OpenCost / Traces /
+// the UI can show "Prometheus / AlertManager / Loki / Traces /
 // NodeAgent connected".
 //
 // The collector reads a handful of fields directly out of `activity_stats`
@@ -9,7 +9,7 @@
 // the UI reads to render the per-datasource Connected/Disconnected pills.
 //
 // Inputs that need K8s/Prometheus access (NodeAgentCount via PromQL,
-// LogsProviderStatus via Loki/Signoz health, OpencostStatus probe URL) are
+// LogsProviderStatus via Loki/Signoz health) are
 // computed by the caller and passed in via Datasources, so this package stays
 // dependency-free and unit-testable.
 package telemetry
@@ -39,6 +39,13 @@ import (
 // collector tolerates because every read uses `.get()` with a default).
 // We keep `omitempty` on the strings/maps and explicit emit on
 // numerics/bools so a `false`/`0` is always present.
+//
+// OpencostConnection and OpencostConnectionError are always false and "": the
+// agent no longer runs or probes OpenCost, cost is computed server-side. The
+// keys stay on the wire because the collector merges activity_stats into
+// `agent.connection_status` with jsonb `||` — omitting them would strand a
+// `true` (or an error) reported by an older agent, and the server only takes
+// over cost for clusters where opencostConnection is not true.
 type ActivityStats struct {
 	AlertManagerConnection  bool     `json:"alertManagerConnection"`
 	PrometheusConnection    bool     `json:"prometheusConnection"`
@@ -70,7 +77,6 @@ type ActivityStats struct {
 	PrometheusURL               string            `json:"prometheusUrl,omitempty"`
 	PrometheusAdditionalLabels  map[string]string `json:"prometheusAdditionalLabels,omitempty"`
 	AlertManagerURL             string            `json:"alertmanagerUrl,omitempty"`
-	OpencostURL                 string            `json:"opencostUrl,omitempty"`
 	TracesURL                   string            `json:"tracesUrl,omitempty"`
 	AutoScalerVersion           string            `json:"autoScalerVersion,omitempty"`
 	AutoScalerEnabled           bool              `json:"autoScalerEnabled"`
@@ -161,7 +167,6 @@ type Datasources struct {
 	PrometheusURL   string
 	AlertManagerURL string
 	LokiURL         string // (informational; logs provider URL is LogsProviderURL below)
-	OpencostURL     string
 
 	// Logs provider — caller picks based on env (ELASTICSEARCH_ENABLED →
 	// SIGNOZ_ENABLED → loki) and probes health.
@@ -243,9 +248,7 @@ type Datasources struct {
 	AutoScalerVersion   string
 	AutoScalerNamespace string
 
-	// Grafana/Opencost connection — caller may probe these out-of-band; if
-	// caller leaves them at the default we fall back to in-package HTTP
-	// probes against the URL fields above.
+	// Grafana connection — probed by the caller out-of-band.
 	GrafanaEnabled bool
 
 	// AgentURL is published to the UI as the cluster's "agent" address so
@@ -389,7 +392,6 @@ func (s *Service) postOnce(ctx context.Context) error {
 		"prom", stats.PrometheusConnection,
 		"logs", stats.LogsConnection,
 		"alertmanager", stats.AlertManagerConnection,
-		"opencost", stats.OpencostConnection,
 		"node_agent", stats.NodeAgentCount,
 		"trace_provider", stats.TraceProvider,
 	)
@@ -402,7 +404,6 @@ func (s *Service) postOnce(ctx context.Context) error {
 // Probes implemented in-package:
 //
 //	AlertManager /-/healthy  (silence_utils.get_alertmanager_silences_connection)
-//	OpenCost    /healthz
 //
 // Inputs the caller pre-computes (see Datasources):
 //
@@ -425,7 +426,6 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 		LogsConnectionError:        ds.LogsProviderError,
 		NodeAgentCount:             ds.NodeAgentCount,
 		NodeAgentConnection:        ds.NodeAgentCount > 0, // line 254: count > 0
-		OpencostURL:                ds.OpencostURL,
 		GrafanaEnabled:             ds.GrafanaEnabled,
 		AutoScalerEnabled:          ds.AutoScalerEnabled,
 		AutoScalerType:             ds.AutoScalerType,
@@ -445,11 +445,6 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	// no auth needed for in-cluster AlertManager.
 	if ds.AlertManagerURL != "" {
 		out.AlertManagerConnection, out.AlertManagerConnectionError = httpHealth(ctx, s.HTTP, ds.AlertManagerURL+"/-/healthy")
-	}
-	// OpenCost: only probe if a URL is set.
-	// where missing URL → opencost=False, no request.
-	if ds.OpencostURL != "" {
-		out.OpencostConnection, out.OpencostConnectionError = httpHealth(ctx, s.HTTP, ds.OpencostURL+"/healthz")
 	}
 
 	// Trace status / provider / URL — verbatim port of the backend.
@@ -498,7 +493,6 @@ func redactReportedURLs(out *ActivityStats, ds Datasources) {
 		&out.PrometheusURL,
 		&out.AlertManagerURL,
 		&out.LogProviderURL,
-		&out.OpencostURL,
 		&out.TracesURL,
 		&out.AgentURL,
 	} {
@@ -523,7 +517,6 @@ func redactReportedURLs(out *ActivityStats, ds Datasources) {
 		{ds.PrometheusURL, &out.PrometheusConnectionError},
 		{ds.AlertManagerURL, &out.AlertManagerConnectionError},
 		{ds.LogsProviderURL, &out.LogsConnectionError},
-		{ds.OpencostURL, &out.OpencostConnectionError},
 		{ds.ClickHouseURL, &out.TracesConnectionError},
 		{ds.ClickHouseURL, &out.ClickhouseLogsConnectionError},
 	} {

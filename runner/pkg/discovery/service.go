@@ -110,12 +110,31 @@ type resourceHandler struct {
 	tomb   map[string]any
 }
 
+// maxIncrementalRequeues bounds how often a key whose incremental POST failed
+// is put back on the queue. Each attempt already includes the sink's own
+// retries (~22s), so this covers a backend outage of a few minutes; past it
+// the next full snapshot reconciles.
+const maxIncrementalRequeues = 5
+
 func (h *resourceHandler) stashTombstone(key string, item any) {
 	h.tombMu.Lock()
 	if h.tomb == nil {
 		h.tomb = map[string]any{}
 	}
 	h.tomb[key] = item
+	h.tombMu.Unlock()
+}
+
+// restashTombstone puts back a tombstone whose POST failed, unless a newer
+// delete of the same key has been stashed meanwhile.
+func (h *resourceHandler) restashTombstone(key string, item any) {
+	h.tombMu.Lock()
+	if h.tomb == nil {
+		h.tomb = map[string]any{}
+	}
+	if _, newer := h.tomb[key]; !newer {
+		h.tomb[key] = item
+	}
 	h.tombMu.Unlock()
 }
 
@@ -133,17 +152,36 @@ func NewService(cs kubernetes.Interface, sink *Sink, resync time.Duration, logge
 	if resync <= 0 {
 		resync = 30 * time.Minute
 	}
-	if logger == nil {
-		logger = slog.Default()
-	}
 	// One factory shared across all resources; each resource registers its
 	// own informer + handler. SharedInformerFactory dedups list/watch traffic.
 	// WithTransform strips fields no converter reads BEFORE objects enter the
 	// cache — the single biggest per-object memory win at 100k+ pods. See
 	// discoveryTransform; it is verified to preserve every field the converters
 	// read, so it's safe to apply unconditionally.
-	factory := informers.NewSharedInformerFactoryWithOptions(cs, resync,
-		informers.WithTransform(discoveryTransform))
+	return NewServiceWithFactory(cs, sink, NewFactory(cs, resync, false), resync, logger)
+}
+
+// NewFactory builds the informer factory discovery runs on, with the
+// transform TransformFunc(forMatchers) returns. Build it once and pass it to
+// NewServiceWithFactory and to anything else that should share its caches.
+func NewFactory(cs kubernetes.Interface, resync time.Duration, forMatchers bool) informers.SharedInformerFactory {
+	if resync <= 0 {
+		resync = 30 * time.Minute
+	}
+	return informers.NewSharedInformerFactoryWithOptions(cs, resync,
+		informers.WithTransform(TransformFunc(forMatchers)))
+}
+
+// NewServiceWithFactory is NewService on a factory the caller built with
+// NewFactory, so other consumers can share its informers. Run starts the
+// factory; starting it again elsewhere is harmless.
+func NewServiceWithFactory(cs kubernetes.Interface, sink *Sink, factory informers.SharedInformerFactory, resync time.Duration, logger *slog.Logger) *Service {
+	if resync <= 0 {
+		resync = 30 * time.Minute
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		cs:               cs,
 		sink:             sink,
@@ -400,25 +438,33 @@ func (s *Service) register(informer cache.SharedIndexInformer, typ Type, convert
 			}
 			enqueue(queue, newObj)
 		},
-		DeleteFunc: func(obj any) {
-			// When tombstones are enabled, capture a deleted:true item NOW —
-			// the DeleteFunc still has the object; once the key is gone from the
-			// indexer the worker can't reconstruct the wire shape (Kind etc.).
-			// Use the same key function as enqueue so stash + dequeue keys match.
-			if s.emitTombstones {
-				if key, err := cache.MetaNamespaceKeyFunc(obj); err == nil {
-					if item, ok := converter(unwrapDeleted(obj)); ok {
-						if m, ok := item.(map[string]any); ok {
-							m["deleted"] = true
-						}
-						h.stashTombstone(key, item)
-					}
-				}
-			}
-			enqueue(queue, obj)
-		},
+		DeleteFunc: func(obj any) { s.onDelete(h, obj) },
 	})
 	s.handlers = append(s.handlers, h)
+}
+
+// onDelete handles an informer delete: stash a tombstone (when enabled) and
+// queue the key so the worker posts it.
+func (s *Service) onDelete(h *resourceHandler, obj any) {
+	// When tombstones are enabled, capture a deleted:true item NOW —
+	// the DeleteFunc still has the object; once the key is gone from the
+	// indexer the worker can't reconstruct the wire shape (Kind etc.).
+	// Use the same key function as enqueue so stash + dequeue keys match.
+	// A delete the watch missed (it happened during a disconnect) is
+	// delivered on relist wrapped in DeletedFinalStateUnknown, which
+	// carries no object metadata of its own; the deletion-aware key
+	// function unwraps it.
+	if s.emitTombstones {
+		if key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj); err == nil {
+			if item, ok := h.converter(unwrapDeleted(obj)); ok {
+				if m, ok := item.(map[string]any); ok {
+					m["deleted"] = true
+				}
+				h.stashTombstone(key, item)
+			}
+		}
+	}
+	enqueue(h.queue, obj)
 }
 
 // sameResourceVersion reports whether an update carries no change: an informer
@@ -737,6 +783,7 @@ func (s *Service) workerLoop(ctx context.Context, h *resourceHandler) {
 func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []string) {
 	items := make([]any, 0, len(keys))
 	converted := make([]string, 0, len(keys))
+	tombs := map[string]any{} // key -> tombstone posted in this batch
 	for _, key := range keys {
 		raw, exists, err := h.informer.GetIndexer().GetByKey(key)
 		if err != nil {
@@ -751,12 +798,20 @@ func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []s
 			if s.emitTombstones {
 				if tomb, ok := h.popTombstone(key); ok {
 					items = append(items, tomb)
+					tombs[key] = tomb
+					continue
 				}
 			} else {
 				s.logger.Debug("resource deleted (will reconcile on next snapshot)", "key", key)
 			}
 			h.queue.Forget(key)
 			continue
+		}
+		// Deleted and recreated under the same name before this key was
+		// processed: the new object's state supersedes the old one's
+		// tombstone, which would otherwise stay stashed indefinitely.
+		if s.emitTombstones {
+			h.popTombstone(key)
 		}
 		item, ok := h.converter(raw)
 		if !ok {
@@ -771,19 +826,45 @@ func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []s
 	}
 	env := &Envelope{Type: h.typ, Data: items}
 	if err := s.sink.Post(ctx, env); err != nil {
-		s.logger.Error("incremental post failed", "type", h.typ, "count", len(items), "err", err)
-		// Don't AddRateLimited on backend errors — the next periodic snapshot
-		// picks it up; failed retries pile up otherwise.
+		// Put the keys back, a bounded number of times: if this was the
+		// object's last change (a pod's final CrashLoopBackOff or Succeeded,
+		// or its deletion), nothing else would re-send it until the next full
+		// snapshot. The queue dedups by key, so a backend outage holds at most
+		// one entry per object, and the retry reads the latest cached state.
+		requeued := 0
+		requeue := func(key string) bool {
+			if h.queue.NumRequeues(key) >= maxIncrementalRequeues {
+				h.queue.Forget(key)
+				return false
+			}
+			h.queue.AddRateLimited(key)
+			requeued++
+			return true
+		}
+		for _, key := range converted {
+			requeue(key)
+		}
+		for key, tomb := range tombs {
+			if requeue(key) {
+				h.restashTombstone(key, tomb)
+			}
+		}
+		s.logger.Error("incremental post failed", "type", h.typ, "count", len(items),
+			"requeued", requeued, "err", err)
 		return
 	}
 	for _, key := range converted {
 		h.queue.Forget(key) // clear any backoff from a prior indexer-get error
 	}
+	for key := range tombs {
+		h.queue.Forget(key)
+	}
 }
 
-// enqueue puts a MetaNamespaceKey for obj on the queue, ignoring tombstones.
+// enqueue puts a MetaNamespaceKey for obj on the queue. Deletion-aware: a
+// DeletedFinalStateUnknown tombstone is keyed by the object it wraps.
 func enqueue(q workqueue.TypedRateLimitingInterface[string], obj any) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		return
 	}
@@ -834,10 +915,14 @@ func newPodConverter(rsLookup replicaSetLookupFn) func(any) (any, bool) {
 			}
 		}
 		return map[string]any{
-			"name":             p.Name,
-			"namespace":        p.Namespace,
-			"type":             "Pod",
-			"service_key":      p.Namespace + "/Pod/" + p.Name,
+			"name":        p.Name,
+			"namespace":   p.Namespace,
+			"type":        "Pod",
+			"service_key": p.Namespace + "/Pod/" + p.Name,
+			// The service_key is reused when a pod is deleted and recreated
+			// under the same name (StatefulSet pods); the UID tells the two
+			// apart, so a late tombstone for the old pod need not hide the new.
+			"uid":              string(p.UID),
 			"resource_version": parseResourceVersion(p.ObjectMeta),
 			"creation_time":    p.CreationTimestamp.UTC().Format(time.RFC3339),
 			"update_time":      time.Now().UTC().UnixMilli(),

@@ -65,14 +65,22 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		DiscoveryResync:    10 * time.Minute,
 		AlertRulesInterval: 30 * time.Minute, // default when ALERT_RULES_INTERVAL unset
 		// Scalability knobs — defaults applied when their env vars are unset.
-		DiscoveryBatchSize:   1000,
-		IncrementalBatchSize: 1,
-		ForwardPoolSize:      64,
-		RelayHandlerPoolSize: 32,
-		TriggerRateLimits:    map[string]time.Duration{},
-		KubeEnabled:          true,
-		PodExecEnabled:       true,
-		ScannerNamespace:     "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
+		DiscoveryBatchSize:             1000,
+		IncrementalBatchSize:           1,
+		ForwardPoolSize:                64,
+		KubewatchWorkers:               8,
+		KubewatchQueueSize:             2048,
+		KubewatchQueueMaxBytes:         64 << 20,
+		TriggerEventsCache:             true,
+		K8sWatchWorkers:                8,
+		K8sWatchMaxPending:             10000,
+		RelayHandlerPoolSize:           32,
+		TriggerRateLimits:              map[string]time.Duration{},
+		KubeEnabled:                    true,
+		GetResourceMaxBytes:            64 << 20,
+		GetResourceUnscopedConcurrency: 2,
+		PodExecEnabled:                 true,
+		ScannerNamespace:               "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
 		// Pull-secret copy is on unless SCANNER_AUTO_COPY_PULL_SECRETS says
 		// otherwise: without it, a private image whose node-local copy is gone
 		// can never be scanned.
@@ -120,6 +128,10 @@ func TestFromEnv_DefaultsWhenOptionalMissing(t *testing.T) {
 	}
 	if !c.KubeEnabled {
 		t.Error("KubeEnabled default should be true (drop-in compat)")
+	}
+	if c.GetResourceMaxBytes != 64<<20 || c.GetResourceUnscopedConcurrency != 2 {
+		t.Errorf("get_resource limits = %d bytes / %d concurrent; want 64 MiB / 2",
+			c.GetResourceMaxBytes, c.GetResourceUnscopedConcurrency)
 	}
 	if !c.PodExecEnabled {
 		t.Error("PodExecEnabled default should be true (drop-in compat)")
@@ -362,5 +374,23 @@ func TestFromEnv_ClickHouseLogsCollected(t *testing.T) {
 	}
 	if !c.ClickHouseLogsCollected {
 		t.Error("ClickHouseLogsCollected = false with CLICKHOUSE_LOGS_COLLECTED=true")
+	}
+}
+
+func TestFromEnv_K8sWatchScope(t *testing.T) {
+	t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+	t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+	t.Setenv("K8S_WATCH_NAMESPACE", " app ")
+	t.Setenv("K8S_WATCH_KINDS", "Pod, node,,configmap")
+	c, err := FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.K8sWatchNamespace != "app" || !reflect.DeepEqual(c.K8sWatchKinds, []string{"pod", "node", "configmap"}) {
+		t.Errorf("namespace %q kinds %v", c.K8sWatchNamespace, c.K8sWatchKinds)
+	}
+	t.Setenv("K8S_WATCH_KINDS", "")
+	if c, _ = FromEnv(); c.K8sWatchKinds == nil || len(c.K8sWatchKinds) != 0 {
+		t.Errorf("set but empty = %v; want an empty, non-nil list", c.K8sWatchKinds)
 	}
 }

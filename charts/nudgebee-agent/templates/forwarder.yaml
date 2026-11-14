@@ -1,3 +1,4 @@
+{{- if include "nudgebee-agent.kubewatchDeployed" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,9 +27,8 @@ spec:
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-forwarder-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
-      {{- if .Values.kubewatch.imagePullSecrets }}
-      imagePullSecrets:
-      {{- toYaml .Values.kubewatch.imagePullSecrets | nindent 6 }}
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.kubewatch.imagePullSecrets "root" .) }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
       - name: kubewatch
@@ -40,6 +40,12 @@ spec:
             value: /config
           - name: ENABLE_PPROF
             value: {{ .Values.kubewatch.pprof | quote }}
+          {{- /* Same reasoning as the runner's GOMEMLIMIT: without it the Go
+          heap may grow to ~2x live data before a collection, past the limit. */}}
+          {{- with (.Values.kubewatch.goMemLimit | default (include "nudgebee-agent.goMemLimitFrom" (dict "limit" (include "nudgebee-agent.kubewatchMemory" .) "ratio" .Values.kubewatch.goMemLimitRatio))) }}
+          - name: GOMEMLIMIT
+            value: {{ . | quote }}
+          {{- end }}
           {{- if .Values.kubewatch.additional_env_vars }}
           {{ toYaml .Values.kubewatch.additional_env_vars | nindent 10 }}
           {{- end }}
@@ -57,9 +63,9 @@ spec:
         resources:
           requests:
             cpu: {{ .Values.kubewatch.resources.requests.cpu }}
-            memory: {{ if .Values.isSmallCluster }}"64Mi"{{ else }}{{ .Values.kubewatch.resources.requests.memory | quote }}{{ end }}
+            memory: {{ include "nudgebee-agent.kubewatchMemory" . | quote }}
           limits:
-            memory: {{ if .Values.isSmallCluster }}"64Mi"{{ else }}{{ .Values.kubewatch.resources.requests.memory | quote }}{{ end }}
+            memory: {{ include "nudgebee-agent.kubewatchMemory" . | quote }}
             {{ if .Values.kubewatch.resources.limits.cpu }}cpu: {{ .Values.kubewatch.resources.limits.cpu | quote }}{{ end }}
       volumes:
         - name: kubewatch-config
@@ -74,3 +80,4 @@ spec:
       {{- if .Values.kubewatch.tolerations }}
       tolerations:  {{ toYaml .Values.kubewatch.tolerations | nindent 8 }}
       {{- end }}
+{{ end -}}

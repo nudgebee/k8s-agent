@@ -26,9 +26,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -42,6 +44,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/enrichers"
 	"github.com/nudgebee/nudgebee-agent/pkg/grafana"
+	"github.com/nudgebee/nudgebee-agent/pkg/k8swatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/kube"
 	"github.com/nudgebee/nudgebee-agent/pkg/metrics"
 	"github.com/nudgebee/nudgebee-agent/pkg/mutate"
@@ -107,6 +110,8 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 	return out
 }
 
+func (a *triggerAdapter) HandlesKind(kind string) bool { return a.e.HandlesKind(kind) }
+
 // promDiscoveryInterval is how often the agent re-looks for a Prometheus
 // Service when it started without one. Five minutes keeps a freshly installed
 // Prometheus usable within a scrape interval or two, at the cost of one
@@ -142,6 +147,9 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
+	// When this process started: the runner's own watch sends a create only
+	// for objects created after it, as kubewatch did.
+	processStart := time.Now()
 	handlers := map[string]dispatch.Handler{
 		"ping":   dispatch.SimpleHandler(handlePing),
 		"echo":   dispatch.SimpleHandler(handleEcho),
@@ -210,6 +218,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		cfg.PodExecEnabled = false
 		cfg.ScannersEnabled = false
 		cfg.MutateEnabled = false
+		cfg.K8sWatchEnabled = false
 	}
 
 	// Service-discovery: only fills blank URLs, never overrides env. Mirrors
@@ -234,41 +243,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Info("alertmanager auto-discovered", "url", redact.URL(u))
 		}
 	}
-	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
-	// computed centrally on the server side. When disabled, skip BOTH the
-	// OPENCOST_ENDPOINT env and the cluster-wide Service autodiscovery: discovery
-	// matches `app=opencost` across all namespaces, so otherwise the agent latches
-	// onto a neighbouring namespace's OpenCost and keeps reporting itself
-	// cost-enabled, which suppresses the server-side takeover. Defaults to enabled.
-	opencostEnabled := true
-	if v := os.Getenv("OPENCOST_ENABLED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			opencostEnabled = b
-		} else {
-			logger.Warn("invalid OPENCOST_ENABLED, defaulting to enabled", "value", v, "err", err)
-		}
-	}
-	opencostURL := ""
-	if opencostEnabled {
-		// Mirrors OpenCostDiscovery.find_open_cost_url.
-		// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
-		opencostURL = os.Getenv("OPENCOST_ENDPOINT")
-		if opencostURL == "" {
-			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
-				opencostURL = u
-				logger.Info("opencost auto-discovered", "url", redact.URL(u))
-			}
-		}
-	} else {
-		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
-	}
-
 	warnMisparsedCredentials(logger, map[string]string{
 		"PROMETHEUS_URL":    cfg.PrometheusURL,
 		"LOKI_URL":          cfg.LokiURL,
 		"LOKI_RULES_URL":    cfg.LokiRulesURL,
 		"ALERTMANAGER_URL":  cfg.AlertManagerURL,
-		"OPENCOST_ENDPOINT": opencostURL,
 		"ELASTICSEARCH_URL": cfg.ElasticsearchURL,
 		"SIGNOZ_URL":        cfg.SignozURL,
 		"JAEGER_URL":        cfg.JaegerURL,
@@ -562,6 +541,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	if cfg.KubeEnabled {
 		kc := kube.NewClient(dynamicKube, typedKube)
+		kc.MaxResultBytes = cfg.GetResourceMaxBytes
+		kc.SetUnscopedListLimit(cfg.GetResourceUnscopedConcurrency)
 		// AllowWrite lifts the read-only verb allowlist; gated by the chart's
 		// runner.enableWritePermissions, which also grants the write RBAC.
 		kx := &kube.KubectlExecutor{AllowWrite: cfg.KubectlAllowWrite} // uses kubectl on PATH
@@ -578,6 +559,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			lightActions[name] = struct{}{}
 		}
 		logger.Info("kube primitives enabled", "actions", len(kh), "kubectl_allow_write", cfg.KubectlAllowWrite)
+
+		// list_helm_releases decodes Helm release Secrets here and returns chart
+		// metadata only — the release values and manifests stay in the cluster.
+		// Needs the cluster-wide secrets list that runner.helmReleaseDiscovery
+		// grants; without it the call returns ErrHelmReleaseDiscoveryDisabled.
+		if typedKube != nil {
+			handlers["list_helm_releases"] = func(ctx context.Context, p map[string]any) (any, error) {
+				ns, _ := p["namespace"].(string)
+				rels, err := discovery.ListHelmReleases(ctx, typedKube, ns)
+				if err != nil {
+					return nil, err
+				}
+				block, err := enrichers.JSONBlock(rels)
+				if err != nil {
+					return nil, err
+				}
+				return enrichers.FindingResponse(cfg.AccountID, uuid.Nil, block)
+			}
+			lightActions["list_helm_releases"] = struct{}{}
+		}
 	}
 
 	if cfg.ScannersEnabled {
@@ -877,6 +878,21 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
+	// One informer factory for discovery and the runner's own watch (when
+	// on), so the objects both read are cached once. With the watch on, the
+	// transform keeps the pod template fields the matchers diff.
+	// The watch feeds the trigger engine, which runs only with the HTTP
+	// listener and a backend to send Findings to. Without them the watch never
+	// starts, so the shared cache must not keep whole objects for it.
+	if cfg.K8sWatchEnabled && (cfg.HTTPListenAddr == "" || cfg.BackendEndpoint == "") {
+		logger.Warn("K8S_WATCH_ENABLED ignored: the trigger engine needs HTTP_LISTEN_ADDR and NUDGEBEE_ENDPOINT")
+		cfg.K8sWatchEnabled = false
+	}
+	var sharedFactory informers.SharedInformerFactory
+	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
+		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
+	}
+
 	// Keep looking for a Prometheus we could not find at boot, and point the
 	// client at the first one that appears. Everything downstream reads the URL
 	// per request, so no restart and no re-registration is needed.
@@ -920,6 +936,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		fwd.SetKubewatchQueue(cfg.KubewatchWorkers, cfg.KubewatchQueueSize, cfg.KubewatchQueueMaxBytes)
+		fwd.KubewatchMetrics = mreg
+		mreg.RegisterKubewatchQueueDepth(func() float64 { return float64(fwd.KubewatchQueueDepth()) })
 		// Lets the forwarder report a node-exporter alert against the node it
 		// describes rather than the exporter pod that emitted it. Opportunistic:
 		// without a typed client the correction falls back to the alert's own
@@ -968,7 +987,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
-			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
+			eventsLister := newK8sEventsLister(typedKube)
+			if cfg.TriggerEventsCache {
+				cached, err := newCachedEventsLister(typedKube, eventsLister)
+				if err != nil {
+					logger.Warn("events cache unavailable; evidence tables use live List calls", "err", err)
+				} else {
+					g.Go(func() error {
+						cached.Run(gctx)
+						return nil
+					})
+					eventsLister = cached
+				}
+			}
+			eng = eng.WithEventsLister(eventsLister)
 			// Service-backends lister lets service_no_endpoints resolve a
 			// Service's selector against live pods + workload templates.
 			// Without it (no K8s client) that matcher never fires. The
@@ -977,6 +1009,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(specs))
+		if cfg.K8sWatchEnabled {
+			// The runner watches Kubernetes itself and kubewatch's posts are
+			// ignored; see pkg/k8swatch.
+			fwd.KubewatchSuperseded = true
+			kw := k8swatch.New(k8swatch.Config{
+				Workers:    cfg.K8sWatchWorkers,
+				MaxPending: cfg.K8sWatchMaxPending,
+				StartTime:  processStart,
+				Namespace:  cfg.K8sWatchNamespace,
+				Kinds:      kindSet(cfg.K8sWatchKinds),
+				Skip: func(kind, namespace, name string) bool {
+					return kind == "ConfigMap" && triggers.ConfigMapIgnored(namespace, name)
+				},
+			}, fwd, eng.Handles, mreg, logger)
+			kw.RegisterShared(sharedFactory)
+			kw.RegisterOwn(typedKube)
+			kw.RegisterRollouts(gctx, typedKube, dynamicKube)
+			g.Go(func() error {
+				logger.Info("starting k8s watch (kubewatch posts are ignored)")
+				if err := kw.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+					return fmt.Errorf("k8s watch: %w", err)
+				}
+				return nil
+			})
+		}
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
@@ -1039,11 +1096,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	// Telemetry: periodic ClusterStatus → /v1/k8s/telemetry. The collector
 	// stores activity_stats as the agent's `connection_status`, which the UI
-	// reads to show "Prometheus / Loki / AlertManager / OpenCost / Traces /
+	// reads to show "Prometheus / Loki / AlertManager / Traces /
 	// NodeAgent connected".
 	//
 	// We mirror the legacy IntegrationHealthChecker probe set —
-	// Prometheus, AlertManager, OpenCost get HTTP probes inside the
+	// Prometheus and AlertManager get HTTP probes inside the
 	// telemetry package; node-agent count is a Prometheus query we run
 	// here so we don't wedge a Prom client into the telemetry package.
 	if cfg.BackendEndpoint != "" {
@@ -1146,7 +1203,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					PrometheusURL:              promClient.URL(),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
-					OpencostURL:                opencostURL,
 					LogsProvider:               logsProvider,
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
@@ -1222,7 +1278,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discoverySink.Metrics = mreg
-		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
+		discSvc := discovery.NewServiceWithFactory(typedKube, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
 			BatchSize:         cfg.DiscoveryBatchSize,
@@ -1754,4 +1810,17 @@ func installNamespace(cfg *config.Config) string {
 		return ns
 	}
 	return cfg.ScannerNamespace
+}
+
+// kindSet turns K8S_WATCH_KINDS into the watcher's kind filter; nil (unset)
+// means every kind.
+func kindSet(kinds []string) map[string]bool {
+	if kinds == nil {
+		return nil
+	}
+	m := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		m[k] = true
+	}
+	return m
 }

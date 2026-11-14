@@ -47,9 +47,10 @@ type helmReleaseEnvelope struct {
 	} `json:"info"`
 	Chart struct {
 		Metadata struct {
-			Name       string `json:"name"`
-			Version    string `json:"version"`
-			AppVersion string `json:"appVersion"`
+			Name        string `json:"name"`
+			Version     string `json:"version"`
+			AppVersion  string `json:"appVersion"`
+			KubeVersion string `json:"kubeVersion"`
 		} `json:"metadata"`
 	} `json:"chart"`
 }

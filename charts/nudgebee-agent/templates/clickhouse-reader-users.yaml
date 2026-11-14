@@ -1,7 +1,7 @@
 {{- /*
 The read-only ClickHouse user the runner's query_data uses (clickhouse.reader in
-values.yaml), mounted into the bundled ClickHouse's users.d through
-clickhouse.extraVolumes. Rendered only where that mount exists (see
+values.yaml), mounted into the bundled ClickHouse's users.d by
+templates/clickhouse-statefulset.yaml. Rendered only where that mount exists (see
 nudgebee-agent.clickhouseReader), which is also when the runner names the user.
 Limits apply when a query sets none; constraints keep a query between 1 and the
 ceiling, so it can lower a limit but neither raise it nor set 0 (unlimited).
@@ -11,8 +11,7 @@ here would otherwise have.
 The per-user memory and concurrency caps are rendered only when set, so a
 release upgraded with --reuse-values from before them keeps running uncapped
 rather than getting a 0 (unlimited) cap with an unsatisfiable constraint.
-The users file is copied in when ClickHouse starts: changed limits apply after
-its pod restarts.
+Changed limits apply after the ClickHouse pod restarts.
 */}}
 {{- if include "nudgebee-agent.clickhouseReader" . }}
 {{- $r := .Values.clickhouse.reader }}

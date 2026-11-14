@@ -7,7 +7,7 @@ This document describes the agent's runtime model, the wire protocol it speaks t
 The agent does only what physically requires in-cluster execution:
 
 1. **K8s API calls** that need the in-cluster ServiceAccount token.
-2. **Network reads** of services (Prometheus, Loki, Elasticsearch, AlertManager, OpenCost) that are only reachable from inside the cluster.
+2. **Network reads** of services (Prometheus, Loki, Elasticsearch, AlertManager) that are only reachable from inside the cluster.
 3. **Privileged operations** like `kubectl exec`, draining nodes, scheduling K8s Jobs.
 4. **AlertManager webhook reception** — the URL has to live somewhere AlertManager can reach.
 

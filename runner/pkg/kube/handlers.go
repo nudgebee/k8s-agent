@@ -29,13 +29,14 @@ func Handlers(c *Client, k *KubectlExecutor, accountID string) map[string]dispat
 	hs := map[string]dispatch.Handler{}
 	if c != nil {
 		hs["get_resource"] = func(ctx context.Context, p map[string]any) (any, error) {
-			data, err := c.GetResource(ctx, ParseGetParams(p))
+			// camelCase → snake_case for parity with the legacy Hikaru output —
+			// see snake.go for the why and which fields are skipped. Encoded
+			// while listing, so the size cap applies as the result grows.
+			data, err := c.GetResourceJSON(ctx, ParseGetParams(p))
 			if err != nil {
 				return nil, err
 			}
-			// camelCase → snake_case for parity with the legacy Hikaru output —
-			// see snake.go for the why and which fields are skipped.
-			return wrapAsFinding(accountID, SnakeKeysDeep(data))
+			return enrichers.FindingResponse(accountID, uuid.Nil, enrichers.JSONBlockRaw(data))
 		}
 		hs["get_resource_yaml"] = func(ctx context.Context, p map[string]any) (any, error) {
 			params := ParseGetParams(p)

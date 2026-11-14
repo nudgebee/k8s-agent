@@ -140,6 +140,30 @@ type Config struct {
 	// (kubewatch + AlertManager intake). Excess is shed (HTTP 202 already
 	// returned). Default 64.
 	ForwardPoolSize int
+	// KubewatchWorkers / KubewatchQueueSize / KubewatchQueueMaxBytes size the
+	// kubewatch intake in pkg/alerts: workers matching events, and how many
+	// events (and bytes of them) may wait. Over either bound, events are shed
+	// and counted. Defaults 8 / 2048 / 64 MiB.
+	KubewatchWorkers       int
+	KubewatchQueueSize     int
+	KubewatchQueueMaxBytes int64
+	// K8sWatchEnabled feeds the trigger matchers from the runner's own
+	// informers (pkg/k8swatch) instead of kubewatch, and makes /api/handle
+	// ignore kubewatch so a change is never matched twice. K8sWatchWorkers
+	// match in parallel; K8sWatchMaxPending bounds the objects with changes
+	// waiting (updates to one object coalesce). Defaults false / 8 / 10000.
+	K8sWatchEnabled    bool
+	K8sWatchWorkers    int
+	K8sWatchMaxPending int
+	// K8sWatchNamespace and K8sWatchKinds carry kubewatch's `namespace` and
+	// `resource` settings over: one namespace (empty: all) and the kinds to
+	// watch, lower-case (nil: every kind a matcher reads).
+	K8sWatchNamespace string
+	K8sWatchKinds     []string
+	// TriggerEventsCache serves the evidence tables on a matched Finding
+	// (recent subject / node / namespace events) from a trimmed Event
+	// informer instead of three API List calls per match. Default true.
+	TriggerEventsCache bool
 	// RelayHandlerPoolSize bounds concurrent inbound WS handler goroutines in
 	// pkg/relay as a soft outer guard against goroutine pile-up. Default 32.
 	RelayHandlerPoolSize int
@@ -158,6 +182,16 @@ type Config struct {
 	// of discovery so an operator can run primitives-only without paying
 	// for the full informer cache.
 	KubeEnabled bool
+	// GetResourceMaxBytes caps the JSON one get_resource call returns; over it
+	// the call fails and says to scope the request. 0 disables the cap.
+	// GetResourceUnscopedConcurrency bounds how many get_resource lists not
+	// scoped to a namespace, name or selector run at once; 0 removes the bound.
+	// Defaults 64 MiB / 2. A call peaks near 10x its result in heap (the
+	// decoded list, then the evidence, which nests the JSON as a string twice),
+	// so the two together keep get_resource near 1.3 GB at worst, under the
+	// default 2000Mi limit.
+	GetResourceMaxBytes            int
+	GetResourceUnscopedConcurrency int
 
 	// KubectlAllowWrite lifts the read-only verb allowlist on
 	// kubectl_command_executor. Set by the chart from
@@ -315,17 +349,28 @@ func FromEnv() (*Config, error) {
 		AlertRulesInterval: parseDuration(os.Getenv("ALERT_RULES_INTERVAL"), 30*time.Minute),
 		// Scalability knobs — wire-changing features OFF by default (need
 		// collector support).
-		DiscoverySnapshotBatching: envBool("DISCOVERY_SNAPSHOT_BATCHING", false),
-		DiscoveryBatchSize:        envInt("DISCOVERY_BATCH_SIZE", 1000),
-		IncrementalBatchSize:      envInt("DISCOVERY_INCREMENTAL_BATCH_SIZE", 1),
-		IncrementalBatchWindow:    parseDuration(os.Getenv("DISCOVERY_INCREMENTAL_BATCH_WINDOW"), 0),
-		EmitTombstones:            envBool("DISCOVERY_EMIT_TOMBSTONES", false),
-		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
-		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
-		TriggerRateLimits:         ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
-		KubeEnabled:               envBool("KUBE_ENABLED", true),
-		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
-		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
+		DiscoverySnapshotBatching:      envBool("DISCOVERY_SNAPSHOT_BATCHING", false),
+		DiscoveryBatchSize:             envInt("DISCOVERY_BATCH_SIZE", 1000),
+		IncrementalBatchSize:           envInt("DISCOVERY_INCREMENTAL_BATCH_SIZE", 1),
+		IncrementalBatchWindow:         parseDuration(os.Getenv("DISCOVERY_INCREMENTAL_BATCH_WINDOW"), 0),
+		EmitTombstones:                 envBool("DISCOVERY_EMIT_TOMBSTONES", false),
+		ForwardPoolSize:                envInt("FORWARD_POOL_SIZE", 64),
+		KubewatchWorkers:               envInt("KUBEWATCH_WORKERS", 8),
+		KubewatchQueueSize:             envInt("KUBEWATCH_QUEUE_SIZE", 2048),
+		KubewatchQueueMaxBytes:         int64(envInt("KUBEWATCH_QUEUE_MAX_BYTES", 64<<20)),
+		TriggerEventsCache:             envBool("TRIGGER_EVENTS_CACHE", true),
+		K8sWatchEnabled:                envBool("K8S_WATCH_ENABLED", false),
+		K8sWatchWorkers:                envInt("K8S_WATCH_WORKERS", 8),
+		K8sWatchMaxPending:             envInt("K8S_WATCH_MAX_PENDING", 10000),
+		K8sWatchNamespace:              strings.TrimSpace(os.Getenv("K8S_WATCH_NAMESPACE")),
+		K8sWatchKinds:                  envList("K8S_WATCH_KINDS"),
+		RelayHandlerPoolSize:           envInt("RELAY_HANDLER_POOL_SIZE", 32),
+		TriggerRateLimits:              ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
+		KubeEnabled:                    envBool("KUBE_ENABLED", true),
+		GetResourceMaxBytes:            envInt("GET_RESOURCE_MAX_BYTES", 64<<20),
+		GetResourceUnscopedConcurrency: envInt("GET_RESOURCE_UNSCOPED_CONCURRENCY", 2),
+		KubectlAllowWrite:              envBool("KUBECTL_ALLOW_WRITE", false),
+		PodExecEnabled:                 envBool("PODEXEC_ENABLED", true),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
 		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
 		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
@@ -404,6 +449,22 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// envList reads a comma-separated, lower-cased list. Unset gives nil; set but
+// empty gives an empty, non-nil list.
+func envList(name string) []string {
+	s, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.ToLower(strings.TrimSpace(part)); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {

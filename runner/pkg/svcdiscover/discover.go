@@ -68,11 +68,6 @@ var (
 		"app=loki",
 		"app.kubernetes.io/instance=loki",
 	}
-	// OpencostSelectors mirrors OpenCostDiscovery.find_open_cost_url.
-	OpencostSelectors = []string{
-		"app=opencost",
-		"app.kubernetes.io/name=opencost",
-	}
 )
 
 // CacheTTL controls how long autodiscovery results (including misses) are

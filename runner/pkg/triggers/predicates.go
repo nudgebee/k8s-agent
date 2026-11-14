@@ -774,7 +774,6 @@ func podUnschedulableMatcher() MatcherSpec {
 // server-side enricher needed.
 func babysitterChangeMatcher(kind string) MatcherSpec {
 	diffOpt := DefaultSpecDiffOptions()
-	buildBlock := BuildKubernetesDiffBlock
 	if strings.EqualFold(kind, "Ingress") {
 		// An Ingress keeps its routing rules in spec, but how traffic is
 		// actually handled — body-size ceilings, timeouts, buffering,
@@ -782,9 +781,6 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 		// The spec-only filter reports nothing for the change most
 		// likely to have broken traffic.
 		diffOpt = IngressDiffOptions()
-		buildBlock = func(obj, oldObj map[string]any, _ string, diffs []DiffEntry) EvidenceBlock {
-			return BuildIngressDiffBlock(obj, oldObj, diffs)
-		}
 	}
 	return MatcherSpec{
 		Name:           "babysitter_" + strings.ToLower(kind),
@@ -832,7 +828,7 @@ func babysitterChangeMatcher(kind string) MatcherSpec {
 			// CodeMirrorDiffViewer; any other block ("markdown", etc.) shows
 			// "No diff available."
 			return []EvidenceBlock{
-				buildBlock(obj, oldObj, kind, diffs),
+				BuildKubernetesDiffBlock(obj, oldObj, kind, diffs),
 			}
 		},
 	}
@@ -886,16 +882,25 @@ func configMapChangeMatcher() MatcherSpec {
 	}
 }
 
+// ConfigMapIgnored reports a ConfigMap whose changes the config-change
+// matcher always drops, by namespace and name alone: the root-CA bundle
+// written into every namespace, and anything in the excluded namespaces
+// except the tracked system ConfigMaps. The runner's own watch uses it to
+// skip such changes before encoding them.
+func ConfigMapIgnored(namespace, name string) bool {
+	// Written into every namespace by the root-CA controller.
+	if name == "kube-root-ca.crt" {
+		return true
+	}
+	return inExcludedNamespace(namespace) && !isTrackedSystemConfigMap(name)
+}
+
 // isNoisyConfigMap drops ConfigMaps that rewrite themselves as part of
 // normal cluster operation. Without this the change feed fills with
 // coordination traffic that no operator wants to read, and the signal —
 // somebody edited a value an application depends on — drowns in it.
 func isNoisyConfigMap(obj map[string]any) bool {
-	// Written into every namespace by the root-CA controller.
-	if metaName(obj) == "kube-root-ca.crt" {
-		return true
-	}
-	if inExcludedNamespace(metaNS(obj)) && !isTrackedSystemConfigMap(metaName(obj)) {
+	if ConfigMapIgnored(metaNS(obj), metaName(obj)) {
 		return true
 	}
 	meta, _ := obj["metadata"].(map[string]any)

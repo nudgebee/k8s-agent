@@ -77,20 +77,23 @@ func ConfigMapDiffOptions() SpecDiffOptions {
 // spec byte-identical, so a spec-only filter reports nothing for the
 // change most likely to have broken traffic.
 //
-// last-applied-configuration is excluded because kubectl stores a full
-// copy of the object there: monitoring it would report every
-// `kubectl apply` twice, once as the real change and once as the
-// annotation carrying the same change.
+// The applied-copy annotations are excluded because each stores a full
+// copy of the object: monitoring one would report every apply twice,
+// once as the real change and once as the annotation carrying the same
+// change, with the object's inline env values in the recorded values.
 func IngressDiffOptions() SpecDiffOptions {
+	omit := []string{
+		"status",
+		"metadata.generation",
+		"metadata.resourceVersion",
+		"metadata.managedFields",
+	}
+	for _, k := range appliedCopyAnnotations {
+		omit = append(omit, "metadata.annotations."+k)
+	}
 	return SpecDiffOptions{
 		FieldsToMonitor: []string{"spec", "metadata.annotations"},
-		FieldsToOmit: []string{
-			"status",
-			"metadata.generation",
-			"metadata.resourceVersion",
-			"metadata.managedFields",
-			"metadata.annotations." + lastAppliedAnnotation,
-		},
+		FieldsToOmit:    omit,
 	}
 }
 
@@ -245,11 +248,14 @@ func joinPath(prefix, key string) string {
 func BuildKubernetesDiffBlock(obj, oldObj map[string]any, kind string, diffs []DiffEntry) EvidenceBlock {
 	// Strip a small set of "noisy" fields before serializing
 	// (status, metadata.generation/resourceVersion/managedFields). Same
-	// fields the spec-diff filter omits — single source of truth.
+	// fields the spec-diff filter omits — single source of truth. The
+	// applied-copy annotations go too: each is a full copy of the object,
+	// so rendering one doubles the payload, shows the change twice, and
+	// ships inline env values a second time.
 	omit := DefaultSpecDiffOptions().FieldsToOmit
 
-	objYAML := objectToYAML(obj, omit)
-	oldYAML := objectToYAML(oldObj, omit)
+	objYAML := objectToYAML(withoutAppliedCopyAnnotations(obj), omit)
+	oldYAML := objectToYAML(withoutAppliedCopyAnnotations(oldObj), omit)
 
 	// resource_name follows the _obj_to_name convention:
 	// "<kind>/<namespace>/<name>.yaml" (kind lowercased, namespace
@@ -451,32 +457,23 @@ func firstDifferenceWindow(before, after string) (string, string) {
 	return cut(before), cut(after)
 }
 
-// BuildIngressDiffBlock is BuildKubernetesDiffBlock for Ingresses: same
-// block, with kubectl's last-applied annotation stripped from the
-// rendered YAML. Ingress annotations are monitored, so without this the
-// annotation carrying a copy of the whole object is rendered alongside
-// the change it duplicates.
-func BuildIngressDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
-	return BuildKubernetesDiffBlock(
-		withoutLastAppliedAnnotation(obj),
-		withoutLastAppliedAnnotation(oldObj),
-		"Ingress",
-		diffs,
-	)
+// appliedCopyAnnotations each hold a full copy of the object they sit on:
+// kubectl's last-applied-configuration and Rancher/k3s's gzipped
+// objectset.rio.cattle.io/applied. Rendering one inside a diff of that
+// same object doubles the payload, shows the change twice, and ships the
+// object's inline env values a second time.
+var appliedCopyAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+	"objectset.rio.cattle.io/applied",
 }
-
-// lastAppliedAnnotation is kubectl's copy of the whole object, kept on
-// the object itself. Rendering it inside a diff of that same object
-// doubles the payload and shows the change twice.
-const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 
 // truncateConfigMapValues returns a shallow-copied obj whose data /
 // binaryData values are capped — to their change window when windows has
-// one for the key, else to their head — and whose last-applied annotation
-// is dropped. The input is left untouched — the same map is handed to
-// every matcher the engine evaluates.
+// one for the key, else to their head — and whose applied-copy
+// annotations are dropped. The input is left untouched — the same map is
+// handed to every matcher the engine evaluates.
 func truncateConfigMapValues(obj map[string]any, windows map[string]valueWindow, before bool) map[string]any {
-	out := withoutLastAppliedAnnotation(obj)
+	out := withoutAppliedCopyAnnotations(obj)
 	if out == nil {
 		return nil
 	}
@@ -498,14 +495,14 @@ func truncateConfigMapValues(obj map[string]any, windows map[string]valueWindow,
 	return out
 }
 
-// withoutLastAppliedAnnotation shallow-copies obj with kubectl's
-// last-applied annotation removed from metadata.annotations.
+// withoutAppliedCopyAnnotations shallow-copies obj with the
+// appliedCopyAnnotations removed from metadata.annotations.
 //
 // The generic omit list can't express this: stripOmittedFields splits an
 // omit path on ".", and annotation keys are themselves dotted
 // ("kubectl.kubernetes.io/..."), so the path never resolves. The input is
 // left untouched — the engine hands the same map to every matcher.
-func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
+func withoutAppliedCopyAnnotations(obj map[string]any) map[string]any {
 	if obj == nil {
 		return nil
 	}
@@ -518,7 +515,14 @@ func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
 		return out
 	}
 	ann, _ := meta["annotations"].(map[string]any)
-	if _, present := ann[lastAppliedAnnotation]; !present {
+	present := false
+	for _, k := range appliedCopyAnnotations {
+		if _, ok := ann[k]; ok {
+			present = true
+			break
+		}
+	}
+	if !present {
 		return out
 	}
 	metaCopy := make(map[string]any, len(meta))
@@ -527,10 +531,10 @@ func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
 	}
 	annCopy := make(map[string]any, len(ann))
 	for k, v := range ann {
-		if k == lastAppliedAnnotation {
-			continue
-		}
 		annCopy[k] = v
+	}
+	for _, k := range appliedCopyAnnotations {
+		delete(annCopy, k)
 	}
 	metaCopy["annotations"] = annCopy
 	out["metadata"] = metaCopy

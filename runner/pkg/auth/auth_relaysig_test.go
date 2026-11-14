@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -131,5 +132,76 @@ func TestValidate_RelaySig_InvalidRead_FallsThroughToLightAction(t *testing.T) {
 	req.BodyRaw = []byte(`{"action_name":"get_resource","action_params":{"x":1}}`)
 	if err := v.Validate(req); err != nil {
 		t.Fatalf("read with a failed relay sig must fall through to lightActions, got: %v", err)
+	}
+}
+
+// A mutation delivered a second time (same signed body and nonce: the broker
+// redelivers what was unacked when a channel dropped) is reported as a duplicate,
+// not as unauthorized: the first delivery may have applied it.
+func TestValidate_RelaySig_ReplayedMutationIsADuplicateNotADenial(t *testing.T) {
+	priv, pub := relaysigKey(t)
+	ver, _ := relaysig.NewVerifier(pub, discardLogger())
+	v := &Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
+
+	body := []byte(`{"account_id":"a","action_name":"delete_workload","action_params":{"kind":"deployment"}}`)
+	if err := v.Validate(signedRelayReq(priv, body, "delete_workload", "dup-1")); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	err := v.Validate(signedRelayReq(priv, body, "delete_workload", "dup-1"))
+	if !errors.Is(err, ErrDuplicateDelivery) {
+		t.Fatalf("second delivery err = %v; want ErrDuplicateDelivery", err)
+	}
+}
+
+// A replayed read still falls through to the light-action allowlist and runs:
+// reads are safe to repeat, and one redelivered after a relay restart must still
+// be answered.
+func TestValidate_RelaySig_ReplayedReadStillRuns(t *testing.T) {
+	priv, pub := relaysigKey(t)
+	ver, _ := relaysig.NewVerifier(pub, discardLogger())
+	v := &Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
+
+	body := []byte(`{"account_id":"a","action_name":"get_resource","action_params":{}}`)
+	if err := v.Validate(signedRelayReq(priv, body, "get_resource", "dup-2")); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if err := v.Validate(signedRelayReq(priv, body, "get_resource", "dup-2")); err != nil {
+		t.Fatalf("replayed read rejected: %v", err)
+	}
+}
+
+// A replay of a request that also carries another credential falls through to
+// that check as before; only the path that would have rejected it changes.
+func TestValidate_RelaySig_ReplayWithOtherCredentialsFallsThrough(t *testing.T) {
+	priv, pub := relaysigKey(t)
+	ver, _ := relaysig.NewVerifier(pub, discardLogger())
+	v := &Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
+
+	body := []byte(`{"account_id":"a","action_name":"delete_workload","action_params":{}}`)
+	if err := v.Validate(signedRelayReq(priv, body, "delete_workload", "dup-3")); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	again := signedRelayReq(priv, body, "delete_workload", "dup-3")
+	again.Signature = "v0=not-a-valid-hmac"
+	if err := v.Validate(again); err == nil || errors.Is(err, ErrDuplicateDelivery) {
+		t.Fatalf("err = %v; want the HMAC check's own error", err)
+	}
+}
+
+// A forged signature that reuses a seen nonce is not a duplicate: the nonce is
+// only checked once the signature verifies.
+func TestValidate_RelaySig_ForgedReplayIsNotADuplicate(t *testing.T) {
+	priv, pub := relaysigKey(t)
+	ver, _ := relaysig.NewVerifier(pub, discardLogger())
+	v := &Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
+
+	body := []byte(`{"account_id":"a","action_name":"delete_workload","action_params":{}}`)
+	if err := v.Validate(signedRelayReq(priv, body, "delete_workload", "dup-4")); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	forged := signedRelayReq(priv, []byte(`{"account_id":"a","action_name":"delete_workload","action_params":{"x":1}}`), "delete_workload", "dup-4")
+	forged.BodyRaw = body // signature no longer matches the body
+	if err := v.Validate(forged); err == nil || errors.Is(err, ErrDuplicateDelivery) {
+		t.Fatalf("err = %v; want an ordinary rejection", err)
 	}
 }
