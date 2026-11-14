@@ -15,6 +15,9 @@ Changed limits apply after the ClickHouse pod restarts.
 */}}
 {{- if include "nudgebee-agent.clickhouseReader" . }}
 {{- $r := .Values.clickhouse.reader }}
+{{- if and $r.maxMemoryUsageForUser (gt (int64 $r.maxMemoryUsage) (int64 $r.maxMemoryUsageForUser)) }}
+{{- fail (printf "clickhouse.reader.maxMemoryUsage (%d) must not exceed clickhouse.reader.maxMemoryUsageForUser (%d)" (int64 $r.maxMemoryUsage) (int64 $r.maxMemoryUsageForUser)) }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -746,13 +746,18 @@ clickhouse:
     maxExecutionTime: 60        # seconds, when a query sets none
     maxExecutionTimeCeiling: 600
     maxRowsToRead: 2000000000
-    # Bytes per query. Kept below maxMemoryUsageForUser so one wide query
-    # leaves room for the small ones (traces, pickers) running next to it.
-    maxMemoryUsage: 1000000000
-    # Bytes for all of this user's queries running at once. The pod's limit is
-    # 2000Mi, so ClickHouse allows about 1.8GB in all; this leaves room for
-    # inserts and merges. Raise it, maxMemoryUsage and the pod's limit together.
-    maxMemoryUsageForUser: 1500000000
+    # Both memory caps are sized for the default 2000Mi ClickHouse limit and must
+    # scale with it. ClickHouse stops every query at 90% of the pod (about
+    # 1.76GiB here) and holds 0.5-1.1GiB itself before any search, so a cap at or
+    # above what is left never acts: the server limit fails the searches first.
+    # Raise both caps together with the pod's limit.
+    #
+    # Bytes per query. Must not exceed maxMemoryUsageForUser (the chart refuses
+    # it), so one wide query leaves room for the small ones (traces, pickers)
+    # running next to it.
+    maxMemoryUsage: 700000000
+    # Bytes for all of this user's queries running at once.
+    maxMemoryUsageForUser: 1000000000
     # Queries this user runs at once; ClickHouse refuses the next one
     # (TOO_MANY_SIMULTANEOUS_QUERIES) instead of queueing it. A starting point,
     # not a measured peak: raise it if that error shows up under normal use.
