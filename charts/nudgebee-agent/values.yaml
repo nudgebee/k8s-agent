@@ -677,13 +677,15 @@ opentelemetry-collector:
 clickhouse:
   enabled: true
   # The official clickhouse/clickhouse-server image, mirrored with OS patches
-  # (nudgebee/nudgebee: deploy/kubernetes/nudgebee-mirrors/clickhouse-official).
-  # Same ClickHouse version as the Bitnami-based image (24.12.4-debian-12-r0-nb-3)
-  # earlier charts ran, so an existing data volume is read as it is.
+  # (nudgebee/nudgebee: deploy/kubernetes/nudgebee-mirrors/clickhouse-official-26).
+  # 26.10 reads a data volume that 24.12 (earlier charts) wrote, but 24.12
+  # cannot read one that 26.10 has written. Snapshot the volume before
+  # upgrading, and roll back by restoring the snapshot, not by setting an
+  # older tag.
   image:
     registry: ghcr.io
     repository: nudgebee/clickhouse
-    tag: 24.12.4-nb-1
+    tag: 26.10.4-nb-1
     # Secrets for pulling the image from a private registry, as secret names
     # or {name: ...} entries. Used by the ClickHouse pod and the schema job.
     pullSecrets: []

@@ -30,6 +30,11 @@ data:
       <logger>
         <level>information</level>
       </logger>
+      <!-- On nodes running eBPF agents that attach uprobes, the server's code
+           can change in memory, and the start-up checksum check of the binary
+           then refuses to start (code 246, CORRUPTED_DATA), so a restart can
+           crash-loop. -->
+      <skip_binary_checksum_checks>1</skip_binary_checksum_checks>
       {{- if .Values.clickhouse.metrics.enabled }}
        <!-- Prometheus metrics -->
        <prometheus>
@@ -114,5 +119,18 @@ data:
         </{{ $user }}>
       {{- end }}
       </users>
+    </clickhouse>
+  # ClickHouse 26 changed these defaults. Keep what earlier charts ran with:
+  # synchronous inserts for the collector, and 64-bit integers quoted in JSON.
+  # The read-only user's profile sets the same quoting in
+  # clickhouse-reader-users.yaml.
+  10_compat_settings.xml: |
+    <clickhouse>
+      <profiles>
+        <default>
+          <async_insert>0</async_insert>
+          <output_format_json_quote_64bit_integers>1</output_format_json_quote_64bit_integers>
+        </default>
+      </profiles>
     </clickhouse>
 {{- end }}
