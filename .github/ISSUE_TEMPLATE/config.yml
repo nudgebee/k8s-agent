@@ -4,7 +4,7 @@ contact_links:
     url: https://github.com/nudgebee/k8s-agent/security/advisories/new
     about: Report security issues privately. Do not open a public issue.
   - name: NudgeBee documentation
-    url: https://app.nudgebee.com/help/docs/installation/agent/installation/
+    url: https://docs.nudgebee.com/docs/installation/agent/installation/
     about: Installation, configuration, and troubleshooting guides.
   - name: Community / questions
     url: https://github.com/nudgebee/k8s-agent/discussions

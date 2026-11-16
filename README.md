@@ -40,6 +40,14 @@ helm upgrade --install nudgebee-agent nudgebee-agent/nudgebee-agent \
   --set runner.nudgebee.auth_secret_key="<your-auth-key>"
 ```
 
+The chart is also published as an OCI artifact. Both sources serve the same package, so an existing release can move over with a plain `helm upgrade`:
+
+```bash
+helm upgrade --install nudgebee-agent oci://ghcr.io/nudgebee/charts/nudgebee-agent \
+  --namespace nudgebee-agent --create-namespace \
+  --set runner.nudgebee.auth_secret_key="<your-auth-key>"
+```
+
 Or use the opinionated installer (auto-installs `kube-prometheus-stack` and wires up Prometheus discovery):
 
 ```bash
@@ -186,7 +194,7 @@ opentelemetry-collector:
   enabled: true
 ```
 
-Full configuration reference: [installation guide](https://app.nudgebee.com/help/docs/installation/agent/installation/).
+Full configuration reference: [installation guide](https://docs.nudgebee.com/docs/installation/agent/installation/).
 
 ### Storage
 
