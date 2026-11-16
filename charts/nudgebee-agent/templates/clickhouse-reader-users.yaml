@@ -24,6 +24,9 @@ data:
       <profiles>
         <nudgebee_reader>
           <readonly>2</readonly>
+          <!-- ClickHouse 26 stopped quoting 64-bit integers in JSON by default;
+               keep the quoted form earlier charts returned. -->
+          <output_format_json_quote_64bit_integers>1</output_format_json_quote_64bit_integers>
           <max_execution_time>{{ int64 $r.maxExecutionTime }}</max_execution_time>
           <max_rows_to_read>{{ int64 $r.maxRowsToRead }}</max_rows_to_read>
           <max_memory_usage>{{ int64 $r.maxMemoryUsage }}</max_memory_usage>

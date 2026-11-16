@@ -121,8 +121,9 @@ data:
       </users>
     </clickhouse>
   # ClickHouse 26 changed these defaults. Keep what earlier charts ran with:
-  # synchronous inserts for the collector, and 64-bit integers quoted in JSON
-  # for the backend's reads through the read-only user.
+  # synchronous inserts for the collector, and 64-bit integers quoted in JSON.
+  # The read-only user's profile sets the same quoting in
+  # clickhouse-reader-users.yaml.
   10_compat_settings.xml: |
     <clickhouse>
       <profiles>
@@ -130,9 +131,6 @@ data:
           <async_insert>0</async_insert>
           <output_format_json_quote_64bit_integers>1</output_format_json_quote_64bit_integers>
         </default>
-        <nudgebee_reader>
-          <output_format_json_quote_64bit_integers>1</output_format_json_quote_64bit_integers>
-        </nudgebee_reader>
       </profiles>
     </clickhouse>
 {{- end }}
