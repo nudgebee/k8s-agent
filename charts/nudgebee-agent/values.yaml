@@ -307,8 +307,8 @@ runner:
   #   shadow      serves the PromQL map; every 15 min per window also builds the
   #               ClickHouse map and logs how the two differ.
   #   clickhouse  edges and container health from ClickHouse, pods/services
-  #               still from Prometheus; falls back to Prometheus whenever
-  #               ClickHouse does not cover the requested window.
+  #               as set by serviceMapInventory; falls back to Prometheus
+  #               whenever ClickHouse does not cover the requested window.
   # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
   # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
   # holds this cluster's metrics only (the bundled one does). They create
@@ -317,6 +317,14 @@ runner:
   # rights. A window from before the tables existed falls back to Prometheus.
   # The prometheus default creates nothing.
   serviceMapSource: prometheus
+  # Where service_map gets pods, readiness, replicas, labels and services:
+  #   kubernetes  the runner's own Kubernetes cache (default); needs no
+  #               kube-state-metrics. Needs discovery (on by default) or
+  #               k8sWatch.enabled. A window ending more than 10 min ago still
+  #               uses the kube_* queries when a Prometheus is configured, as
+  #               the cache holds the cluster as it is now.
+  #   prometheus  the kube_* queries; needs kube-state-metrics.
+  serviceMapInventory: kubernetes
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.
