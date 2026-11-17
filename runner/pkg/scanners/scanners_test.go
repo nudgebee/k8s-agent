@@ -69,6 +69,16 @@ func TestBuildJob_HygieneInvariants(t *testing.T) {
 	if job.Namespace != "ns" {
 		t.Errorf("namespace = %q; agent must clamp", job.Namespace)
 	}
+	// The pod carries the Job's labels, so pod watchers can recognise a scan pod.
+	podLabels := job.Spec.Template.Labels
+	for k, v := range job.Labels {
+		if podLabels[k] != v {
+			t.Errorf("pod template label %s = %q; want the Job's %q", k, podLabels[k], v)
+		}
+	}
+	if podLabels[jobNameSelectorLabel] != "popeye-scan-abcd1234" {
+		t.Errorf("pod template job-name label = %q; want the Job name", podLabels[jobNameSelectorLabel])
+	}
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("RestartPolicy = %v; want Never", job.Spec.Template.Spec.RestartPolicy)
 	}
