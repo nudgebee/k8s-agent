@@ -892,6 +892,23 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
 		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
 	}
+	smInventory, ok := servicemap.ParseInventory(cfg.ServiceMapInventory)
+	if !ok {
+		logger.Warn("unknown SERVICE_MAP_INVENTORY; using prometheus", "value", cfg.ServiceMapInventory)
+	}
+	if smInventory == servicemap.InventoryKubernetes {
+		if sharedFactory == nil {
+			logger.Warn("SERVICE_MAP_INVENTORY=kubernetes needs DISCOVERY_ENABLED or K8S_WATCH_ENABLED; using prometheus")
+			smInventory = servicemap.InventoryPrometheus
+		} else {
+			// Asked for before discovery or the k8s watch starts the factory,
+			// which then starts these informers too. Not started here:
+			// discovery sets watch error handlers, which fail once started.
+			smSvc.Kube = servicemap.NewKubeCache(sharedFactory)
+		}
+	}
+	smSvc.Inventory = smInventory
+	logger.Info("service map inventory", "inventory", string(smInventory))
 
 	// Keep looking for a Prometheus we could not find at boot, and point the
 	// client at the first one that appears. Everything downstream reads the URL

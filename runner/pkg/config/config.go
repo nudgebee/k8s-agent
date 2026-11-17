@@ -252,6 +252,11 @@ type Config struct {
 	// logs how the ClickHouse map differs). Needs the collector's node-agent
 	// metrics pipeline writing into ClickHouse.
 	ServiceMapSource string
+	// ServiceMapInventory is where service_map gets pods, readiness, replicas,
+	// labels and services: "prometheus" (default, the kube_* queries) or
+	// "kubernetes" (the runner's informer cache; needs discovery or the k8s
+	// watch running).
+	ServiceMapInventory string
 
 	// Where logs are written in that ClickHouse, for the logs health check. The
 	// chart sets these from the bundled collector's exporter config. Unset (the
@@ -397,6 +402,7 @@ func FromEnv() (*Config, error) {
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
 		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
+		ServiceMapInventory:        cmp(os.Getenv("SERVICE_MAP_INVENTORY"), "prometheus"),
 		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
 		ClickHouseLogsCollected:    envBool("CLICKHOUSE_LOGS_COLLECTED", false),
 		ClickHouseReaderUser:       os.Getenv("CLICKHOUSE_READER_USER"),
