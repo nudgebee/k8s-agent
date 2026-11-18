@@ -83,7 +83,7 @@ RUN set -eu; \
 
 # Throwaway stage: bring the CA trust store up to date. Only its files are
 # copied into the final image (never /var/lib/rpm or system binaries).
-FROM registry.access.redhat.com/ubi9@sha256:87f66688da4e206d5a1877088626c542288a5ccd97898cf363b588d57817e6be AS pkgs
+FROM registry.access.redhat.com/ubi9@sha256:e45746866f611d164042b961cd83f1093c4fdb422d9b99fcf23ff951626044f8 AS pkgs
 RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates \
  && dnf clean all
 
