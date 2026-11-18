@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -50,17 +51,21 @@ func clickhousePromQLAuth(c *prometheus.Client, chURL, user, password string) {
 	c.Auth = prometheus.ForURL(chURL, prometheus.NewBasicAuth(user, password), c.Auth)
 }
 
-// probeClickHousePromQL reports whether ClickHouse's Prometheus query API at
-// chURL answers the probe with at least one series, using the client's HTTP
-// client, headers and authorizer.
-func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL string) bool {
+// errNoNodeAgentSeries is the probe's reason when the query works but the
+// table holds no node-agent data.
+var errNoNodeAgentSeries = errors.New("no node-agent series")
+
+// probeClickHousePromQL returns nil when ClickHouse's Prometheus query API at
+// chURL answers the probe with at least one series, else why not. It uses the
+// client's HTTP client, headers and authorizer.
+func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL string) error {
 	p := prometheus.New(chURL, c.HTTP)
 	p.ExtraHeaders, p.Auth = c.ExtraHeaders, c.Auth
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	raw, err := p.Query(cctx, clickhousePromQLProbe, "", "")
 	if err != nil {
-		return false
+		return err
 	}
 	var resp struct {
 		Status string `json:"status"`
@@ -68,7 +73,16 @@ func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL stri
 			Result []json.RawMessage `json:"result"`
 		} `json:"data"`
 	}
-	return json.Unmarshal(raw, &resp) == nil && resp.Status == "success" && len(resp.Data.Result) > 0
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return err
+	}
+	if resp.Status != "success" {
+		return errors.New("query status " + resp.Status)
+	}
+	if len(resp.Data.Result) == 0 {
+		return errNoNodeAgentSeries
+	}
+	return nil
 }
 
 // watchClickHousePromQL probes ClickHouse's Prometheus query API now and then
@@ -76,14 +90,26 @@ func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL stri
 // while the client has no URL: a Prometheus that discovery finds first keeps
 // it, and one found later replaces ClickHouse. After an upgrade the handler
 // and table may appear only after the runner started, hence the re-probe.
+// The first failed probe is logged at Info with its reason, later ones at
+// Debug.
 func watchClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL string, interval time.Duration, logger *slog.Logger) {
+	logged := false
 	for {
 		if c.URL() != "" {
 			return
 		}
-		if probeClickHousePromQL(ctx, c, chURL) && c.SetURLIfEmpty(chURL) {
-			logger.Info("prometheus not found; PromQL goes to ClickHouse until one is discovered", "url", redact.URL(chURL))
+		err := probeClickHousePromQL(ctx, c, chURL)
+		switch {
+		case err == nil:
+			if c.SetURLIfEmpty(chURL) {
+				logger.Info("prometheus not found; PromQL goes to ClickHouse until one is discovered", "url", redact.URL(chURL))
+			}
 			return
+		case !logged:
+			logger.Info("ClickHouse PromQL fallback not available yet; will retry", "reason", err.Error(), "url", redact.URL(chURL), "retry_interval", interval)
+			logged = true
+		default:
+			logger.Debug("ClickHouse PromQL fallback not available yet", "reason", err.Error())
 		}
 		select {
 		case <-ctx.Done():

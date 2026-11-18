@@ -290,9 +290,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
 		}
 	}
-	// No Prometheus: send PromQL to ClickHouse's Prometheus query API when the
-	// chart enables it. The watcher below still looks for a Prometheus, which
-	// takes over the moment one appears; ForURL keeps each backend's auth.
 	// With no Prometheus, PromQL can fall back to ClickHouse's Prometheus
 	// query API once a probe finds node-agent data there (see the watcher
 	// below); ForURL keeps each backend's auth.

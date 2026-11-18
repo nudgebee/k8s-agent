@@ -87,21 +87,25 @@ func newFallbackClient(t *testing.T, ch *fakeClickHouse) (*prometheus.Client, st
 // on at least one series: vector(1) would pass on an empty table.
 func TestProbeClickHousePromQL(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
-		want   bool
+		name       string
+		status     int
+		body       string
+		wantReason string // "" when the probe passes
 	}{
-		{"node-agent series", 200, oneSeries, true},
-		{"empty table", 200, noSeries, false},
-		{"handler missing", 404, "There is no handle /prometheus/api/v1/query", false},
-		{"auth rejected", 401, "Authentication failed", false},
+		{"node-agent series", 200, oneSeries, ""},
+		{"empty table", 200, noSeries, "no node-agent series"},
+		{"handler missing", 404, "There is no handle /prometheus/api/v1/query", "HTTP 404"},
+		{"auth rejected", 401, "Authentication failed", "HTTP 401"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ch := &fakeClickHouse{body: func() (int, string) { return tc.status, tc.body }}
 			c, chURL := newFallbackClient(t, ch)
-			if got := probeClickHousePromQL(context.Background(), c, chURL); got != tc.want {
-				t.Errorf("probe = %v; want %v", got, tc.want)
+			err := probeClickHousePromQL(context.Background(), c, chURL)
+			switch {
+			case tc.wantReason == "" && err != nil:
+				t.Errorf("probe failed: %v; want it to pass", err)
+			case tc.wantReason != "" && (err == nil || !strings.Contains(err.Error(), tc.wantReason)):
+				t.Errorf("probe reason = %v; want it to mention %q", err, tc.wantReason)
 			}
 			ch.mu.Lock()
 			defer ch.mu.Unlock()
@@ -192,4 +196,50 @@ func TestWatchClickHousePromQLPrometheusFirst(t *testing.T) {
 	if n := ch.calls(); n != 0 {
 		t.Errorf("probes sent = %d; want 0", n)
 	}
+}
+
+// A failing probe logs its reason once at Info, not on every retry.
+func TestWatchClickHousePromQLLogsReasonOnce(t *testing.T) {
+	var probes atomic.Int64
+	ch := &fakeClickHouse{body: func() (int, string) {
+		if probes.Add(1) > 3 {
+			return 200, oneSeries
+		}
+		return 200, noSeries
+	}}
+	c, chURL := newFallbackClient(t, ch)
+	var buf safeBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	watchClickHousePromQL(ctx, c, chURL, time.Millisecond, logger)
+
+	out := buf.String()
+	if n := strings.Count(out, "fallback not available yet"); n != 1 {
+		t.Errorf("Info lines about the failing probe = %d; want 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, `reason="no node-agent series"`) {
+		t.Errorf("reason missing from the log:\n%s", out)
+	}
+	if !strings.Contains(out, "PromQL goes to ClickHouse") {
+		t.Errorf("switch not logged:\n%s", out)
+	}
+}
+
+type safeBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
