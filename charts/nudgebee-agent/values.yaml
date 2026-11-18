@@ -388,7 +388,9 @@ runner:
   # "/prometheus" for a prometheus_api_v1 handler at /prometheus/api/v1. A
   # Prometheus discovered later takes over. Empty (default) leaves PromQL
   # unavailable without a Prometheus. The handler and the TimeSeries table it
-  # reads are not set up by this chart yet.
+  # reads are not set up by this chart yet. With CLUSTER_NAME set the service
+  # map comes back empty from ClickHouse: its queries filter on cluster, and
+  # the table has no cluster label until one is added at ingest.
   clickhousePromqlPath: ""
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty

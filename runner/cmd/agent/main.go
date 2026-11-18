@@ -293,15 +293,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// No Prometheus: send PromQL to ClickHouse's Prometheus query API when the
 	// chart enables it. The watcher below still looks for a Prometheus, which
 	// takes over the moment one appears; ForURL keeps each backend's auth.
-	if cfg.PrometheusURL == "" && cfg.ClickHousePromQLPath != "" && cfg.ClickHouseEnabled && cfg.ClickHouseHost != "" {
-		chProm := chclient.New(chclient.Config{
-			Host:       cfg.ClickHouseHost,
-			Port:       cfg.ClickHousePort,
-			SSLEnabled: cfg.ClickHouseSSL,
-		}).BaseURL + "/" + strings.Trim(cfg.ClickHousePromQLPath, "/")
-		promClient.Auth = prometheus.ForURL(chProm, prometheus.NewBasicAuth(cfg.ClickHouseUser, cfg.ClickHousePassword), promClient.Auth)
-		promClient.SetURL(chProm)
-		logger.Info("prometheus not configured; PromQL goes to ClickHouse until one is discovered", "url", redact.URL(chProm))
+	chPromQL := clickhousePromQLURL(cfg)
+	if chPromQL != "" {
+		useClickHousePromQL(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
+		logger.Info("prometheus not configured; PromQL goes to ClickHouse until one is discovered", "url", redact.URL(chPromQL))
 	}
 	ph := prometheus.Handlers(promClient)
 	maps.Copy(handlers, ph)
@@ -863,11 +858,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			promClient.URL(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			prometheusProxyURL(promClient, chPromQL)(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
 		// Read the URL per request rather than pinning the one we had at
 		// startup, so the /prometheus-v2/* route works on a Prometheus that
-		// only shows up later.
-		gp.PrometheusURLFn = promClient.URL
+		// only shows up later. Not the ClickHouse fallback: the proxy does not
+		// carry the client's authorizer.
+		gp.PrometheusURLFn = prometheusProxyURL(promClient, chPromQL)
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
 			logger.Info("grafana proxy enabled", "url", redact.URL(grafanaURL))
@@ -1244,6 +1240,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              promClient.URL(),
+					PrometheusBackend:          promBackend(promClient, chPromQL),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
 					LogsProvider:               logsProvider,
