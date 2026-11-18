@@ -290,6 +290,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
 		}
 	}
+	// No Prometheus: send PromQL to ClickHouse's Prometheus query API when the
+	// chart enables it. The watcher below still looks for a Prometheus, which
+	// takes over the moment one appears; ForURL keeps each backend's auth.
+	if cfg.PrometheusURL == "" && cfg.ClickHousePromQLPath != "" && cfg.ClickHouseEnabled && cfg.ClickHouseHost != "" {
+		chProm := chclient.New(chclient.Config{
+			Host:       cfg.ClickHouseHost,
+			Port:       cfg.ClickHousePort,
+			SSLEnabled: cfg.ClickHouseSSL,
+		}).BaseURL + "/" + strings.Trim(cfg.ClickHousePromQLPath, "/")
+		promClient.Auth = prometheus.ForURL(chProm, prometheus.NewBasicAuth(cfg.ClickHouseUser, cfg.ClickHousePassword), promClient.Auth)
+		promClient.SetURL(chProm)
+		logger.Info("prometheus not configured; PromQL goes to ClickHouse until one is discovered", "url", redact.URL(chProm))
+	}
 	ph := prometheus.Handlers(promClient)
 	maps.Copy(handlers, ph)
 	for name := range ph {
@@ -339,8 +352,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// agent — which read prometheus_url from the Robusta global_config ConfigMap
 	// — by bumping only the image tag on the old chart, which never sets the
 	// PROMETHEUS_URL env the Go agent reads.
-	watchForPrometheus := promClient.URL() == ""
-	if watchForPrometheus {
+	watchForPrometheus := cfg.PrometheusURL == ""
+	if promClient.URL() == "" {
 		logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
 			"retry_interval", promDiscoveryInterval)
 	}
@@ -529,9 +542,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		smSvc.NodeAgentCount = nodeAgentCounter(typedKube, installNamespace(cfg))
 	}
 	smSvc.UseClickHouse(ch, smSource, logger)
-	if smSource == servicemap.SourceTimeSeries {
-		smSvc.UseTimeSeries(ch, cfg.ServiceMapTimeSeriesPath)
-	}
 	smSvc.StartSummary(ctx)
 	logger.Info("service map source", "source", string(smSource), "clickhouse", ch != nil)
 
@@ -933,7 +943,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		g.Go(func() error {
 			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
 				promClient.SetURL(u)
-				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", redact.URL(u))
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map now use it", "url", redact.URL(u))
 			})
 			return nil
 		})

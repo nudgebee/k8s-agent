@@ -366,13 +366,6 @@ runner:
   #   clickhouse  edges and container health from ClickHouse, pods/services
   #               as set by serviceMapInventory; falls back to Prometheus
   #               whenever ClickHouse does not cover the requested window.
-  #   timeseries  the same PromQL as prometheus for edges and container
-  #               health, sent to ClickHouse's Prometheus query API
-  #               (prometheus_api_v1 handler at /prometheus/api/v1, over the
-  #               TimeSeries table the collector remote-writes node-agent
-  #               metrics into). Creates no summary tables; a failed query is
-  #               retried on Prometheus when one is configured. The handler,
-  #               table and collector pipeline are not set up by this chart yet.
   # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
   # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
   # holds this cluster's metrics only (the bundled one does). They create
@@ -389,6 +382,14 @@ runner:
   #               the cache holds the cluster as it is now.
   #   prometheus  the kube_* queries; needs kube-state-metrics.
   serviceMapInventory: kubernetes
+  # With no Prometheus configured or discovered, send the runner's PromQL
+  # (service map, rightsizing, prometheus_* actions) to ClickHouse's Prometheus
+  # query API at this path on the ClickHouse HTTP port, for example
+  # "/prometheus" for a prometheus_api_v1 handler at /prometheus/api/v1. A
+  # Prometheus discovered later takes over. Empty (default) leaves PromQL
+  # unavailable without a Prometheus. The handler and the TimeSeries table it
+  # reads are not set up by this chart yet.
+  clickhousePromqlPath: ""
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.

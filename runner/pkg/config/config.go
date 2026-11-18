@@ -255,15 +255,15 @@ type Config struct {
 
 	// ServiceMapSource is where service_map reads the eBPF edge and container
 	// metrics: "prometheus" (default), "clickhouse" (falls back to Prometheus
-	// when ClickHouse cannot serve the window), "shadow" (serves Prometheus,
-	// logs how the ClickHouse map differs) or "timeseries" (the same PromQL,
-	// against ClickHouse's Prometheus query API over the node-agent TimeSeries
-	// table). All but prometheus need the collector's node-agent metrics
-	// pipeline writing into ClickHouse.
+	// when ClickHouse cannot serve the window) or "shadow" (serves Prometheus,
+	// logs how the ClickHouse map differs). Needs the collector's node-agent
+	// metrics pipeline writing into ClickHouse.
 	ServiceMapSource string
-	// ServiceMapTimeSeriesPath is the URL prefix of ClickHouse's
-	// prometheus_api_v1 handler before /api/v1, on the ClickHouse HTTP port.
-	ServiceMapTimeSeriesPath string
+	// ClickHousePromQLPath, when set, is the URL prefix (before /api/v1) of
+	// ClickHouse's prometheus_api_v1 handler on the ClickHouse HTTP port. With
+	// no Prometheus configured or discovered, PromQL then goes there, as the
+	// ClickHouse user, until a Prometheus is discovered.
+	ClickHousePromQLPath string
 	// ServiceMapInventory is where service_map gets pods, readiness, replicas,
 	// labels and services: "prometheus" (default, the kube_* queries) or
 	// "kubernetes" (the runner's informer cache; needs discovery or the k8s
@@ -415,7 +415,7 @@ func FromEnv() (*Config, error) {
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
 		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
-		ServiceMapTimeSeriesPath:   cmp(os.Getenv("SERVICE_MAP_TIMESERIES_PATH"), "/prometheus"),
+		ClickHousePromQLPath:       os.Getenv("CLICKHOUSE_PROMQL_PATH"),
 		ServiceMapInventory:        cmp(os.Getenv("SERVICE_MAP_INVENTORY"), "prometheus"),
 		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
 		ClickHouseLogsCollected:    envBool("CLICKHOUSE_LOGS_COLLECTED", false),

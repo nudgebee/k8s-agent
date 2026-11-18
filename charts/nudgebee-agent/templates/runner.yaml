@@ -251,3 +251,6 @@ stringData:
   {{- with .Values.runner.serviceMapInventory }}
   SERVICE_MAP_INVENTORY: {{ . | quote }}
   {{- end }}
+  {{- with .Values.runner.clickhousePromqlPath }}
+  CLICKHOUSE_PROMQL_PATH: {{ . | quote }}
+  {{- end }}

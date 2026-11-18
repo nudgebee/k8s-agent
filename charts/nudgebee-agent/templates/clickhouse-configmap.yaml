@@ -156,6 +156,11 @@ data:
         <default>
           <async_insert>0</async_insert>
           <output_format_json_quote_64bit_integers>1</output_format_json_quote_64bit_integers>
+          <!-- The Prometheus query API (prometheus_api_v1) evaluates PromQL with
+               aggregate functions ClickHouse 26.10 keeps behind this setting;
+               without it every query fails. The runner's timeseries service
+               map source queries it as this user. -->
+          <enable_time_series_aggregate_functions>1</enable_time_series_aggregate_functions>
         </default>
       </profiles>
     </clickhouse>

@@ -49,6 +49,29 @@ func (a *basicAuth) Apply(_ context.Context, req *http.Request) error {
 	return nil
 }
 
+// ForURL returns an Authorizer that applies a to requests sent under base and
+// next (nil for none) to every other request. A client whose URL moves from
+// one backend to another (see Client.SetURL) then sends each the credentials
+// it expects.
+func ForURL(base string, a, next Authorizer) Authorizer {
+	return &urlAuth{base: strings.TrimRight(base, "/") + "/", a: a, next: next}
+}
+
+type urlAuth struct {
+	base    string
+	a, next Authorizer
+}
+
+func (u *urlAuth) Apply(ctx context.Context, req *http.Request) error {
+	if strings.HasPrefix(req.URL.String(), u.base) {
+		return u.a.Apply(ctx, req)
+	}
+	if u.next != nil {
+		return u.next.Apply(ctx, req)
+	}
+	return nil
+}
+
 // --- Coralogix -------------------------------------------------------------
 
 type coralogixAuth struct{ token string }

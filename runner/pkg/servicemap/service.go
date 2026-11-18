@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -30,10 +29,6 @@ type Service struct {
 	// Build is PromQL only, as before.
 	CH     *chclient.Client
 	Source Source
-	// TS is a PromQL client for ClickHouse's Prometheus query API over the
-	// node-agent TimeSeries table, used by SourceTimeSeries (see
-	// UseTimeSeries).
-	TS *prometheus.Client
 	// Inventory InventoryKubernetes reads pods, readiness, replicas, labels
 	// and services from Kube instead of the kube_* queries.
 	Inventory Inventory
@@ -64,11 +59,6 @@ const (
 	// per window and filter, also builds the ClickHouse map and logs how the
 	// two differ.
 	SourceShadow Source = "shadow"
-	// SourceTimeSeries runs the same PromQL as SourcePrometheus for edges and
-	// container health, against ClickHouse's Prometheus query API over the
-	// node-agent TimeSeries table. It creates no summary tables. A query that
-	// fails there is retried on Prometheus when one is configured.
-	SourceTimeSeries Source = "timeseries"
 )
 
 // ParseSource maps the SERVICE_MAP_SOURCE value to a Source; anything it does
@@ -78,7 +68,7 @@ func ParseSource(v string) (Source, bool) {
 	switch s := Source(strings.ToLower(strings.TrimSpace(v))); s {
 	case "", SourcePrometheus:
 		return SourcePrometheus, true
-	case SourceClickHouse, SourceShadow, SourceTimeSeries:
+	case SourceClickHouse, SourceShadow:
 		return s, true
 	}
 	return SourcePrometheus, false
@@ -244,12 +234,6 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 
 	var metrics map[string][]promResult
 	switch s.source() {
-	case SourceTimeSeries:
-		// No cluster filter: the TimeSeries table holds this cluster's
-		// node-agent metrics only, scraped without a cluster label.
-		metrics = s.timeseriesMetrics(ctx, queryList, endStr, func(q string) string {
-			return expandPlaceholders(q, rangeStr, srcFilter, dstFilter, podFilter, nsFilter, "")
-		}, fetch)
 	case SourceClickHouse:
 		metrics = s.clickhouseMetrics(ctx, start, end, window, p, queryList, fetch)
 	case SourceShadow:
@@ -366,45 +350,10 @@ func (s *Service) fetchSummary(ctx context.Context, start, end time.Time, p Filt
 	return fetchClickHouse(ctx, s.CH, start, end, p, s.NodeAgentCount)
 }
 
-// timeseriesMetrics runs the edge and container queries against ClickHouse's
-// TimeSeries table and any kube_* queries (no Kubernetes inventory) against
-// Prometheus, in parallel. A TimeSeries query that fails is retried on
-// Prometheus through fetch, which records it as failed when there is none.
-func (s *Service) timeseriesMetrics(ctx context.Context, queryList map[string]string, endStr string,
-	expand func(string) string, fetch func(context.Context, map[string]string) map[string][]promResult) map[string][]promResult {
-	kube := kubeKeys(queryList)
-	kubeCh := make(chan map[string][]promResult, 1)
-	go func() { kubeCh <- fetch(ctx, kube) }()
-
-	rest := map[string]string{}
-	for k, q := range queryList {
-		if _, ok := kube[k]; !ok {
-			rest[k] = q
-		}
-	}
-	tsMetrics, bad := s.fetchPromFrom(ctx, s.TS, rest, endStr, expand)
-	metrics := <-kubeCh
-	maps.Copy(metrics, tsMetrics)
-	if len(bad) > 0 && ctx.Err() == nil {
-		s.logger().Warn("service map: timeseries queries failed, using prometheus", "queries", len(bad))
-		retry := map[string]string{}
-		for _, k := range bad {
-			retry[k] = rest[k]
-		}
-		maps.Copy(metrics, fetch(ctx, retry))
-	}
-	return metrics
-}
-
-// fetchProm runs the given queries on Prometheus; see fetchPromFrom.
+// fetchProm runs the given queries in parallel, at most MaxParallel at a time.
+// A query that fails is left out of the result and its key returned in failed;
+// Build decides whether the map can be drawn without it.
 func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, endStr string, expand func(string) string) (metrics map[string][]promResult, failed []string) {
-	return s.fetchPromFrom(ctx, s.Prom, queryList, endStr, expand)
-}
-
-// fetchPromFrom runs the given queries on c in parallel, at most MaxParallel
-// at a time. A query that fails is left out of the result and its key returned
-// in failed; Build decides whether the map can be drawn without it.
-func (s *Service) fetchPromFrom(ctx context.Context, c *prometheus.Client, queryList map[string]string, endStr string, expand func(string) string) (metrics map[string][]promResult, failed []string) {
 	type fetchResult struct {
 		key  string
 		data []promResult
@@ -428,7 +377,7 @@ func (s *Service) fetchPromFrom(ctx context.Context, c *prometheus.Client, query
 			}
 			defer func() { <-sem }()
 
-			raw, err := c.Query(ctx, expand(q), endStr, "")
+			raw, err := s.Prom.Query(ctx, expand(q), endStr, "")
 			if err != nil {
 				resultsCh <- fetchResult{key: key, err: err}
 				return
@@ -443,7 +392,7 @@ func (s *Service) fetchPromFrom(ctx context.Context, c *prometheus.Client, query
 	metrics = map[string][]promResult{}
 	for r := range resultsCh {
 		if r.err != nil {
-			s.logger().Warn("service map: query failed", "key", r.key, "backend", c.URL(), "err", r.err)
+			s.logger().Warn("service map: prometheus query failed", "key", r.key, "err", r.err)
 			failed = append(failed, r.key)
 			continue
 		}
@@ -520,12 +469,6 @@ func kubeKeys[V any](m map[string]V) map[string]V {
 }
 
 func (s *Service) source() Source {
-	if s.Source == SourceTimeSeries {
-		if s.TS == nil || s.TS.URL() == "" {
-			return SourcePrometheus
-		}
-		return SourceTimeSeries
-	}
 	if s.CH == nil {
 		return SourcePrometheus
 	}
@@ -548,35 +491,6 @@ func (s *Service) logger() *slog.Logger {
 // startup, before StartSummary.
 func (s *Service) UseClickHouse(c *chclient.Client, src Source, logger *slog.Logger) {
 	s.CH, s.Source, s.Logger = c, src, logger
-}
-
-// UseTimeSeries points SourceTimeSeries at ClickHouse's Prometheus query API:
-// path is the handler's prefix before /api/v1 (for example "/prometheus"),
-// authenticated as the ClickHouse client's user. Call it after UseClickHouse.
-func (s *Service) UseTimeSeries(c *chclient.Client, path string) {
-	if c == nil {
-		return
-	}
-	ts := prometheus.New(strings.TrimRight(c.BaseURL, "/")+"/"+strings.Trim(path, "/"), &http.Client{
-		Timeout:   60 * time.Second,
-		Transport: timeSeriesSettings{http.DefaultTransport},
-	})
-	ts.Auth = prometheus.NewBasicAuth(c.User, c.Password)
-	s.TS = ts
-}
-
-// timeSeriesSettings adds the ClickHouse settings the Prometheus query API
-// needs to every request: rate(), increase() and the other range functions
-// run on aggregate functions that ClickHouse 26.10 refuses unless
-// enable_time_series_aggregate_functions is set.
-type timeSeriesSettings struct{ next http.RoundTripper }
-
-func (t timeSeriesSettings) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	q := r.URL.Query()
-	q.Set("enable_time_series_aggregate_functions", "1")
-	r.URL.RawQuery = q.Encode()
-	return t.next.RoundTrip(r)
 }
 
 // maybeShadow builds the ClickHouse map for the same window in the
