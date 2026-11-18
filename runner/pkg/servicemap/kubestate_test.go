@@ -395,3 +395,38 @@ func TestBuild_KubernetesCacheNotSyncedWithoutPrometheus(t *testing.T) {
 		t.Errorf("err = %v; want %q", err, want)
 	}
 }
+
+// On the ClickHouse fallback (no kube-state metrics), a window that ended 2h
+// ago still takes its pods from the cache; a real Prometheus keeps answering
+// the kube_* queries for it.
+func TestBuild_KubernetesInventoryPastWindowWithoutRealPrometheus(t *testing.T) {
+	end := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	for _, tc := range []struct {
+		name      string
+		real      bool
+		wantKubeQ bool
+	}{
+		{"clickhouse fallback", false, false},
+		{"real prometheus", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fp := newKubeTestService(t, trafficResponses, testCluster()...)
+			isReal := tc.real
+			s.HasPrometheus = func() bool { return isReal }
+
+			apps, err := s.Build(context.Background(), FilterParams{Duration: 60, EndTime: end})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fp.kubeQueries() > 0; got != tc.wantKubeQ {
+				t.Errorf("kube_* queries sent = %v; want %v", got, tc.wantKubeQ)
+			}
+			if !tc.wantKubeQ {
+				backend := appNamed(apps, "Deployment", "backend")
+				if backend == nil || len(backend.Instances) != 1 || backend.DesiredInstances != 3 {
+					t.Fatalf("backend = %+v; want its pod and 3 desired replicas from the cache", backend)
+				}
+			}
+		})
+	}
+}

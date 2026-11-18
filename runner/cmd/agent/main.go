@@ -357,6 +357,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// metrics in-cluster). Registered unconditionally; the handlers report
 	// the missing URL themselves until one is found.
 	smSvc := servicemap.New(promClient, cfg.ClusterName)
+	// On the ClickHouse fallback there are no kube_* series: past windows keep
+	// taking their inventory from the cache until a Prometheus is discovered.
+	smSvc.HasPrometheus = func() bool { return promBackend(promClient, chPromQL) == promBackendPrometheus }
 	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
 	maps.Copy(handlers, smHandlers)
 	for name := range smHandlers {
