@@ -293,10 +293,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// No Prometheus: send PromQL to ClickHouse's Prometheus query API when the
 	// chart enables it. The watcher below still looks for a Prometheus, which
 	// takes over the moment one appears; ForURL keeps each backend's auth.
+	// With no Prometheus, PromQL can fall back to ClickHouse's Prometheus
+	// query API once a probe finds node-agent data there (see the watcher
+	// below); ForURL keeps each backend's auth.
 	chPromQL := clickhousePromQLURL(cfg)
 	if chPromQL != "" {
-		useClickHousePromQL(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
-		logger.Info("prometheus not configured; PromQL goes to ClickHouse until one is discovered", "url", redact.URL(chPromQL))
+		clickhousePromQLAuth(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
 	}
 	ph := prometheus.Handlers(promClient)
 	maps.Copy(handlers, ph)
@@ -948,6 +950,15 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		})
 	}
 
+	// Probe ClickHouse's Prometheus query API until it holds node-agent data
+	// or a Prometheus is discovered, whichever comes first.
+	if chPromQL != "" {
+		g.Go(func() error {
+			watchClickHousePromQL(gctx, promClient, chPromQL, promDiscoveryInterval, logger)
+			return nil
+		})
+	}
+
 	// Pod-shell idle-session reaper. Closes sessions that haven't been touched
 	// in IdleTimeout.
 	if shellMgr != nil {
@@ -1253,7 +1264,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogProviderConfig:          logCfg,
 					PrometheusConnected:        promConnected,
 					PrometheusConnectedError:   promErr,
-					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
+					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, nodeAgentCountQuery(promBackend(promClient, chPromQL)), logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
 					TraceTable:                 traceTable,
@@ -1459,20 +1470,18 @@ func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog
 }
 
 // queryNodeAgentCount
-// (lines 246-264). Counts pods that match the upstream nudgebee node-agent
-// job regex; the daemonset reports `up{job=~"...nudgebee(-.*)?-node-agent"}`
-// per-pod, so len(result) is the count. Returns 0 on any error so the UI
+// (lines 246-264). Runs q (nodeAgentCountQuery), which returns one series per
+// node agent, so len(result) is the count. Returns 0 on any error so the UI
 // shows Disconnected rather than panicking the telemetry tick.
 //
 // Note: the legacy query embeds `__CLUSTER__` for multi-cluster Prom setups;
 // __CLUSTER__ is replaced upstream by the relay before queries reach the
 // agent. Our local probe runs against the agent's own cluster so we drop
 // the token entirely.
-func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog.Logger) int {
+func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, q string, logger *slog.Logger) int {
 	if c == nil || c.URL() == "" {
 		return 0
 	}
-	const q = `up{job=~"(.+/)?nudgebee(-.*)?-node-agent"}`
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := c.Query(cctx, q, "", "")

@@ -82,6 +82,18 @@ func (c *Client) SetURL(u string) {
 	c.baseURL = strings.TrimRight(u, "/")
 }
 
+// SetURLIfEmpty sets the URL only when none is set, and reports whether it
+// did, so a fallback cannot overwrite a URL another goroutine set first.
+func (c *Client) SetURLIfEmpty(u string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.baseURL != "" {
+		return false
+	}
+	c.baseURL = strings.TrimRight(u, "/")
+	return true
+}
+
 // Query runs an instant query (/api/v1/query).
 //
 //	query (required): PromQL expression

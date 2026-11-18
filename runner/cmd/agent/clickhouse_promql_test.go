@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,13 +16,13 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/observability/prometheus"
 )
 
+const (
+	oneSeries = `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"2052"]}]}}`
+	noSeries  = `{"status":"success","data":{"resultType":"vector","result":[]}}`
+)
+
 func TestClickhousePromQLURL(t *testing.T) {
-	base := config.Config{
-		ClickHouseEnabled:    true,
-		ClickHouseHost:       "nudgebee-agent-clickhouse",
-		ClickHousePort:       8123,
-		ClickHousePromQLPath: "/prometheus/",
-	}
+	base := config.Config{ClickHouseEnabled: true, ClickHouseHost: "nudgebee-agent-clickhouse", ClickHousePort: 8123}
 	for _, tc := range []struct {
 		name string
 		edit func(*config.Config)
@@ -25,7 +30,6 @@ func TestClickhousePromQLURL(t *testing.T) {
 	}{
 		{"fallback", func(*config.Config) {}, "http://nudgebee-agent-clickhouse:8123/prometheus"},
 		{"prometheus configured or discovered", func(c *config.Config) { c.PrometheusURL = "http://prom:9090" }, ""},
-		{"path unset (chart default)", func(c *config.Config) { c.ClickHousePromQLPath = "" }, ""},
 		{"clickhouse disabled", func(c *config.Config) { c.ClickHouseEnabled = false }, ""},
 		{"no host", func(c *config.Config) { c.ClickHouseHost = "" }, ""},
 		{"host that normalises to empty", func(c *config.Config) { c.ClickHouseHost = "http://" }, ""},
@@ -40,46 +44,122 @@ func TestClickhousePromQLURL(t *testing.T) {
 	}
 }
 
-// The runner starts on the ClickHouse fallback and hands over to a Prometheus
-// that discovery finds later: the backend, the Grafana proxy's upstream and
-// the credentials each backend receives all follow.
-func TestClickHousePromQLHandover(t *testing.T) {
-	var chAuth, promAuth string
-	ch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, _ := r.BasicAuth()
-		chAuth = u + ":" + p
-		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
-	}))
-	defer ch.Close()
-	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, _ := r.BasicAuth()
-		promAuth = u + ":" + p
-		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
-	}))
-	defer prom.Close()
+// fakeClickHouse serves the Prometheus query API under /prometheus and
+// answers with body(), recording the queries and credentials it gets.
+type fakeClickHouse struct {
+	mu      sync.Mutex
+	body    func() (int, string)
+	queries []string
+	auth    []string
+	paths   []string
+}
 
+func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	u, p, _ := r.BasicAuth()
+	f.mu.Lock()
+	f.queries = append(f.queries, r.URL.Query().Get("query"))
+	f.auth = append(f.auth, u+":"+p)
+	f.paths = append(f.paths, r.URL.Path)
+	body := f.body
+	f.mu.Unlock()
+	status, b := body()
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(b))
+}
+
+func (f *fakeClickHouse) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.queries)
+}
+
+func newFallbackClient(t *testing.T, ch *fakeClickHouse) (*prometheus.Client, string) {
+	t.Helper()
+	srv := httptest.NewServer(ch)
+	t.Cleanup(srv.Close)
+	chURL := srv.URL + clickhousePromQLPath
 	c := prometheus.New("", &http.Client{Timeout: 5 * time.Second})
-	chURL := ch.URL + "/prometheus"
-	if got := promBackend(c, chURL); got != "" {
-		t.Errorf("backend with no URL = %q; want empty", got)
-	}
+	clickhousePromQLAuth(c, chURL, "default", "pw")
+	return c, chURL
+}
 
+// The probe asks for node-agent data, as the ClickHouse user, and passes only
+// on at least one series: vector(1) would pass on an empty table.
+func TestProbeClickHousePromQL(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"node-agent series", 200, oneSeries, true},
+		{"empty table", 200, noSeries, false},
+		{"handler missing", 404, "There is no handle /prometheus/api/v1/query", false},
+		{"auth rejected", 401, "Authentication failed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := &fakeClickHouse{body: func() (int, string) { return tc.status, tc.body }}
+			c, chURL := newFallbackClient(t, ch)
+			if got := probeClickHousePromQL(context.Background(), c, chURL); got != tc.want {
+				t.Errorf("probe = %v; want %v", got, tc.want)
+			}
+			ch.mu.Lock()
+			defer ch.mu.Unlock()
+			if ch.queries[0] != clickhousePromQLProbe || ch.auth[0] != "default:pw" || ch.paths[0] != "/prometheus/api/v1/query" {
+				t.Errorf("probe sent query=%q auth=%q path=%q", ch.queries[0], ch.auth[0], ch.paths[0])
+			}
+		})
+	}
+}
+
+// The fallback turns on once the probe passes (the table filling in after
+// startup), and a Prometheus discovered later takes over: the backend, the
+// Grafana proxy's upstream and the credentials each backend gets all follow.
+func TestWatchClickHousePromQLHandover(t *testing.T) {
+	var ready atomic.Bool
+	ch := &fakeClickHouse{body: func() (int, string) {
+		if ready.Load() {
+			return 200, oneSeries
+		}
+		return 200, noSeries
+	}}
+	c, chURL := newFallbackClient(t, ch)
 	proxyURL := prometheusProxyURL(c, chURL)
-	useClickHousePromQL(c, chURL, "default", "pw")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		watchClickHousePromQL(ctx, c, chURL, 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+
+	for ch.calls() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := promBackend(c, chURL); got != "" {
+		t.Fatalf("backend while the table is empty = %q; want none", got)
+	}
+	ready.Store(true)
+	<-done
 	if got := promBackend(c, chURL); got != promBackendClickHouse {
-		t.Errorf("backend = %q; want clickhouse", got)
+		t.Fatalf("backend = %q; want clickhouse", got)
 	}
 	if got := proxyURL(); got != "" {
 		t.Errorf("proxy upstream on the fallback = %q; want empty (503)", got)
 	}
-	if _, err := c.Query(context.Background(), "vector(1)", "1", ""); err != nil {
-		t.Fatal(err)
-	}
-	if chAuth != "default:pw" {
-		t.Errorf("clickhouse auth = %q; want default:pw", chAuth)
+	if got := nodeAgentCountQuery(promBackend(c, chURL)); !strings.Contains(got, "count by (instance)") {
+		t.Errorf("node-agent count query on clickhouse = %q", got)
 	}
 
 	// Discovery finds a Prometheus.
+	var promAuth string
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, _ := r.BasicAuth()
+		promAuth = u + ":" + p
+		_, _ = w.Write([]byte(noSeries))
+	}))
+	defer prom.Close()
 	c.SetURL(prom.URL)
 	if got := promBackend(c, chURL); got != promBackendPrometheus {
 		t.Errorf("backend after discovery = %q; want prometheus", got)
@@ -87,10 +167,29 @@ func TestClickHousePromQLHandover(t *testing.T) {
 	if got := proxyURL(); got != prom.URL {
 		t.Errorf("proxy upstream after discovery = %q; want %q", got, prom.URL)
 	}
+	if got := nodeAgentCountQuery(promBackend(c, chURL)); !strings.HasPrefix(got, "up{") {
+		t.Errorf("node-agent count query on prometheus = %q", got)
+	}
 	if _, err := c.Query(context.Background(), "vector(1)", "1", ""); err != nil {
 		t.Fatal(err)
 	}
 	if promAuth != ":" {
 		t.Errorf("discovered prometheus got credentials %q; want none", promAuth)
+	}
+}
+
+// A Prometheus discovered before the probe passes keeps the client: the
+// watcher stops without switching it to ClickHouse.
+func TestWatchClickHousePromQLPrometheusFirst(t *testing.T) {
+	ch := &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }}
+	c, chURL := newFallbackClient(t, ch)
+	c.SetURL("http://prometheus:9090")
+
+	watchClickHousePromQL(context.Background(), c, chURL, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := c.URL(); got != "http://prometheus:9090" {
+		t.Errorf("URL = %q; want the discovered Prometheus", got)
+	}
+	if n := ch.calls(); n != 0 {
+		t.Errorf("probes sent = %d; want 0", n)
 	}
 }

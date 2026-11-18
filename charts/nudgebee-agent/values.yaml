@@ -382,16 +382,14 @@ runner:
   #               the cache holds the cluster as it is now.
   #   prometheus  the kube_* queries; needs kube-state-metrics.
   serviceMapInventory: kubernetes
-  # With no Prometheus configured or discovered, send the runner's PromQL
+  # With no Prometheus configured or discovered, the runner sends its PromQL
   # (service map, rightsizing, prometheus_* actions) to ClickHouse's Prometheus
-  # query API at this path on the ClickHouse HTTP port, for example
-  # "/prometheus" for a prometheus_api_v1 handler at /prometheus/api/v1. A
-  # Prometheus discovered later takes over. Empty (default) leaves PromQL
-  # unavailable without a Prometheus. The handler and the TimeSeries table it
-  # reads are not set up by this chart yet. With CLUSTER_NAME set the service
-  # map comes back empty from ClickHouse: its queries filter on cluster, and
-  # the table has no cluster label until one is added at ingest.
-  clickhousePromqlPath: ""
+  # query API at /prometheus/api/v1 as soon as a probe finds node-agent data
+  # there; a Prometheus discovered later takes over. The handler and the
+  # TimeSeries table it reads are not set up by this chart yet. With
+  # CLUSTER_NAME set the service map comes back empty from ClickHouse: its
+  # queries filter on cluster, and the table has no cluster label until one is
+  # added at ingest.
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.
