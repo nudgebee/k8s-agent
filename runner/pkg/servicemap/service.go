@@ -557,7 +557,7 @@ func (s *Service) UseTimeSeries(c *chclient.Client, path string) {
 	if c == nil {
 		return
 	}
-	ts := prometheus.New(c.BaseURL+"/"+strings.Trim(path, "/"), &http.Client{
+	ts := prometheus.New(strings.TrimRight(c.BaseURL, "/")+"/"+strings.Trim(path, "/"), &http.Client{
 		Timeout:   60 * time.Second,
 		Transport: timeSeriesSettings{http.DefaultTransport},
 	})
