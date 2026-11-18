@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -556,9 +557,26 @@ func (s *Service) UseTimeSeries(c *chclient.Client, path string) {
 	if c == nil {
 		return
 	}
-	ts := prometheus.New(c.BaseURL+"/"+strings.Trim(path, "/"), nil)
+	ts := prometheus.New(c.BaseURL+"/"+strings.Trim(path, "/"), &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: timeSeriesSettings{http.DefaultTransport},
+	})
 	ts.Auth = prometheus.NewBasicAuth(c.User, c.Password)
 	s.TS = ts
+}
+
+// timeSeriesSettings adds the ClickHouse settings the Prometheus query API
+// needs to every request: rate(), increase() and the other range functions
+// run on aggregate functions that ClickHouse 26.10 refuses unless
+// enable_time_series_aggregate_functions is set.
+type timeSeriesSettings struct{ next http.RoundTripper }
+
+func (t timeSeriesSettings) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	q := r.URL.Query()
+	q.Set("enable_time_series_aggregate_functions", "1")
+	r.URL.RawQuery = q.Encode()
+	return t.next.RoundTrip(r)
 }
 
 // maybeShadow builds the ClickHouse map for the same window in the

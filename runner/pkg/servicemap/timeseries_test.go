@@ -23,6 +23,7 @@ type recorder struct {
 	queries []string
 	paths   []string
 	auth    []string
+	params  []string
 	respond func(q string) (status int, body string)
 }
 
@@ -31,6 +32,7 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	r.queries = append(r.queries, q)
 	r.paths = append(r.paths, req.URL.Path)
+	r.params = append(r.params, req.URL.Query().Get("enable_time_series_aggregate_functions"))
 	user, pass, _ := req.BasicAuth()
 	r.auth = append(r.auth, user+":"+pass)
 	r.mu.Unlock()
@@ -200,6 +202,9 @@ func TestUseTimeSeries_PathAndAuth(t *testing.T) {
 	}
 	if ts.auth[0] != "reader:secret" {
 		t.Errorf("basic auth = %q; want reader:secret", ts.auth[0])
+	}
+	if ts.params[0] != "1" {
+		t.Errorf("enable_time_series_aggregate_functions = %q; want 1 (ClickHouse refuses rate() without it)", ts.params[0])
 	}
 
 	s.UseTimeSeries(nil, "/prometheus")
