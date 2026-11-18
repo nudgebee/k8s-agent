@@ -252,11 +252,14 @@ func (s *Service) StartSummary(ctx context.Context) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	// Read once, here: the loop outlives this call, and tests shorten these
+	// intervals and restore them while it may still be running.
+	recheck, retry := summaryRecheck, summaryRetry
 	go func() {
 		failing, dropped := false, false
 		for {
 			err := ensureSummary(ctx, s.CH)
-			wait := summaryRecheck
+			wait := recheck
 			switch {
 			case err == nil:
 				failing = false
@@ -271,7 +274,7 @@ func (s *Service) StartSummary(ctx context.Context) {
 				}
 			case errors.Is(err, errSummaryNotReady):
 				s.summaryReady.Store(false)
-				wait = summaryRetry
+				wait = retry
 			case !failing:
 				logger.Warn("cannot create service map summary tables; serving the map from prometheus", "err", err)
 				failing = true
