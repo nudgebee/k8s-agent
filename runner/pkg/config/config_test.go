@@ -88,11 +88,12 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		// ClickHouse defaults: enabled, port 8123, db "default" — so the
 		// chart's existing CH config (CLICKHOUSE_HOST in runner-secret)
 		// just works.
-		ClickHouseEnabled:   true,
-		ClickHousePort:      8123,
-		ClickHouseDB:        "default",
-		ServiceMapSource:    "prometheus",
-		ServiceMapInventory: "prometheus",
+		ClickHouseEnabled:        true,
+		ClickHousePort:           8123,
+		ClickHouseDB:             "default",
+		ServiceMapSource:         "prometheus",
+		ServiceMapTimeSeriesPath: "/prometheus",
+		ServiceMapInventory:      "prometheus",
 		// The logs check falls back to otel_logs in that database.
 		ClickHouseLogsDatabase: "default",
 		ClickHouseLogsTable:    "otel_logs",

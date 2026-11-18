@@ -529,6 +529,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		smSvc.NodeAgentCount = nodeAgentCounter(typedKube, installNamespace(cfg))
 	}
 	smSvc.UseClickHouse(ch, smSource, logger)
+	if smSource == servicemap.SourceTimeSeries {
+		smSvc.UseTimeSeries(ch, cfg.ServiceMapTimeSeriesPath)
+	}
 	smSvc.StartSummary(ctx)
 	logger.Info("service map source", "source", string(smSource), "clickhouse", ch != nil)
 

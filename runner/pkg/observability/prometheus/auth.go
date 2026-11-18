@@ -34,6 +34,21 @@ type Authorizer interface {
 	Apply(ctx context.Context, req *http.Request) error
 }
 
+// --- HTTP basic ------------------------------------------------------------
+
+type basicAuth struct{ user, password string }
+
+// NewBasicAuth returns an Authorizer that sends HTTP basic auth, as
+// ClickHouse's Prometheus query API expects.
+func NewBasicAuth(user, password string) Authorizer {
+	return &basicAuth{user: user, password: password}
+}
+
+func (a *basicAuth) Apply(_ context.Context, req *http.Request) error {
+	req.SetBasicAuth(a.user, a.password)
+	return nil
+}
+
 // --- Coralogix -------------------------------------------------------------
 
 type coralogixAuth struct{ token string }
