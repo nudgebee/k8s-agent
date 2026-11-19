@@ -68,7 +68,7 @@ func TestClient_RoundTrip(t *testing.T) {
 	client := NewClient(Config{
 		URL:           wsURL,
 		AuthSecretKey: "test-secret",
-		Greeting:      Greeting{Version: "test", AgentVersion: "0.0.0"},
+		Greeting:      Greeting{Version: "test", AgentVersion: "0.0.0", ProtocolVersion: "9"},
 	}, func(ctx context.Context, msg []byte, send SendFunc) {
 		var req ExternalActionRequest
 		if err := json.Unmarshal(msg, &req); err != nil {
@@ -89,8 +89,8 @@ func TestClient_RoundTrip(t *testing.T) {
 
 	select {
 	case g := <-gotGreeting:
-		if g.Action != "auth" || g.Version != "test" || g.AgentVersion != "0.0.0" {
-			t.Errorf("greeting = %+v; want action=auth version=test agent_version=0.0.0", g)
+		if g.Action != "auth" || g.Version != "test" || g.AgentVersion != "0.0.0" || g.ProtocolVersion != "9" {
+			t.Errorf("greeting = %+v; want action=auth version=test agent_version=0.0.0 protocol_version=9", g)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for greeting")
@@ -224,5 +224,126 @@ func TestClient_RelayPingsKeepSessionAlive(t *testing.T) {
 	case <-dials:
 		t.Fatal("session was redialed; relay pings did not refresh the read deadline")
 	case <-time.After(900 * time.Millisecond):
+	}
+}
+
+// Regression: the relay stopped reading the agent's socket but kept sending
+// its pings. The agent's response writes timed out, yet every relay ping
+// pushed the read deadline forward and the write errors were only logged, so
+// the session never ended and the agent sat disconnected until a pod restart.
+// Before the fix this test sees one dial only.
+func TestClient_ReconnectsWhenRelayStopsReading(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	dials := make(chan struct{}, 4)
+	testOver := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		dials <- struct{}{}
+		var g Greeting
+		if err := conn.ReadJSON(&g); err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"request_id":"r1"}`)); err != nil {
+			return
+		}
+		// Never read again, but keep pinging — the relay's pinger runs apart
+		// from its reader, so a stuck reader still pings.
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-testOver:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+					return
+				}
+			}
+		}
+	}))
+	defer srv.Close()
+	defer close(testOver)
+
+	// Big enough to fill the loopback socket buffers, so the write blocks
+	// until WriteTimeout.
+	big := strings.Repeat("x", 64<<20)
+	client := NewClient(Config{
+		URL:            "ws" + strings.TrimPrefix(srv.URL, "http"),
+		AuthSecretKey:  "test-secret",
+		WriteTimeout:   200 * time.Millisecond,
+		PingInterval:   time.Hour, // isolate the response-write path
+		PongWait:       300 * time.Millisecond,
+		ReconnectDelay: 10 * time.Millisecond,
+	}, func(ctx context.Context, msg []byte, send SendFunc) {
+		_ = send(&Response{Data: big})
+	})
+
+	// Generous waits: under the race detector on a busy CI runner, encoding
+	// the 64 MiB reply alone has taken about 3s, and the session only ends
+	// after that. A session that never ends still fails here.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go func() { _ = client.Run(ctx) }()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-dials:
+		case <-time.After(15 * time.Second):
+			t.Fatalf("timeout waiting for dial %d; a relay that stopped reading did not end the session", i+1)
+		case <-ctx.Done():
+			t.Fatalf("context ended waiting for dial %d; a relay that stopped reading did not end the session", i+1)
+		}
+	}
+}
+
+// A message shed because the handler pool is full must be answered with 503,
+// not dropped: the caller is blocked on its request_id.
+func TestClient_ShedRepliesWith503(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	got := make(chan Response, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var g Greeting
+		if err := conn.ReadJSON(&g); err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"request_id":"busy-1"}`))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"request_id":"shed-1"}`))
+		var resp Response
+		if err := conn.ReadJSON(&resp); err != nil {
+			t.Logf("read: %v", err)
+		} else {
+			got <- resp
+		}
+	}))
+	defer srv.Close()
+
+	release := make(chan struct{})
+	defer close(release)
+	c := NewClient(Config{
+		URL:             "ws" + strings.TrimPrefix(srv.URL, "http"),
+		HandlerPoolSize: 1,
+	}, func(ctx context.Context, msg []byte, send SendFunc) { <-release })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	select {
+	case r := <-got:
+		if r.RequestID != "shed-1" || r.StatusCode != 503 {
+			t.Fatalf("reply = %+v; want request_id=shed-1 status=503", r)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply for shed message")
 	}
 }

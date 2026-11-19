@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -217,6 +218,11 @@ func parsePublicKey(s string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(keyBytes), nil
 }
 
+// ErrReplay is VerifyBody's error for a body whose signature is valid but whose
+// nonce was already seen: the same signed request delivered again. The nonce is
+// checked last, so a replay is never a forged or stale message.
+var ErrReplay = errors.New("relay signature: nonce already seen (replay)")
+
 // checkAndRecordNonce rejects a nonce it has already seen and otherwise records
 // it, both under a single lock so there is no check-then-record race. To keep
 // the hot path O(1), the O(N) eviction sweep runs at most once per minute once
@@ -226,7 +232,7 @@ func (v *Verifier) checkAndRecordNonce(nonce string) error {
 	v.nonceMu.Lock()
 	defer v.nonceMu.Unlock()
 	if _, seen := v.seenNonces[nonce]; seen {
-		return fmt.Errorf("relay signature: nonce %s already seen (replay)", nonce)
+		return fmt.Errorf("%w: nonce %s", ErrReplay, nonce)
 	}
 	now := time.Now()
 	v.seenNonces[nonce] = now

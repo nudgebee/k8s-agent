@@ -7,7 +7,6 @@ k8s_context=""
 openshift_enable=""
 additional_secret=""
 prometheus_url=""
-opencost_service_url=""
 namespace="nudgebee-agent"
 agent_name="nudgebee-agent"
 env="prod"
@@ -18,11 +17,10 @@ prometheus_org_id=""
 relay_address=""
 relay_signing_public_key=""
 collector_endpoint=""
-image_registry=""
-disable_opencost=""
 disable_otel=""
 disable_prometheus_stack=""
 storage_class=""
+chart_ref=""
 
 # Help function
 usage() {
@@ -31,33 +29,32 @@ usage() {
   echo "Options:"
   echo "  -a <auth_key>           Authentication key (required)"
   echo "  -k <k8s_context>        Kubernetes context"
-  echo "  -o <openshift_enable>   OpenShift enable option"
+  echo "  -o <openshift_enable>   Enable OpenShift support (true/false)"
   echo "  -p <prometheus_url>     Prometheus URL"
   echo "  -s <additional_secret>  Additional secret"
   echo "  -n <namespace>          Namespace"
   echo "  -z <agent_name>         Agent_name"
   echo "  -h <help>               Help"
-  echo "  -d <disable_node_agent> Disable node agent"
+  echo "  -d <disable_node_agent> Disable node agent (true/false)"
   echo "  -f <values> values yaml"
   echo "  -m <alert_manager_url> Alert manager URL"
   echo "  -r <prometheus-org-id> Prometheus org id"
   echo "  -w <relay_address>    WebSocket relay address (self-hosted)"
   echo "  -S <relay_signing_public_key> Relay Ed25519 public key (authorizes UI workload mutations)"
   echo "  -c <collector_endpoint> Collector endpoint URL (self-hosted)"
-  echo "  -i <image_registry>   Image registry (air-gapped/on-prem)"
-  echo "  -x <disable_opencost> Disable OpenCost (true/false)"
   echo "  -t <disable_otel>     Disable OpenTelemetry Collector & ClickHouse (true/false)"
   echo "  -g <disable_prometheus_stack> Disable Prometheus stack (true/false)"
   echo "  -C <storage_class>    StorageClass name for every PVC this script creates"
   echo "                        (ClickHouse, and Prometheus/Loki when installed here)."
   echo "                        Defaults to the cluster default StorageClass; required"
   echo "                        when the cluster has none. A name only, not '-'."
+  echo "  -R <oci_chart_ref>    Install from an OCI registry instead of the Helm repo (Helm 3.8+), e.g. oci://ghcr.io/nudgebee/charts/nudgebee-agent"
   echo "Example:"
   echo "  $0 -a my_auth_key -k my_k8s_context -o true -p http://prometheus:9090 -s my_secret -C gp3"
   exit 1
 }
 
-while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
+while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:R:" opt; do
   case $opt in
     a)
       auth_key="$OPTARG"
@@ -102,10 +99,18 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
       collector_endpoint="$OPTARG"
       ;;
     i)
-      image_registry="$OPTARG"
+      # The chart has no single registry setting: each image's registry is part of
+      # its own values key, so -i used to be accepted and silently ignored.
+      echo "Error: -i is not supported. To pull from a private registry, pass a values file with -f that" >&2
+      echo "points every ghcr.io image at it: runner.image.repository, runner.profilerImage," >&2
+      echo "kubewatch.image.repository, nodeAgent.image.repository, opentelemetry-collector.image.repository," >&2
+      echo "and clickhouse.image.registry." >&2
+      echo "List them for your chart version with: helm show values nudgebee-agent/nudgebee-agent | grep ghcr.io" >&2
+      exit 1
       ;;
     x)
-      disable_opencost="$OPTARG"
+      # Accepted and ignored: the agent no longer installs OpenCost, but install
+      # commands generated before that still pass -x true.
       ;;
     t)
       disable_otel="$OPTARG"
@@ -115,6 +120,9 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
       ;;
     C)
       storage_class="$OPTARG"
+      ;;
+    R)
+      chart_ref="$OPTARG"
       ;;
     h)
       usage
@@ -130,13 +138,26 @@ while getopts ":a:k:o:p:s:n:z:h:e:d:f:m:r:w:S:c:i:x:t:g:C:" opt; do
   esac
 done
 
+# Boolean flags take true or false. Anything else used to be read silently as
+# true (-d, -o) or false (-t, -g).
+check_bool_flag() {
+  if [ -n "$2" ] && [ "$2" != "true" ] && [ "$2" != "false" ]; then
+    echo "Error: -$1 takes true or false, got '$2'." >&2
+    exit 1
+  fi
+}
+check_bool_flag d "$disable_node_agent"
+check_bool_flag o "$openshift_enable"
+check_bool_flag t "$disable_otel"
+check_bool_flag g "$disable_prometheus_stack"
+
 # Check if an access key is provided
 if [ -z "$auth_key" ]; then
-  echo "Error: Access key not provided. Please provide an access key using -a or --auth-key."
+  echo "Error: Access key not provided. Please provide an access key using -a <auth_key>."
   exit 1
 fi
 
-# `-` is the Bitnami convention for "disable dynamic provisioning, bind a
+# `-` is the chart's convention for "disable dynamic provisioning, bind a
 # pre-created PV". Only the agent chart understands it: kube-prometheus-stack
 # copies the value straight into the PVC (yielding a StorageClass named "-" that
 # does not exist, so the volume stays Pending forever) and loki-stack renders it
@@ -187,9 +208,16 @@ NODE_KERNEL_VERSIONS=$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo
 MIN_KERNEL_VERSION="4.16"
 
 for kernel_version in $NODE_KERNEL_VERSIONS; do
-    KERNEL_MAJOR_MINOR=$(echo "$kernel_version" | cut -d. -f1-2)
-    if (( $(echo "$KERNEL_MAJOR_MINOR < $MIN_KERNEL_VERSION" | bc -l) )); then
-        echo "Error: Node with kernel version $kernel_version is less than $MIN_KERNEL_VERSION. Node Agent will not be installed on this node."
+    # Integer compare in bash: the old `bc` compare passed every node when bc
+    # was missing, and read 4.9 as newer than 4.16.
+    kernel_major=${kernel_version%%.*}
+    kernel_minor=${kernel_version#*.}
+    kernel_minor=${kernel_minor%%[!0-9]*}
+    if ! [[ $kernel_major =~ ^[0-9]+$ && $kernel_minor =~ ^[0-9]+$ ]]; then
+        echo "Warning: could not read kernel version $kernel_version; skipping the check for this node."
+    elif (( kernel_major < 4 || (kernel_major == 4 && kernel_minor < 16) )); then
+        # The node agent is one DaemonSet, so one old node turns it off everywhere.
+        echo "Error: Node with kernel version $kernel_version is less than $MIN_KERNEL_VERSION. Node Agent will not be installed on any node."
         disable_node_agent="true"
     else
         echo "Node kernel version $kernel_version is compatible."
@@ -208,6 +236,19 @@ if ! command -v helm &> /dev/null; then
     echo "Error: Helm is not installed. You can install it by following the instructions at:"
     echo "https://helm.sh/docs/intro/install/"
     exit 1
+fi
+
+if [ -n "$chart_ref" ]; then
+  if [[ "$chart_ref" != oci://* ]]; then
+    echo "Error: -R expects an oci:// chart reference, got: $chart_ref"
+    exit 1
+  fi
+  helm_version="$(helm version --template '{{.Version}}')"
+  IFS=. read -r helm_major helm_minor _ <<<"${helm_version#v}"
+  if [ "$helm_major" -lt 3 ] || { [ "$helm_major" -eq 3 ] && [ "$helm_minor" -lt 8 ]; }; then
+    echo "Error: OCI charts need Helm 3.8 or newer, found $helm_version. Drop -R to install from the Helm repo."
+    exit 1
+  fi
 fi
 
 # Storage preflight. Every PVC below is provisioned asynchronously, so a
@@ -302,8 +343,9 @@ else
             installed_prometheus_stack=true
             grafana_command=" --set runner.grafana.enabled=true --set runner.grafana.url=http://nudgebee-prometheus-grafana.${namespace}.svc --set runner.grafana.username=admin --set runner.grafana.password=admin "
         else
-            echo "Prometheus installation not requested. Exiting."
-            exit 0
+            echo "Error: Prometheus installation not requested, so nothing was installed." >&2
+            echo "Re-run with -p <prometheus_url> to use an existing Prometheus, or -g true to install without the Prometheus stack." >&2
+            exit 1
         fi
     else
         existingPrometheus=true
@@ -349,15 +391,18 @@ if [ "$installed_prometheus_stack" == "true" ]; then
 fi
 
 echo "Installing nudgebee agent using helm"
-helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
-helm repo update > /dev/null 2>&1
+if [ -z "$chart_ref" ]; then
+  helm repo add nudgebee-agent https://nudgebee.github.io/k8s-agent/
+  helm repo update > /dev/null 2>&1
+  chart_ref="nudgebee-agent/nudgebee-agent"
+fi
 
 # Build the helm command as an array. Each optional flag becomes an
 # (empty or populated) sub-array; bash expands `"${arr[@]}"` correctly
 # even when empty, preserves spaces/quoting in values, and avoids
 # command-injection via eval.
 helm_args=(
-  upgrade --install "$agent_name" nudgebee-agent/nudgebee-agent
+  upgrade --install "$agent_name" "$chart_ref"
   --namespace "$namespace"
   --create-namespace
   --set "runner.nudgebee.auth_secret_key=$auth_key"
@@ -366,7 +411,6 @@ helm_args=(
 if [ -n "$prometheus_url" ]; then
   helm_args+=(
     --set "globalConfig.prometheus_url=$prometheus_url"
-    --set "opencost.opencost.prometheus.external.url=$prometheus_url"
   )
 fi
 
@@ -379,7 +423,7 @@ if [ -n "$additional_secret" ]; then
 fi
 
 openshift_enable_args=()
-if [ -n "$openshift_enable" ]; then
+if [ "$openshift_enable" == "true" ]; then
   openshift_enable_args=(
     --set "openshift.enabled=true"
     --set "openshift.createScc=true"
@@ -390,7 +434,7 @@ if [ -n "$openshift_enable" ]; then
 fi
 
 disable_node_agent_args=()
-if [ -n "$disable_node_agent" ]; then
+if [ "$disable_node_agent" == "true" ]; then
   disable_node_agent_args=(--set "nodeAgent.enabled=false")
 fi
 
@@ -418,7 +462,6 @@ if [ -n "$prometheus_org_id" ]; then
   prometheus_org_id_args=(
     --set "globalConfig.prometheus_headers=X-Scope-OrgID: $prometheus_org_id"
     --set "globalConfig.alertmanager_headers=X-Scope-OrgID: $prometheus_org_id"
-    --set "opencost.opencost.extraEnv.PROMETHEUS_HEADER_X_SCOPE_ORGID=$prometheus_org_id"
   )
 fi
 
@@ -437,16 +480,6 @@ fi
 collector_endpoint_args=()
 if [ -n "$collector_endpoint" ]; then
   collector_endpoint_args=(--set "runner.nudgebee.endpoint=$collector_endpoint")
-fi
-
-image_registry_args=()
-if [ -n "$image_registry" ]; then
-  image_registry_args=(--set "runner.image_registry=$image_registry")
-fi
-
-disable_opencost_args=()
-if [ "$disable_opencost" == "true" ]; then
-  disable_opencost_args=(--set "opencost.enabled=false")
 fi
 
 disable_otel_args=()
@@ -494,8 +527,6 @@ helm_args+=(
   "${relay_address_args[@]}"
   "${relay_signing_public_key_args[@]}"
   "${collector_endpoint_args[@]}"
-  "${image_registry_args[@]}"
-  "${disable_opencost_args[@]}"
   "${disable_otel_args[@]}"
   "${disable_prometheus_stack_args[@]}"
   "${storage_class_args[@]}"
@@ -538,7 +569,7 @@ if [ -z "$loki_url" ]; then
         echo "Loki installation not requested. Node Agent will still be installed."
     fi
 else
-    echo "Please configure NudgeBee to connect to your existing Loki instance by following the instructions at: https://app.nudgebee.com/help/docs/installation/agent/installation/logging/"
+    echo "Please configure NudgeBee to connect to your existing Loki instance by following the instructions at: https://docs.nudgebee.com/docs/installation/agent/connect/logging/"
 fi
 
 # Check for ClickHouse PVC requirements
@@ -562,6 +593,6 @@ for component in "${components[@]}"; do
         echo "1. Insufficient resources."
         echo "2. Missing dependencies."
         echo "3. Configuration errors."
-        echo "Please refer to the NudgeBee documentation for troubleshooting: https://app.nudgebee.com/help/docs/installation/agent/installation/"
+        echo "Please refer to the NudgeBee documentation for troubleshooting: https://docs.nudgebee.com/docs/installation/agent/installation/"
     fi
 done

@@ -1,24 +1,34 @@
-# Multi-stage build. The final image is alpine-based so we can ship a
-# working `kubectl` binary alongside the agent — the kubectl_command_executor
-# action shells out to it (pkg/kube/exec.go).
+# Multi-stage build. The final image is Red Hat UBI 9 micro (Red Hat container
+# certification). Both the agent and kubectl are static Go binaries, so the only
+# OS content they need beyond ubi-micro is the CA bundle. It is installed in a
+# throwaway stage and only its files are copied over, so ubi-micro's own package
+# database and files stay untouched. Timezone data is embedded in the agent
+# binary (-tags timetzdata) instead of copied: ubi-micro's rpmdb lists tzdata
+# but its zoneinfo files are stripped, and adding them back is flagged by
+# preflight's HasModifiedFiles.
+# The kubectl_command_executor action shells out to kubectl (pkg/kube/exec.go),
+# not to a shell; ubi-micro does ship bash.
+#
+# Build with the repo root as a named context so the LICENSE can be copied in:
+#   docker buildx build --build-context repo=. -f runner/Dockerfile runner
 
-# golang 1.26.5: fixes the stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
-# traversal) / CVE-2026-42505 (crypto/tls ECH) present in 1.26.4 builds.
-FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+# golang 1.27.3: 1.27.1 builds carry the stdlib CVEs GO-2026-6612 (critical) and
+# GO-2026-6603/6605/6607/6608/6610/6611/6613/6617 (high), fixed in 1.27.2.
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 WORKDIR /src
 
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 # GOTOOLCHAIN=local: always compile with the base image's Go, never an
-# auto-downloaded toolchain — keeps the stdlib at the patched 1.26.5.
+# auto-downloaded toolchain — keeps the stdlib at the base image's patched release.
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build \
+RUN go build -tags timetzdata \
 	-ldflags="-s -w \
 		-X github.com/nudgebee/nudgebee-agent/pkg/version.Version=${VERSION} \
 		-X github.com/nudgebee/nudgebee-agent/pkg/version.Commit=${COMMIT} \
@@ -27,27 +37,30 @@ RUN go build \
 	./cmd/agent
 
 # Pin kubectl to a known-good version. Bump alongside the Kubernetes versions
-# we test against. The download follows TARGETARCH so the arch matches the image
-# being built — dl.k8s.io's path segments are literally `amd64` / `arm64`, the
-# same values buildx sets. This used to be hardcoded to amd64 while
-# runner-image.yaml built both arches, so the arm64 image shipped an x86-64
-# kubectl and every kubectl_command_executor action on an arm64 node died with
+# we test against. Built from the release tag rather than downloaded: the
+# published v1.36.6 binary still carries x/net v0.56.0, and this also gives it the
+# same patched Go as the agent. GOARCH follows TARGETARCH so the arch matches the
+# image being built. This used to be hardcoded to amd64 while runner-image.yaml
+# built both arches, so the arm64 image shipped an x86-64 kubectl and every
+# kubectl_command_executor action on an arm64 node died with
 # `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
-# Pinned to BUILDPLATFORM: this stage only curls a binary, so there is no reason
-# to run it emulated on the arm64 leg.
-FROM --platform=$BUILDPLATFORM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS kubectl
+# Pinned to BUILDPLATFORM: Go cross-compiles, so there is no reason to run this
+# emulated on the arm64 leg.
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS kubectl
 ARG TARGETARCH
-# v1.36.2 (current stable): upstream builds the 1.32 line on Go 1.24.13, whose
-# stale stdlib + x/net account for 33 of the image's 37 fixable Trivy findings
-# (20 HIGH). v1.36.2 is built on Go 1.26.4 — residual is only the industry-wide
-# 1.26.4 stdlib pair, which clears when upstream rebuilds on 1.26.5. kubectl's
-# CLI surface used by kubectl_command_executor is stable across these versions.
-ARG KUBECTL_VERSION=v1.36.2
-RUN apk add --no-cache curl ca-certificates && \
-	curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
-	chmod +x /usr/local/bin/kubectl
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+ARG KUBECTL_VERSION=v1.36.6
+RUN apk add --no-cache git && \
+	git clone --depth 1 --branch "${KUBECTL_VERSION}" https://github.com/kubernetes/kubernetes /src
+WORKDIR /src
+RUN rm -rf vendor && \
+	go work edit -replace golang.org/x/net=golang.org/x/net@v0.60.0 && \
+	go work sync
+RUN GOOS=linux GOARCH="$TARGETARCH" go build -trimpath \
+	-ldflags "-s -w -X k8s.io/client-go/pkg/version.gitVersion=${KUBECTL_VERSION} -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION}" \
+	-o /usr/local/bin/kubectl ./cmd/kubectl
 
-# Assert the downloaded binary's ELF e_machine matches TARGETARCH, so this
+# Assert the built binary's ELF e_machine matches TARGETARCH, so this
 # cannot silently regress to shipping the wrong arch again.
 #
 # Byte 18 of the ELF header is e_machine: 0x3e = x86-64, 0xb7 = aarch64.
@@ -68,12 +81,35 @@ RUN set -eu; \
 		exit 1; \
 	fi
 
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
-WORKDIR /
-RUN apk add --no-cache ca-certificates && \
-	addgroup -S nonroot -g 65532 && \
-	adduser -S -D -u 65532 -G nonroot nonroot
-COPY --from=build /out/nudgebee-agent /nudgebee-agent
-COPY --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
-USER nonroot:nonroot
+# Throwaway stage: bring the CA trust store up to date. Only its files are
+# copied into the final image (never /var/lib/rpm or system binaries).
+FROM registry.access.redhat.com/ubi9@sha256:e45746866f611d164042b961cd83f1093c4fdb422d9b99fcf23ff951626044f8 AS pkgs
+RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates \
+ && dnf clean all
+
+FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:dbd325b96bcd432dd42816d31412bdf1dc0fb973b79ed310344bc23c76c068db
+ARG IMAGE_VERSION=0.0.0
+ARG IMAGE_RELEASE=1
+LABEL name="nudgebee-agent" \
+      maintainer="nudgebee" \
+      vendor="nudgebee" \
+      version="${IMAGE_VERSION}" \
+      release="${IMAGE_RELEASE}" \
+      summary="Nudgebee Kubernetes agent" \
+      description="Runs Nudgebee actions and enrichers inside a customer cluster."
+# Go reads /etc/pki/tls/certs/ca-bundle.crt (a symlink into ca-trust/extracted).
+COPY --from=pkgs /etc/pki/ca-trust/extracted /etc/pki/ca-trust/extracted
+COPY --from=pkgs /etc/pki/tls/certs /etc/pki/tls/certs
+# Red Hat certification (HasLicense): license text must be under /licenses.
+COPY --from=repo LICENSE /licenses/LICENSE
+# The agent writes nothing itself; /tmp is the one world-writable path for kubectl's
+# discovery cache ($HOME/.kube/cache) under an arbitrary UID with no home directory.
+ENV HOME=/tmp
+WORKDIR /tmp
+# --chmod sets the mode in the COPY itself; root-owned and world-executable so
+# the arbitrary UID OpenShift assigns can run but not overwrite them.
+COPY --chmod=0755 --from=build /out/nudgebee-agent /nudgebee-agent
+COPY --chmod=0755 --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
+# Numeric uid so runAsNonRoot can be verified without an /etc/passwd entry.
+USER 65532:65532
 ENTRYPOINT ["/nudgebee-agent"]

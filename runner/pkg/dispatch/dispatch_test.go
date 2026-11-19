@@ -2,15 +2,21 @@ package dispatch
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/auth"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
+	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
 // captureSend records every Response written so tests can inspect them.
@@ -476,5 +482,135 @@ func TestHandleTrusted_LongActionTimeout(t *testing.T) {
 	_, ok, err = d.HandleTrusted(context.Background(), "quick", nil, false)
 	if !ok || err == nil {
 		t.Errorf("short action should hit deadline; ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDispatch_RelayTimeoutStopsAction(t *testing.T) {
+	d := New(Config{TaskTimeout: 10 * time.Second}, nil, map[string]Handler{
+		"slow": Handler(func(ctx context.Context, params map[string]any) (any, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+	})
+	var env map[string]any
+	if err := json.Unmarshal(envelope(t, "slow", "req-rt", nil), &env); err != nil {
+		t.Fatal(err)
+	}
+	env["relay_timeout_ms"] = 50
+	msg, _ := json.Marshal(env)
+
+	cap := &captureSend{}
+	start := time.Now()
+	d.Handle(context.Background(), msg, cap.send)
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("handler ran %v; want it stopped at the relay's 50ms, not the 10s task timeout", elapsed)
+	}
+	if r := cap.only(t); r.StatusCode != 504 {
+		t.Errorf("expected 504, got %d", r.StatusCode)
+	}
+}
+
+func TestDispatch_RelayTimeoutBoundsGrafanaProxy(t *testing.T) {
+	stub := &deadlineGrafana{}
+	d := New(Config{}, nil, map[string]Handler{})
+	d.SetGrafana(stub)
+
+	send := func(extra map[string]any) {
+		m := map[string]any{
+			"method": "GET",
+			"url":    "/api/health",
+			"header": map[string][]string{"X-Nb-Request-Id": {"g-1"}},
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		msg, _ := json.Marshal(m)
+		d.Handle(context.Background(), msg, (&captureSend{}).send)
+	}
+
+	send(nil)
+	if stub.hadDeadline {
+		t.Fatal("proxy call without relay_timeout_ms got a deadline; want today's behaviour")
+	}
+	send(map[string]any{"relay_timeout_ms": int64(1) << 62})
+	if stub.hadDeadline {
+		t.Fatal("an out-of-range relay_timeout_ms must be ignored, not wrap into a past deadline")
+	}
+	send(map[string]any{"relay_timeout_ms": 30000})
+	if !stub.hadDeadline {
+		t.Fatal("proxy call with relay_timeout_ms ran without a deadline")
+	}
+	if rem := time.Until(stub.deadline); rem > 30*time.Second || rem < 25*time.Second {
+		t.Errorf("deadline in %v; want ~30s", rem)
+	}
+}
+
+type deadlineGrafana struct {
+	hadDeadline bool
+	deadline    time.Time
+}
+
+func (g *deadlineGrafana) record(ctx context.Context) any {
+	g.deadline, g.hadDeadline = ctx.Deadline()
+	return map[string]any{"status_code": 200}
+}
+
+func (g *deadlineGrafana) HandleGrafana(ctx context.Context, _ *GrafanaRequest) any {
+	return g.record(ctx)
+}
+
+func (g *deadlineGrafana) HandleAPI(ctx context.Context, _ string, _ *GrafanaRequest) any {
+	return g.record(ctx)
+}
+
+func (g *deadlineGrafana) HandlePrometheus(ctx context.Context, _ *GrafanaRequest) any {
+	return g.record(ctx)
+}
+
+// The same relay-signed mutation delivered twice (the broker redelivers what was
+// unacked when a channel dropped) runs once; the second delivery is answered 409,
+// not 401, because the change may have applied.
+func TestDispatch_DuplicateDeliveryOfAMutationIs409(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 7)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	ver, err := relaysig.NewVerifier(base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &auth.Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
+	var runs atomic.Int32
+	d := New(Config{}, v, map[string]Handler{
+		"scale_deployment": SimpleHandler(func(map[string]any) (any, error) { runs.Add(1); return "scaled", nil }),
+	})
+
+	body := json.RawMessage(`{"action_name":"scale_deployment","timestamp":1700000000}`)
+	msg, err := json.Marshal(map[string]any{
+		"body":            body,
+		"request_id":      "req-dup",
+		"relay_signature": base64.StdEncoding.EncodeToString(ed25519.Sign(priv, body)),
+		"relay_signed_at": time.Now().UTC().Format(time.RFC3339),
+		"relay_nonce":     "nonce-dup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := &captureSend{}
+	d.Handle(context.Background(), msg, first.send)
+	if r := first.only(t); r.StatusCode != 200 {
+		t.Fatalf("first delivery: status %d (%v); want 200", r.StatusCode, r.Data)
+	}
+	again := &captureSend{}
+	d.Handle(context.Background(), msg, again.send)
+	if r := again.only(t); r.StatusCode != 409 {
+		t.Fatalf("second delivery: status %d (%v); want 409", r.StatusCode, r.Data)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("handler ran %d times; want once", got)
 	}
 }

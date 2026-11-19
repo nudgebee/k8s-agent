@@ -41,4 +41,6 @@ type Greeting struct {
 	AgentVersion   string `json:"agent_version,omitempty"`
 	AgentCommit    string `json:"agent_commit,omitempty"`
 	AgentBuildTime string `json:"agent_build_time,omitempty"`
+	// ProtocolVersion is version.ProtocolVersion.
+	ProtocolVersion string `json:"protocol_version,omitempty"`
 }

@@ -14,7 +14,6 @@ keywords:
   - kubernetes
   - observability
   - opentelemetry
-  - opencost
   - monitoring
   - clickhouse
   - kubewatch
@@ -23,7 +22,7 @@ annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Documentation
-      url: https://app.nudgebee.com/help/docs/installation/agent/installation/
+      url: https://docs.nudgebee.com/docs/installation/agent/installation/
     - name: Source
       url: https://github.com/nudgebee/k8s-agent
 # version and appVersion MUST stay identical. The agent reports appVersion to the
@@ -34,17 +33,9 @@ annotations:
 # release-rc.yaml stamps both for RCs; release.yaml uses whatever is committed
 # here, so a GA release ships exactly these two lines. helm-dev-lint.yml fails
 # the PR if they differ.
-version: 0.1.27
-appVersion: 0.1.27
+version: 0.1.33
+appVersion: 0.1.33
 dependencies:
-- name: opencost
-  version: 2.0.1
-  condition: opencost.enabled
-  repository: "https://opencost.github.io/opencost-helm-chart"
-- name: clickhouse
-  version: 3.1.*
-  repository: https://charts.bitnami.com/bitnami
-  condition: opentelemetry-collector.enabled
 - name: opentelemetry-collector
   version: 0.165.0
   repository: https://open-telemetry.github.io/opentelemetry-helm-charts

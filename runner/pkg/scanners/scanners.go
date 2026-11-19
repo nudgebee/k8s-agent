@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -44,7 +45,11 @@ const (
 	// comfortably above the api-server orchestrator's 15-min poll budget, so it
 	// never cuts short a scan the orchestrator would still accept.
 	minJobActiveDeadlineSeconds int64 = 1800
-	defaultMaxConcurrent        int   = 5
+
+	// unschedulableGrace is how long a pod may stay Unschedulable before the Job
+	// is reported Failed. Long enough for a cluster autoscaler to add a node.
+	unschedulableGrace       = 5 * time.Minute
+	defaultMaxConcurrent int = 5
 	// 64 MiB raw stdout cap — large enough to absorb trivy_cis (~17 MiB) and
 	// kube_bench full reports without truncation. Agent gzips before sending,
 	// so the wire payload is typically ~5-10x smaller than the raw cap.
@@ -120,6 +125,7 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		Args:         spec.Args,
 		Env:          envs,
 		VolumeMounts: spec.VolumeMounts,
+		Resources:    spec.Resources,
 	}
 	if spec.ImagePullPolicy != "" {
 		container.ImagePullPolicy = corev1.PullPolicy(spec.ImagePullPolicy)
@@ -149,6 +155,7 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		HostPID:            spec.HostPID,
 		HostNetwork:        spec.HostNetwork,
 		NodeName:           spec.NodeName,
+		NodeSelector:       spec.NodeSelector,
 		ServiceAccountName: saName,
 		Volumes:            spec.Volumes,
 	}
@@ -168,6 +175,13 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		orchestratorLabel: orchestratorValue,
 		jobUUIDLabel:      jobUUID,
 	}
+	// The pod carries the Job's labels too, so anything watching pods (the
+	// agent's own finding triggers, kube-state-metrics alerting) can tell a scan
+	// pod from a workload pod without looking up its owner.
+	podLabels := map[string]string{jobNameSelectorLabel: jobName}
+	for k, v := range labels {
+		podLabels[k] = v
+	}
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -180,7 +194,7 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 			ActiveDeadlineSeconds:   &deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{jobNameSelectorLabel: jobName},
+					Labels: podLabels,
 				},
 				Spec: podSpec,
 			},
@@ -312,6 +326,29 @@ func (r *Runner) imagePullFailure(ctx context.Context, jobName string) (string, 
 		}
 		if msg, stuck := check(p.Status.ContainerStatuses); stuck {
 			return msg, true
+		}
+	}
+	return "", false
+}
+
+// unschedulable reports whether the Job's pod has had no node for longer than
+// unschedulableGrace. Like a failed pull, this earns no Failed condition: the pod
+// stays Pending and the Job holds a concurrency slot until its deadline. A pinned
+// Job never reaches this, because NodeName bypasses the scheduler. Best-effort: a
+// list error yields ("", false).
+func (r *Runner) unschedulable(ctx context.Context, jobName string, now time.Time) (string, bool) {
+	pods, err := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: jobNameSelectorLabel + "=" + jobName,
+	})
+	if err != nil {
+		return "", false
+	}
+	for i := range pods.Items {
+		for _, c := range pods.Items[i].Status.Conditions {
+			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
+				c.Reason == corev1.PodReasonUnschedulable && now.Sub(c.LastTransitionTime.Time) > unschedulableGrace {
+				return "unschedulable: " + c.Message, true
+			}
 		}
 	}
 	return "", false

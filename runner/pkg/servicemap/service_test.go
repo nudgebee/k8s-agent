@@ -2,6 +2,8 @@ package servicemap
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -185,6 +187,49 @@ func TestService_Build_TolerantOfPartialFetchErrors(t *testing.T) {
 	_, err := s.Build(ctx, FilterParams{})
 	if err != nil {
 		t.Errorf("partial failure should NOT propagate: %v", err)
+	}
+}
+
+// A query the map's shape depends on failing must not give a map that looks
+// complete: without kube_pod_info pods lose their IPs and owners, and without an
+// edge query links vanish. The knowledge graph builds CALLS edges from the map.
+func TestService_Build_FailsWhenARequiredQueryFails(t *testing.T) {
+	for _, failing := range []string{"kube_pod_info", "container_net_tcp_successful_connects"} {
+		t.Run(failing, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Query().Get("query"), failing) {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+			}))
+			defer srv.Close()
+
+			prom := prometheus.New(srv.URL, &http.Client{Timeout: 5 * time.Second})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			apps, err := New(prom, "").Build(ctx, FilterParams{})
+			if !errors.Is(err, errQueriesFailed) {
+				t.Fatalf("err = %v, %d apps; want errQueriesFailed", err, len(apps))
+			}
+			if !strings.Contains(err.Error(), failing) {
+				t.Errorf("err = %v; want it to name %s", err, failing)
+			}
+		})
+	}
+}
+
+func TestQueryFailures_OnlyRequiredKeysFail(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	var f queryFailures
+	f.add([]string{"container_restarts", "kube_pod_labels"})
+	if err := f.err(logger); err != nil {
+		t.Fatalf("optional failures only: err = %v; want nil", err)
+	}
+	f.add([]string{"kube_service_info"})
+	err := f.err(logger)
+	if !errors.Is(err, errQueriesFailed) || !strings.Contains(err.Error(), "kube_service_info") || strings.Contains(err.Error(), "container_restarts") {
+		t.Fatalf("err = %v; want errQueriesFailed naming only kube_service_info", err)
 	}
 }
 

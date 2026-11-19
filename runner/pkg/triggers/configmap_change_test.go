@@ -1,6 +1,8 @@
 package triggers
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -337,5 +339,175 @@ func TestConfigMapChange_OptsIntoChurnSuppression(t *testing.T) {
 	}
 	if babysitterChangeMatcher("Deployment").SuppressChurn {
 		t.Error("workload changes do not churn and must not be suppressed by frequency")
+	}
+}
+
+// flagsFile builds a pretty-printed flags file held in one ConfigMap key,
+// with flag "featureN" for each n. Flags late in the file sit well past
+// maxConfigMapValueBytes.
+func flagsFile(n int, override map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("{\n  \"flags\": {\n")
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("feature%02d", i)
+		v := "off"
+		if o, ok := override[name]; ok {
+			v = o
+		}
+		fmt.Fprintf(&sb, "    %q: {\n      \"defaultVariant\": %q,\n      \"state\": \"ENABLED\",\n      \"variants\": {\n        \"off\": false,\n        \"on\": true\n      }\n    },\n", name, v)
+	}
+	sb.WriteString("    \"last\": {}\n  }\n}\n")
+	return sb.String()
+}
+
+func configMapWith(t *testing.T, key, value string) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"name": "flags", "namespace": "prod"},
+		"data":     map[string]any{key: value},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustObj(t, string(b))
+}
+
+func diffEntry(t *testing.T, blocks []EvidenceBlock) (oldYAML, newYAML, before, after string) {
+	t.Helper()
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 evidence block; got %d", len(blocks))
+	}
+	data, _ := blocks[0]["data"].(map[string]any)
+	values, _ := data["updated_values"].([]any)
+	if len(values) != 1 {
+		t.Fatalf("expected 1 updated_value; got %d", len(values))
+	}
+	entry, _ := values[0].(map[string]any)
+	oldYAML, _ = data["old"].(string)
+	newYAML, _ = data["new"].(string)
+	before, _ = entry["old"].(string)
+	after, _ = entry["new"].(string)
+	return
+}
+
+// An edit past the cap used to leave two identical head excerpts: the
+// event said the value changed and showed nothing that did. Both sides now
+// keep the changed lines, framed by enough context to name what changed.
+func TestConfigMapChange_KeepsAnEditPastTheCap(t *testing.T) {
+	before := flagsFile(40, nil)
+	after := flagsFile(40, map[string]string{"feature30": "on"})
+	if i := strings.Index(before, `"feature30"`); i < maxConfigMapValueBytes {
+		t.Fatalf("fixture must put the edit past the cap; found at %d", i)
+	}
+
+	blocks := configMapChangeMatcher().EnrichBlocks(configMapWith(t, "flags.json", after), configMapWith(t, "flags.json", before), EnrichContext{})
+	oldYAML, newYAML, b, a := diffEntry(t, blocks)
+
+	for _, side := range []struct{ name, text, want string }{
+		{"updated_values old", b, `"defaultVariant": "off"`},
+		{"updated_values new", a, `"defaultVariant": "on"`},
+		{"rendered old", oldYAML, `"defaultVariant": "off"`},
+		{"rendered new", newYAML, `"defaultVariant": "on"`},
+	} {
+		if !strings.Contains(side.text, `"feature30": {`) || !strings.Contains(side.text, side.want) {
+			t.Errorf("%s must carry the edited flag and its value:\n%s", side.name, side.text)
+		}
+		if !strings.Contains(side.text, "truncated: showing lines") {
+			t.Errorf("%s must say it is an excerpt", side.name)
+		}
+	}
+	if b == a {
+		t.Error("the two excerpts must differ — they are the change")
+	}
+	if len(b) > maxConfigMapValueBytes || len(a) > maxConfigMapValueBytes {
+		t.Errorf("excerpts over the cap: %d / %d bytes", len(b), len(a))
+	}
+}
+
+func TestConfigMapChange_KeepsEachEditedRange(t *testing.T) {
+	before := flagsFile(60, nil)
+	after := flagsFile(60, map[string]string{"feature05": "on", "feature50": "on"})
+
+	blocks := configMapChangeMatcher().EnrichBlocks(configMapWith(t, "flags.json", after), configMapWith(t, "flags.json", before), EnrichContext{})
+	_, _, b, a := diffEntry(t, blocks)
+	if strings.Count(a, "truncated: showing lines") != 2 || strings.Count(b, "truncated: showing lines") != 2 {
+		t.Fatalf("two distant edits must be two ranges:\nold: %s\nnew: %s", b, a)
+	}
+	for _, name := range []string{`"feature05": {`, `"feature50": {`} {
+		if !strings.Contains(a, name) || !strings.Contains(b, name) {
+			t.Errorf("both sides must keep %s", name)
+		}
+	}
+	if strings.Contains(a, `"feature25"`) {
+		t.Error("the unchanged middle of the file must be left out")
+	}
+}
+
+// One long line has no line ranges to keep; the excerpt opens just before
+// the first byte that differs instead of at the head.
+func TestConfigMapChange_OneLineValueKeepsTheFirstDifference(t *testing.T) {
+	head := strings.Repeat("x", maxConfigMapValueBytes*2)
+	blocks := configMapChangeMatcher().EnrichBlocks(
+		configMapWith(t, "blob", head+"NEW"+strings.Repeat("y", 100)),
+		configMapWith(t, "blob", head+"OLD"+strings.Repeat("y", 100)), EnrichContext{})
+	_, _, b, a := diffEntry(t, blocks)
+	if !strings.Contains(b, "OLD") || !strings.Contains(a, "NEW") {
+		t.Errorf("excerpts must hold the differing bytes:\nold: %.120s…\nnew: %.120s…", b, a)
+	}
+	if !strings.Contains(a, "truncated: showing bytes") {
+		t.Error("a byte excerpt must say so")
+	}
+}
+
+// Only a changed value gets a change window. An over-cap key that did not
+// change is still cut to its head, and a key that is new has no old side
+// to align with.
+func TestConfigMapChange_UnchangedAndAddedKeysKeepTheHeadCap(t *testing.T) {
+	big := strings.Repeat("a\n", maxConfigMapValueBytes)
+	old := mustObj(t, `{"metadata":{"name":"c","namespace":"prod"},"data":{"same":"`+strings.ReplaceAll(big, "\n", `\n`)+`","k":"1"}}`)
+	updated := mustObj(t, `{"metadata":{"name":"c","namespace":"prod"},"data":{"same":"`+strings.ReplaceAll(big, "\n", `\n`)+`","k":"2","added":"`+strings.ReplaceAll(big, "\n", `\n`)+`"}}`)
+
+	windows := changedValueWindows(old, updated)
+	if len(windows) != 0 {
+		t.Fatalf("no changed over-cap value here; got windows for %v", windows)
+	}
+	blocks := configMapChangeMatcher().EnrichBlocks(updated, old, EnrichContext{})
+	data, _ := blocks[0]["data"].(map[string]any)
+	newYAML, _ := data["new"].(string)
+	if !strings.Contains(newYAML, "truncated: 2048 of") {
+		t.Errorf("unchanged and added over-cap values keep the head cap:\n%.300s", newYAML)
+	}
+}
+
+func TestConfigMapChange_ChangeWindowsCutOnRuneBoundaries(t *testing.T) {
+	for _, pad := range []int{0, 1} {
+		head := strings.Repeat("a", pad) + strings.Repeat("é", maxConfigMapValueBytes)
+		b, a := changeWindows(head+"1", head+"2")
+		if !utf8.ValidString(b) || !utf8.ValidString(a) {
+			t.Errorf("pad=%d: excerpt is not valid UTF-8", pad)
+		}
+	}
+}
+
+// Many scattered edits to a large value with repeated lines made the line
+// matcher take minutes. Past maxMatchedLines the changed span is one range,
+// which the byte window then cuts down.
+func TestConfigMapChange_LargeValueWithManyEditsStaysFast(t *testing.T) {
+	var b, a strings.Builder
+	for i := 0; i < 30000; i++ {
+		fmt.Fprintf(&b, "    \"k%d\": %d,\n  },\n", i, i)
+		v := i
+		if i%97 == 0 {
+			v = -i
+		}
+		fmt.Fprintf(&a, "    \"k%d\": %d,\n  },\n", i, v)
+	}
+	start := time.Now()
+	before, after := changeWindows(b.String(), a.String())
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("changeWindows took %s on a %d-byte value", d, b.Len())
+	}
+	if before == after || len(before) > maxConfigMapValueBytes+64 || len(after) > maxConfigMapValueBytes+64 {
+		t.Errorf("excerpts must differ and stay near the cap: %d / %d bytes", len(before), len(after))
 	}
 }

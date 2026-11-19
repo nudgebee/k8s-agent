@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/nudgebee/nudgebee-agent/pkg/cmdout"
 	"github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 )
 
@@ -95,6 +96,8 @@ func handleBash(ctx context.Context, e Executor, p map[string]any) (any, error) 
 		Pod:       str(p, "pod"),
 		Container: str(p, "container"),
 		Command:   []string{"bash", "-c", cmd},
+
+		OutputEncoding: str(p, cmdout.Param),
 	}
 	return e.Exec(ctx, req)
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/pmezard/go-difflib/difflib"
 	"sigs.k8s.io/yaml"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/kube"
@@ -76,20 +77,23 @@ func ConfigMapDiffOptions() SpecDiffOptions {
 // spec byte-identical, so a spec-only filter reports nothing for the
 // change most likely to have broken traffic.
 //
-// last-applied-configuration is excluded because kubectl stores a full
-// copy of the object there: monitoring it would report every
-// `kubectl apply` twice, once as the real change and once as the
-// annotation carrying the same change.
+// The applied-copy annotations are excluded because each stores a full
+// copy of the object: monitoring one would report every apply twice,
+// once as the real change and once as the annotation carrying the same
+// change, with the object's inline env values in the recorded values.
 func IngressDiffOptions() SpecDiffOptions {
+	omit := []string{
+		"status",
+		"metadata.generation",
+		"metadata.resourceVersion",
+		"metadata.managedFields",
+	}
+	for _, k := range appliedCopyAnnotations {
+		omit = append(omit, "metadata.annotations."+k)
+	}
 	return SpecDiffOptions{
 		FieldsToMonitor: []string{"spec", "metadata.annotations"},
-		FieldsToOmit: []string{
-			"status",
-			"metadata.generation",
-			"metadata.resourceVersion",
-			"metadata.managedFields",
-			"metadata.annotations." + lastAppliedAnnotation,
-		},
+		FieldsToOmit:    omit,
 	}
 }
 
@@ -100,6 +104,16 @@ func IngressDiffOptions() SpecDiffOptions {
 // of evidence per event. The changed key is what carries the diagnostic
 // signal — the full file body does not.
 const maxConfigMapValueBytes = 2048
+
+// changeContextLines is how many unchanged lines frame each edited range
+// when an over-cap value is cut down to the lines that changed.
+const changeContextLines = 3
+
+// maxMatchedLines bounds the lines, per side, handed to the line matcher
+// once the common head and tail are trimmed. Its cost grows with the cube of
+// the input when lines repeat ("},"), so a large value edited in many places
+// would stall the event; past this the changed span is kept as one range.
+const maxMatchedLines = 1000
 
 // ComputeSpecDiff walks obj + oldObj recursively and returns the filtered
 // path-level diffs. Returns nil when oldObj is nil (no diff possible) or
@@ -234,11 +248,14 @@ func joinPath(prefix, key string) string {
 func BuildKubernetesDiffBlock(obj, oldObj map[string]any, kind string, diffs []DiffEntry) EvidenceBlock {
 	// Strip a small set of "noisy" fields before serializing
 	// (status, metadata.generation/resourceVersion/managedFields). Same
-	// fields the spec-diff filter omits — single source of truth.
+	// fields the spec-diff filter omits — single source of truth. The
+	// applied-copy annotations go too: each is a full copy of the object,
+	// so rendering one doubles the payload, shows the change twice, and
+	// ships inline env values a second time.
 	omit := DefaultSpecDiffOptions().FieldsToOmit
 
-	objYAML := objectToYAML(obj, omit)
-	oldYAML := objectToYAML(oldObj, omit)
+	objYAML := objectToYAML(withoutAppliedCopyAnnotations(obj), omit)
+	oldYAML := objectToYAML(withoutAppliedCopyAnnotations(oldObj), omit)
 
 	// resource_name follows the _obj_to_name convention:
 	// "<kind>/<namespace>/<name>.yaml" (kind lowercased, namespace
@@ -295,40 +312,168 @@ func BuildKubernetesDiffBlock(obj, oldObj map[string]any, kind string, diffs []D
 // `kubectl.kubernetes.io/last-applied-configuration`, which duplicates
 // the entire object into the rendered YAML for anything applied with
 // `kubectl apply`.
+//
+// A changed value over the cap is cut to the lines that changed, on both
+// sides, rather than to its first bytes. Keeping the head of each side
+// drops any edit further into the value — a whole flags or config file
+// held in one key — and leaves two identical excerpts that say the value
+// changed without saying how.
 func BuildConfigMapDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
+	windows := changedValueWindows(oldObj, obj)
 	return BuildKubernetesDiffBlock(
-		truncateConfigMapValues(obj),
-		truncateConfigMapValues(oldObj),
+		truncateConfigMapValues(obj, windows, false),
+		truncateConfigMapValues(oldObj, windows, true),
 		"ConfigMap",
-		truncateDiffValues(diffs),
+		truncateDiffValues(diffs, windows),
 	)
 }
 
-// BuildIngressDiffBlock is BuildKubernetesDiffBlock for Ingresses: same
-// block, with kubectl's last-applied annotation stripped from the
-// rendered YAML. Ingress annotations are monitored, so without this the
-// annotation carrying a copy of the whole object is rendered alongside
-// the change it duplicates.
-func BuildIngressDiffBlock(obj, oldObj map[string]any, diffs []DiffEntry) EvidenceBlock {
-	return BuildKubernetesDiffBlock(
-		withoutLastAppliedAnnotation(obj),
-		withoutLastAppliedAnnotation(oldObj),
-		"Ingress",
-		diffs,
-	)
+// valueWindow is the excerpt of one over-cap value kept on each side of a
+// change.
+type valueWindow struct{ before, after string }
+
+// changedValueWindows returns, by diff path ("data.<key>"), the excerpts
+// for every data / binaryData value present on both sides that changed
+// and is over the cap on either side.
+func changedValueWindows(oldObj, obj map[string]any) map[string]valueWindow {
+	out := map[string]valueWindow{}
+	for _, field := range []string{"data", "binaryData"} {
+		before, _ := oldObj[field].(map[string]any)
+		after, _ := obj[field].(map[string]any)
+		for k, a := range after {
+			bs, okB := before[k].(string)
+			as, okA := a.(string)
+			if !okB || !okA || bs == as {
+				continue
+			}
+			if len(bs) <= maxConfigMapValueBytes && len(as) <= maxConfigMapValueBytes {
+				continue
+			}
+			b, a := changeWindows(bs, as)
+			out[joinPath(field, k)] = valueWindow{before: b, after: a}
+		}
+	}
+	return out
 }
 
-// lastAppliedAnnotation is kubectl's copy of the whole object, kept on
-// the object itself. Rendering it inside a diff of that same object
-// doubles the payload and shows the change twice.
-const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+// changeWindows cuts two versions of a value down to the line ranges that
+// differ, each framed by changeContextLines unchanged lines and headed by
+// the line numbers it covers. Both sides are cut at matching places, so
+// the two excerpts still diff line for line. When that is still over the
+// cap — many edits, or a value on one long line — it falls back to a byte
+// window opening just before the first difference.
+func changeWindows(before, after string) (string, string) {
+	bl := strings.Split(before, "\n")
+	al := strings.Split(after, "\n")
+	hunks := changedHunks(bl, al)
+	b, a := renderHunks(bl, hunks, true), renderHunks(al, hunks, false)
+	if len(b) <= maxConfigMapValueBytes && len(a) <= maxConfigMapValueBytes {
+		return b, a
+	}
+	return firstDifferenceWindow(before, after)
+}
+
+// hunk is one edited range plus its context, as [start, end) line indexes
+// into each side.
+type hunk struct{ b1, b2, a1, a2 int }
+
+func changedHunks(bl, al []string) []hunk {
+	// Trim the common head and tail before matching: an edit to a large
+	// file is usually a few lines, and the matcher's cost grows with what
+	// is left.
+	head := 0
+	for head < len(bl) && head < len(al) && bl[head] == al[head] {
+		head++
+	}
+	tail := 0
+	for tail < len(bl)-head && tail < len(al)-head && bl[len(bl)-1-tail] == al[len(al)-1-tail] {
+		tail++
+	}
+	bMid, aMid := bl[head:len(bl)-tail], al[head:len(al)-tail]
+	ops := []difflib.OpCode{{Tag: 'r', I1: 0, I2: len(bMid), J1: 0, J2: len(aMid)}}
+	if len(bMid) <= maxMatchedLines && len(aMid) <= maxMatchedLines {
+		// autoJunk off: it treats lines repeated across the file ("},") as
+		// junk, which merges unrelated edits into one replaced range.
+		ops = difflib.NewMatcherWithJunk(bMid, aMid, false, nil).GetOpCodes()
+	}
+	var hunks []hunk
+	for _, op := range ops {
+		if op.Tag == 'e' {
+			continue
+		}
+		h := hunk{head + op.I1, head + op.I2, head + op.J1, head + op.J2}
+		// Lines either side of an edit are equal on both sides, so the
+		// same amount of context is available to each.
+		pre := min(changeContextLines, h.b1, h.a1)
+		post := min(changeContextLines, len(bl)-h.b2, len(al)-h.a2)
+		h = hunk{h.b1 - pre, h.b2 + post, h.a1 - pre, h.a2 + post}
+		if n := len(hunks); n > 0 && h.b1 <= hunks[n-1].b2 {
+			hunks[n-1].b2, hunks[n-1].a2 = h.b2, h.a2
+			continue
+		}
+		hunks = append(hunks, h)
+	}
+	return hunks
+}
+
+func renderHunks(lines []string, hunks []hunk, before bool) string {
+	var sb strings.Builder
+	for i, h := range hunks {
+		start, end := h.a1, h.a2
+		if before {
+			start, end = h.b1, h.b2
+		}
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "... [truncated: showing lines %d-%d of %d]", start+1, end, len(lines))
+		for _, l := range lines[start:end] {
+			sb.WriteString("\n")
+			sb.WriteString(l)
+		}
+	}
+	return sb.String()
+}
+
+// firstDifferenceWindow keeps maxConfigMapValueBytes of each side starting
+// a little before the first byte that differs, cut on rune boundaries.
+func firstDifferenceWindow(before, after string) (string, string) {
+	p := 0
+	for p < len(before) && p < len(after) && before[p] == after[p] {
+		p++
+	}
+	start := max(0, p-maxConfigMapValueBytes/4)
+	cut := func(s string) string {
+		from := min(start, len(s))
+		for from > 0 && !utf8.RuneStart(s[from]) {
+			from--
+		}
+		to := min(len(s), from+maxConfigMapValueBytes)
+		for to < len(s) && to > from && !utf8.RuneStart(s[to]) {
+			to--
+		}
+		return fmt.Sprintf("... [truncated: showing bytes %d-%d of %d]\n%s", from, to, len(s), s[from:to])
+	}
+	return cut(before), cut(after)
+}
+
+// appliedCopyAnnotations each hold a full copy of the object they sit on:
+// kubectl's last-applied-configuration and Rancher/k3s's gzipped
+// objectset.rio.cattle.io/applied. Rendering one inside a diff of that
+// same object doubles the payload, shows the change twice, and ships the
+// object's inline env values a second time.
+var appliedCopyAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+	"objectset.rio.cattle.io/applied",
+}
 
 // truncateConfigMapValues returns a shallow-copied obj whose data /
-// binaryData values are capped and whose last-applied annotation is
-// dropped. The input is left untouched — the same map is handed to every
-// matcher the engine evaluates.
-func truncateConfigMapValues(obj map[string]any) map[string]any {
-	out := withoutLastAppliedAnnotation(obj)
+// binaryData values are capped — to their change window when windows has
+// one for the key, else to their head — and whose applied-copy
+// annotations are dropped. The input is left untouched — the same map is
+// handed to every matcher the engine evaluates.
+func truncateConfigMapValues(obj map[string]any, windows map[string]valueWindow, before bool) map[string]any {
+	out := withoutAppliedCopyAnnotations(obj)
 	if out == nil {
 		return nil
 	}
@@ -339,6 +484,10 @@ func truncateConfigMapValues(obj map[string]any) map[string]any {
 		}
 		capped := make(map[string]any, len(src))
 		for k, v := range src {
+			if w, ok := windows[joinPath(field, k)]; ok {
+				capped[k] = w.side(before)
+				continue
+			}
 			capped[k] = truncateValue(v)
 		}
 		out[field] = capped
@@ -346,14 +495,14 @@ func truncateConfigMapValues(obj map[string]any) map[string]any {
 	return out
 }
 
-// withoutLastAppliedAnnotation shallow-copies obj with kubectl's
-// last-applied annotation removed from metadata.annotations.
+// withoutAppliedCopyAnnotations shallow-copies obj with the
+// appliedCopyAnnotations removed from metadata.annotations.
 //
 // The generic omit list can't express this: stripOmittedFields splits an
 // omit path on ".", and annotation keys are themselves dotted
 // ("kubectl.kubernetes.io/..."), so the path never resolves. The input is
 // left untouched — the engine hands the same map to every matcher.
-func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
+func withoutAppliedCopyAnnotations(obj map[string]any) map[string]any {
 	if obj == nil {
 		return nil
 	}
@@ -366,7 +515,14 @@ func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
 		return out
 	}
 	ann, _ := meta["annotations"].(map[string]any)
-	if _, present := ann[lastAppliedAnnotation]; !present {
+	present := false
+	for _, k := range appliedCopyAnnotations {
+		if _, ok := ann[k]; ok {
+			present = true
+			break
+		}
+	}
+	if !present {
 		return out
 	}
 	metaCopy := make(map[string]any, len(meta))
@@ -375,24 +531,36 @@ func withoutLastAppliedAnnotation(obj map[string]any) map[string]any {
 	}
 	annCopy := make(map[string]any, len(ann))
 	for k, v := range ann {
-		if k == lastAppliedAnnotation {
-			continue
-		}
 		annCopy[k] = v
+	}
+	for _, k := range appliedCopyAnnotations {
+		delete(annCopy, k)
 	}
 	metaCopy["annotations"] = annCopy
 	out["metadata"] = metaCopy
 	return out
 }
 
+func (w valueWindow) side(before bool) string {
+	if before {
+		return w.before
+	}
+	return w.after
+}
+
 // truncateDiffValues caps the before/after values carried in
-// updated_values. Paths are never truncated — the changed key is the
-// part that has to survive intact.
-func truncateDiffValues(diffs []DiffEntry) []DiffEntry {
+// updated_values, to the change window where there is one. Paths are
+// never truncated — the changed key is the part that has to survive
+// intact.
+func truncateDiffValues(diffs []DiffEntry, windows map[string]valueWindow) []DiffEntry {
 	out := make([]DiffEntry, 0, len(diffs))
 	for _, d := range diffs {
-		d.Before = truncateValue(d.Before)
-		d.After = truncateValue(d.After)
+		if w, ok := windows[d.Path]; ok {
+			d.Before, d.After = w.before, w.after
+		} else {
+			d.Before = truncateValue(d.Before)
+			d.After = truncateValue(d.After)
+		}
 		out = append(out, d)
 	}
 	return out

@@ -1,0 +1,33 @@
+{{- /*
+Opt-in (runner.helmReleaseDiscovery): cluster-wide `list` on secrets so the
+list_helm_releases action can read Helm release Secrets. RBAC cannot restrict a
+rule to a label, so this reaches every Secret; the runner itself only lists with
+owner=helm and returns decoded chart metadata, never Secret data. Rendered in
+both standard and read-only mode.
+*/}}
+{{- if .Values.runner.helmReleaseDiscovery }}
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-helm-releases
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-helm-releases
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-helm-releases
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+{{- end }}

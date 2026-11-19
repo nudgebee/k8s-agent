@@ -26,9 +26,7 @@ jobs:
       - name: Add dependency chart repos
         run: |
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo add opencost https://opencost.github.io/opencost-helm-chart
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm repo add bitnami https://charts.bitnami.com/bitnami
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -75,8 +73,8 @@ jobs:
       # release does not create. kubelet cannot resolve the reference, so the pod
       # never starts — it sits in phase Pending with CreateContainerConfigError,
       # which reads as "stuck Pending" to operators. It bit us when the runner
-      # kept a hard secretKeyRef to the ClickHouse Secret while the ClickHouse
-      # subchart is conditioned on opentelemetry-collector.enabled.
+      # kept a hard secretKeyRef to the ClickHouse Secret while the bundled
+      # ClickHouse is conditioned on opentelemetry-collector.enabled.
       - name: Assert no workload references a Secret/ConfigMap the release omits
         run: |
           pip install pyyaml
@@ -118,6 +116,11 @@ jobs:
                       if 'configMap' in v:
                           check('ConfigMap', v['configMap']['name'],
                                 f"{owner} volume/{v['name']}", v['configMap'].get('optional'))
+                      for src in (v.get('projected') or {}).get('sources') or []:
+                          for key, kind in (('secret', 'Secret'), ('configMap', 'ConfigMap')):
+                              if ref := src.get(key):
+                                  check(kind, ref['name'],
+                                        f"{owner} volume/{v['name']} (projected)", ref.get('optional'))
 
               for d in docs:
                   if d.get('kind') not in POD_OWNERS:
@@ -166,10 +169,9 @@ jobs:
           print(f'ok: memory_limiter first in {len(pipelines)} pipeline(s)')
           PY
 
-      # global.storageClass / clickhouse.persistence.storageClass work only
-      # because the Bitnami common helper reads them, and the chart tracks
-      # `clickhouse 3.1.*` with a floating patch. Pin the three semantics the
-      # README documents rather than trusting a subchart bump not to change them.
+      # Pin the three global.storageClass / clickhouse.persistence.storageClass
+      # semantics the README documents (and the Bitnami subchart had): the
+      # global wins, "-" means storageClassName: "", empty omits the key.
       - name: Assert the StorageClass values reach the ClickHouse PVC
         run: |
           assert() { # <expected-storageClassName-line-or-empty> <helm-args...>
@@ -190,6 +192,367 @@ jobs:
           assert 'storageClassName:ci-global' --set global.storageClass=ci-global --set clickhouse.persistence.storageClass=ci-local
           assert 'storageClassName:""' --set global.storageClass=- --set clickhouse.persistence.storageClass=ci-local
           echo 'ok: storageClass precedence and "-" handling intact'
+
+      # Every pod the chart renders, and the runner's ServiceAccount, must carry
+      # global.imagePullSecrets after the component's own list, or a
+      # private-registry install leaves that pod in ImagePullBackOff.
+      # clickhouse.image.pullSecrets takes names and {name: ...} entries.
+      - name: Assert pull secrets reach every pod
+        run: |
+          rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent \
+            --set 'global.imagePullSecrets[0].name=ci-global' \
+            --set 'clickhouse.image.pullSecrets[0].name=ci-map' \
+            --set 'clickhouse.image.pullSecrets[1]=ci-plain')"
+          got="$(printf '%s\n' "$rendered" | yq -N 'select(.kind) | [.kind, .metadata.name, ((.spec.template.spec.imagePullSecrets // .imagePullSecrets // []) | map(.name) | join(","))] | join(" ")')"
+          expect() { # <kind> <name> <secrets>
+            if ! printf '%s\n' "$got" | grep -qx "$1 $2 $3"; then
+              echo "$1 $2: want imagePullSecrets $3, got: $(printf '%s\n' "$got" | grep "^$1 $2 " || echo none)"
+              exit 1
+            fi
+          }
+          expect Deployment nudgebee-agent-runner ci-global
+          expect Deployment nudgebee-agent-forwarder ci-global
+          expect DaemonSet nudgebee-agent-node-agent ci-global
+          expect ServiceAccount nudgebee-agent-runner-service-account ci-global
+          expect StatefulSet nudgebee-agent-clickhouse-shard0 ci-map,ci-plain,ci-global
+          expect Job nudgebee-agent-ch-schema-upgrade ci-map,ci-plain,ci-global
+          echo 'ok: every pod carries its own and the global pull secrets'
+
+      # The runner's ClickHouse logs check must look where the bundled exporter
+      # writes. With the collector off nothing is set and the runner falls back
+      # to otel_logs in CLICKHOUSE_DB; an operator's own env var wins.
+      - name: Assert the runner's ClickHouse logs table follows the exporter
+        run: |
+          assert() { # <expected-env-lines> <helm-args...>
+            expected="$1"; shift
+            if ! rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@")"; then
+              echo "helm template $*: render failed"
+              exit 1
+            fi
+            actual="$(printf '%s\n' "$rendered" | grep -A1 'name: CLICKHOUSE_LOGS_' | grep -v '^--$' | tr -d ' ' | paste -sd' ' -)"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: expected [$expected], got [$actual]"
+              exit 1
+            fi
+          }
+          assert '-name:CLICKHOUSE_LOGS_DATABASE value:"default" -name:CLICKHOUSE_LOGS_TABLE value:"otel_logs"'
+          assert '-name:CLICKHOUSE_LOGS_DATABASE value:"telemetry" -name:CLICKHOUSE_LOGS_TABLE value:"app_logs"' \
+            --set opentelemetry-collector.config.exporters.clickhouse.database=telemetry \
+            --set opentelemetry-collector.config.exporters.clickhouse.logs_table_name=app_logs
+          assert '' --set opentelemetry-collector.enabled=false
+          assert '-name:CLICKHOUSE_LOGS_DATABASE value:"default" -name:CLICKHOUSE_LOGS_TABLE value:mine' \
+            --set 'runner.additional_env_vars[0].name=CLICKHOUSE_LOGS_TABLE' \
+            --set 'runner.additional_env_vars[0].value=mine'
+          echo 'ok: CLICKHOUSE_LOGS_DATABASE / CLICKHOUSE_LOGS_TABLE follow the exporter config'
+
+      # query_data reads through a read-only user with query limits. The user
+      # exists only in the bundled ClickHouse, so the runner names it only when
+      # that is where it connects, and the users file is mounted into the
+      # official image's users.d.
+      - name: Assert the read-only ClickHouse user for query_data
+        run: |
+          render() { helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@"; }
+          reader_env() { printf '%s\n' "$1" | grep -A1 'name: CLICKHOUSE_READER_USER' | grep -v '^--$' | tr -d ' ' | paste -sd' ' -; }
+          fail() { echo "$*"; exit 1; }
+
+          out="$(render)"
+          [ "$(reader_env "$out")" = '-name:CLICKHOUSE_READER_USER value:nudgebee_reader' ] || fail "default: runner lacks CLICKHOUSE_READER_USER"
+          printf '%s\n' "$out" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          cm = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nudgebee-agent-clickhouse-reader-users")
+          xml = cm["data"]["nudgebee-reader.xml"]
+          for want in ("<readonly>2</readonly>", "<password from_env=\"CLICKHOUSE_ADMIN_PASSWORD\"/>", "<max_execution_time><min>1</min><max>600</max></max_execution_time>", "<profile>nudgebee_reader</profile>", "<query>GRANT SELECT, SHOW ON *.*</query>", "<max_bytes_before_external_group_by>500000000</max_bytes_before_external_group_by>"):
+              assert want in xml, want
+          sts = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"].startswith("nudgebee-agent-clickhouse-shard"))
+          pod = sts["spec"]["template"]["spec"]
+          vol = next(v for v in pod["volumes"] if v["name"] == "users")
+          assert {"configMap": {"name": cm["metadata"]["name"]}} in vol["projected"]["sources"], vol
+          mounts = [m for c in pod["containers"] for m in c.get("volumeMounts") or [] if m["name"] == "users"]
+          assert [m["mountPath"] for m in mounts] == ["/etc/clickhouse-server/users.d"], mounts
+          '
+
+          [ -z "$(reader_env "$(render --set clickhouse.reader.enabled=false)")" ] || fail "reader disabled: runner still names it"
+          [ -z "$(reader_env "$(render --set opentelemetry-collector.enabled=false)")" ] || fail "no bundled ClickHouse: runner still names the reader"
+          [ -z "$(reader_env "$(render --set 'runner.additional_env_vars[0].name=CLICKHOUSE_HOST' --set 'runner.additional_env_vars[0].value=ch.example')")" ] \
+            || fail "external CLICKHOUSE_HOST: runner still names the reader"
+          # --reuse-values from a release without clickhouse.reader: no user, no ConfigMap.
+          out="$(render --set clickhouse.reader=null)" || fail "reader=null: render failed"
+          [ -z "$(reader_env "$out")" ] || fail "reader=null: runner names the reader"
+          if printf '%s\n' "$out" | grep -q 'name: nudgebee-agent-clickhouse-reader-users'; then fail "reader=null: reader ConfigMap rendered"; fi
+          # An operator's own extraVolumes no longer drop the reader. The
+          # nudgebee-reader-users entries earlier charts shipped in these lists
+          # (they named the subchart's common.names.fullname helper, which is
+          # gone) are skipped, not rendered.
+          cat > /tmp/extra-volumes.yaml <<'EOF'
+          clickhouse:
+            extraVolumes:
+              - name: certs
+                emptyDir:
+                  medium: Memory
+              - name: nudgebee-reader-users
+                configMap:
+                  name: '{{ include "common.names.fullname" . }}-reader-users'
+                  optional: true
+            extraVolumeMounts:
+              - name: nudgebee-reader-users
+                mountPath: /bitnami/clickhouse/etc/users.d/nudgebee-reader
+          EOF
+          out="$(render -f /tmp/extra-volumes.yaml)" || fail "extraVolumes: render failed"
+          [ "$(reader_env "$out")" = '-name:CLICKHOUSE_READER_USER value:nudgebee_reader' ] || fail "extraVolumes: runner lacks CLICKHOUSE_READER_USER"
+          printf '%s\n' "$out" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          pod = next(d for d in docs if d["kind"] == "StatefulSet")["spec"]["template"]["spec"]
+          names = [v["name"] for v in pod["volumes"]]
+          assert "certs" in names and "nudgebee-reader-users" not in names, names
+          mounts = [m["name"] for c in pod["containers"] for m in c.get("volumeMounts") or []]
+          assert "nudgebee-reader-users" not in mounts, mounts
+          '
+          echo 'ok: query_data reads through the read-only ClickHouse user'
+
+      # clickhouse.timeseries (off by default) adds the node-agent TimeSeries
+      # table: ClickHouse's /prometheus/api/v1 handler, the Job that creates
+      # the table, and the collector pipeline in its second config file. Off,
+      # or with no bundled ClickHouse, none of it renders and the collector's
+      # second file is empty.
+      - name: Assert clickhouse.timeseries
+        run: |
+          render() { helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@"; }
+          check() {
+            python3 -c '
+          import sys, yaml
+          want_on = sys.argv[1] == "on"
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          def find(kind, name):
+              return next((d for d in docs if d["kind"] == kind and d["metadata"]["name"] == name), None)
+          ch = find("ConfigMap", "nudgebee-agent-clickhouse")
+          job = find("Job", "nudgebee-agent-ch-timeseries-table")
+          role = find("RoleBinding", "nudgebee-agent-collector-timeseries")
+          col = find("ConfigMap", "nudgebee-agent-collector-timeseries")
+          ts = yaml.safe_load(col["data"]["timeseries.yaml"]) if col else None
+          if not want_on:
+              assert ch is None or "20_timeseries.xml" not in ch["data"], "handler rendered"
+              assert job is None and role is None, "Job or RoleBinding rendered"
+              assert col is None or ts == {}, ts
+              sys.exit(0)
+          xml = ch["data"]["20_timeseries.xml"]
+          for want in ("<url_prefix>/prometheus/api/v1</url_prefix>", "<type>prometheus_api_v1</type>", "<table>node_agent_ts</table>", "<defaults/>"):
+              assert want in xml, want
+          assert job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+          script = job["spec"]["template"]["spec"]["containers"][0]["command"][-1]
+          for want in ("CREATE TABLE IF NOT EXISTS default.node_agent_ts ENGINE = TimeSeries", "PARTITION BY toDate(timestamp)", "INTERVAL 7 DAY", "ttl_only_drop_parts = 1"):
+              assert want in script, want
+          assert role["subjects"][0]["name"] == "nudgebee-agent-opentelemetry-collector", role["subjects"]
+          exp = ts["exporters"]["prometheus_remote_write/clickhouse_ts"]
+          assert exp["endpoint"] == "http://nudgebee-agent-clickhouse:8123/prometheus/api/v1/write", exp
+          assert exp["headers"]["X-ClickHouse-User"] == "default", exp
+          p = ts["service"]["pipelines"]["metrics/node_agent_ts"]
+          assert p["processors"][0] == "memory_limiter", p
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "nudgebee-agent-opentelemetry-collector")
+          c = dep["spec"]["template"]["spec"]["containers"][0]
+          assert "--config=/conf/nudgebee/timeseries.yaml" in c["args"], c["args"]
+          ' "$1"
+          }
+          fail() { echo "$*"; exit 1; }
+
+          render | check off || fail "default: timeseries rendered"
+          render --set clickhouse.timeseries.enabled=true | check on || fail "enabled: incomplete"
+          render --set clickhouse.timeseries.enabled=true --set opentelemetry-collector.enabled=false | check off \
+            || fail "no bundled ClickHouse: timeseries rendered"
+          # --reuse-values from a release without clickhouse.timeseries.
+          render --set clickhouse.timeseries=null | check off || fail "timeseries=null: render failed or rendered"
+          # ClickHouse would merge an extraOverrides <http_handlers> with the
+          # chart's into one broken rule, so the render refuses.
+          if render --set clickhouse.timeseries.enabled=true \
+               --set-string 'clickhouse.extraOverrides=<clickhouse><http_handlers><rule/></http_handlers></clickhouse>' >/dev/null 2>&1; then
+            fail "extraOverrides with <http_handlers>: render did not fail"
+          fi
+          # The RoleBinding names the ServiceAccount the collector pod runs as.
+          sa() { render --set clickhouse.timeseries.enabled=true "$@" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          rb = next(d for d in docs if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "nudgebee-agent-collector-timeseries")
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("opentelemetry-collector"))
+          print(rb["subjects"][0]["name"], dep["spec"]["template"]["spec"].get("serviceAccountName", "default"))'; }
+          for args in "" "--set opentelemetry-collector.serviceAccount.create=false" "--set opentelemetry-collector.serviceAccount.name=otel-sa"; do
+            read -r bound runs <<<"$(sa $args)"
+            [ "$bound" = "$runs" ] || fail "${args:-default}: RoleBinding names $bound, the collector runs as $runs"
+          done
+          # The cluster label and the runner's TIMESERIES_CLUSTER carry the same
+          # value; CLUSTER_NAME is never set. With no clusterName and no lookup
+          # (helm template) neither is set. An operator's own TIMESERIES_CLUSTER
+          # is not doubled.
+          cluster() { render --set clickhouse.timeseries.enabled=true "$@" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          col = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nudgebee-agent-collector-timeseries")
+          exp = yaml.safe_load(col["data"]["timeseries.yaml"])["exporters"]["prometheus_remote_write/clickhouse_ts"]
+          label = (exp.get("external_labels") or {}).get("cluster", "-")
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "nudgebee-agent-runner")
+          env = [e for c in dep["spec"]["template"]["spec"]["containers"] for e in c.get("env") or []]
+          ts = [e.get("value", "") for e in env if e["name"] == "TIMESERIES_CLUSTER"]
+          assert not any(e["name"] == "CLUSTER_NAME" for e in env), "CLUSTER_NAME set"
+          print(label, ",".join(ts) or "-")'; }
+          [ "$(cluster --set clickhouse.timeseries.clusterName=prod-eu)" = "prod-eu prod-eu" ] || fail "clusterName: label and env differ"
+          [ "$(cluster)" = "- -" ] || fail "no cluster known: label or env set"
+          [ "$(cluster --set clickhouse.timeseries.clusterName=prod-eu \
+                 --set 'runner.additional_env_vars[0].name=TIMESERIES_CLUSTER' --set 'runner.additional_env_vars[0].value=mine')" = "prod-eu mine" ] \
+            || fail "own TIMESERIES_CLUSTER: doubled or overridden"
+          echo 'ok: clickhouse.timeseries'
+
+      # logs.collection is the one switch for where container logs go. node-agent
+      # points the node-agent's log push at the bundled collector and is the only
+      # thing that makes the runner report clickhouseLogsCollected. A value it
+      # can't honour fails the render instead of reporting logs nobody collects.
+      # NODE_NAME is set in node-agent mode only, so other modes keep the
+      # node-agent pod spec as it was. The collector's logs pipeline drops
+      # kube-system and the release namespace.
+      - name: Assert the logs collection switch
+        run: |
+          assert() { # <expected-env-lines> <helm-args...>
+            expected="$1"; shift
+            if ! rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@")"; then
+              echo "helm template $*: render failed"
+              exit 1
+            fi
+            actual="$(printf '%s\n' "$rendered" | grep -A1 -e 'name: LOGS_ENDPOINT' -e 'name: NODE_NAME' -e 'name: CLICKHOUSE_LOGS_COLLECTED' | grep -v '^--$' | tr -d ' ' | paste -sd' ' -)"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: expected [$expected], got [$actual]"
+              exit 1
+            fi
+          }
+          refuses() { # <message-fragment> <helm-args...>
+            want="$1"; shift
+            if out="$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@" 2>&1)"; then
+              echo "helm template $*: rendered; expected it to fail with [$want]"
+              exit 1
+            fi
+            case "$out" in *"$want"*) ;; *) echo "helm template $*: failed with [$out], expected [$want]"; exit 1 ;; esac
+          }
+          assert ''
+          assert '' --set logs.collection=
+          assert '' --set logs.collection=none
+          assert '-name:LOGS_ENDPOINT value:"http://nudgebee-agent-opentelemetry-collector:4318/v1/logs" -name:NODE_NAME valueFrom: -name:CLICKHOUSE_LOGS_COLLECTED value:"true"' \
+            --set logs.collection=node-agent
+          # An operator's own endpoint is theirs: nothing claims the logs reach ClickHouse.
+          assert '-name:LOGS_ENDPOINT value:"http://loki:3100/otlp/v1/logs"' --set nodeAgent.logsEndpoint=http://loki:3100/otlp/v1/logs
+          refuses 'set opentelemetry-collector.enabled=true' --set logs.collection=node-agent --set opentelemetry-collector.enabled=false
+          refuses 'needs nodeAgent.enabled=true' --set logs.collection=node-agent --set nodeAgent.enabled=false
+          refuses 'unset nodeAgent.logsEndpoint' --set logs.collection=node-agent --set nodeAgent.logsEndpoint=http://x:4318/v1/logs
+          refuses 'remove LOGS_ENDPOINT from nodeAgent.env' --set logs.collection=node-agent \
+            --set 'nodeAgent.env[0].name=LOGS_ENDPOINT' --set 'nodeAgent.env[0].value=http://loki:3100/otlp/v1/logs'
+          refuses 'otel-daemonset is not available yet' --set logs.collection=otel-daemonset
+          refuses 'must be none or node-agent' --set logs.collection=loki
+          printf '%s\n' "$(helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent --set logs.collection=node-agent)" | grep -A3 'name: NODE_NAME' | grep -q 'fieldPath: spec.nodeName' \
+            || { echo 'node-agent NODE_NAME is not spec.nodeName'; exit 1; }
+          # The subchart runs tpl over its config, which fills in the release namespace.
+          rendered="$(helm template nudgebee-agent charts/nudgebee-agent --namespace ci-logs --set logs.collection=node-agent)"
+          printf '%s\n' "$rendered" | grep -qF 'resource.attributes["k8s.namespace.name"] == "ci-logs"' \
+            || { echo 'filter/drop_log_namespaces does not drop the release namespace'; exit 1; }
+          printf '%s\n' "$rendered" | grep -q -- '- filter/drop_log_namespaces$' \
+            || { echo 'filter/drop_log_namespaces is not in the logs pipeline'; exit 1; }
+          echo 'ok: logs.collection sets the node-agent endpoint, NODE_NAME and clickhouseLogsCollected together'
+
+      # The bundled ClickHouse replaced the Bitnami subchart in place: an upgrade
+      # updates the same StatefulSet, and its pod mounts the existing volume.
+      # Kubernetes rejects an upgrade that changes the StatefulSet's name,
+      # selector, serviceName, podManagementPolicy or volumeClaimTemplates, and
+      # data already on a volume is found only at the storage paths below. The
+      # expected values are what the Bitnami subchart (clickhouse 3.1.6) rendered.
+      - name: Assert the ClickHouse objects keep what earlier charts rendered
+        run: |
+          helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent | python3 -c '
+          import sys, yaml
+          docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(sys.stdin) if d}
+          sel = {"app.kubernetes.io/name": "clickhouse", "app.kubernetes.io/instance": "nudgebee-agent", "app.kubernetes.io/component": "clickhouse"}
+          sts = docs[("StatefulSet", "nudgebee-agent-clickhouse-shard0")]["spec"]
+          assert sts["selector"] == {"matchLabels": sel}, sts["selector"]
+          assert sts["serviceName"] == "nudgebee-agent-clickhouse-headless", sts["serviceName"]
+          assert sts["podManagementPolicy"] == "Parallel", sts["podManagementPolicy"]
+          assert sts["volumeClaimTemplates"] == [{
+              "metadata": {"name": "data", "labels": dict(sel, **{"helm.sh/chart": "clickhouse-3.1.6", "app.kubernetes.io/managed-by": "Helm"})},
+              "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "50Gi"}}},
+          }], sts["volumeClaimTemplates"]
+          c = sts["template"]["spec"]["containers"][0]
+          assert {"name": "data", "mountPath": "/bitnami/clickhouse"} in c["volumeMounts"], c["volumeMounts"]
+          pw = next(e for e in c["env"] if e["name"] == "CLICKHOUSE_ADMIN_PASSWORD")
+          assert pw["valueFrom"]["secretKeyRef"] == {"name": "nudgebee-agent-clickhouse", "key": "admin-password"}, pw
+          assert "admin-password" in docs[("Secret", "nudgebee-agent-clickhouse")]["data"]
+          ports = {p["name"]: p["port"] for p in docs[("Service", "nudgebee-agent-clickhouse")]["spec"]["ports"]}
+          assert ports == {"http": 8123, "tcp": 9000, "tcp-mysql": 9004, "tcp-postgresql": 9005, "http-intersrv": 9009, "http-metrics": 8001}, ports
+          assert docs[("Service", "nudgebee-agent-clickhouse-headless")]["spec"]["clusterIP"] == "None"
+          paths = docs[("ConfigMap", "nudgebee-agent-clickhouse")]["data"]["10_storage_paths.xml"]
+          for want in ("<path>/bitnami/clickhouse/data/</path>", "<tmp_path>/bitnami/clickhouse/data/tmp/</tmp_path>",
+                       "<user_files_path>/bitnami/clickhouse/data/user_files/</user_files_path>",
+                       "<format_schema_path>/bitnami/clickhouse/data/format_schemas/</format_schema_path>",
+                       "<local_directory><path>/bitnami/clickhouse/data/access/</path></local_directory>"):
+              assert want in paths, want
+          users = docs[("ConfigMap", "nudgebee-agent-clickhouse-users")]["data"]["00_admin_user.xml"]
+          assert "from_env=\"CLICKHOUSE_ADMIN_PASSWORD\"" in users, users
+          print("ok: ClickHouse StatefulSet, Services, Secret and storage paths match earlier charts")
+          '
+          # A Bitnami-based image (what --reuse-values carries over from an
+          # earlier release) fails the render instead of starting the wrong image.
+          if out="$(helm template nudgebee-agent charts/nudgebee-agent --set clickhouse.image.tag=24.12.4-debian-12-r0-nb-3 2>&1)"; then
+            echo "rendered with a Bitnami-based image; expected it to fail"; exit 1
+          fi
+          case "$out" in *"--reset-then-reuse-values"*) ;; *) echo "unexpected failure: $out"; exit 1 ;; esac
+          echo 'ok: a Bitnami-based image is refused'
+          # A chart release alone must not restart ClickHouse: render again with
+          # only the chart version changed and compare the pod templates.
+          cp -r charts/nudgebee-agent /tmp/chart-next
+          sed -i 's/^version: .*/version: 99.0.0/; s/^appVersion: .*/appVersion: 99.0.0/' /tmp/chart-next/Chart.yaml
+          for c in charts/nudgebee-agent /tmp/chart-next; do
+            helm template nudgebee-agent "$c" --namespace nudgebee-agent \
+              --set clickhouse.extraOverrides='<clickhouse/>' \
+              --show-only templates/clickhouse-statefulset.yaml \
+              | python3 -c 'import sys, yaml, json; print(json.dumps(yaml.safe_load(sys.stdin)["spec"]["template"], sort_keys=True))'
+          done > /tmp/pod-templates.txt
+          if [ "$(sort -u /tmp/pod-templates.txt | wc -l)" != 1 ]; then
+            echo "the ClickHouse pod template changes with the chart version, so every release would restart it"
+            diff <(sed -n 1p /tmp/pod-templates.txt | python3 -m json.tool) <(sed -n 2p /tmp/pod-templates.txt | python3 -m json.tool)
+            exit 1
+          fi
+          echo 'ok: a chart version bump leaves the ClickHouse pod template unchanged'
+
+      # The runner's Secrets access is opt-in only. A default or write-mode render
+      # must not grant any Secrets verb (or a wildcard resource) to anything;
+      # each opt-in must add exactly its own narrow grant.
+      - name: Assert Secrets RBAC is opt-in only
+        run: |
+          pip install pyyaml
+          check() { # <expected-grants> <helm-args...>
+            expected="$1"; shift
+            helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@" > /tmp/rbac.yaml
+            actual="$(python - /tmp/rbac.yaml <<'PY'
+          import sys, yaml
+          out = []
+          for d in yaml.safe_load_all(open(sys.argv[1])):
+              if not d or d.get('kind') not in ('Role', 'ClusterRole'):
+                  continue
+              for r in d.get('rules') or []:
+                  if {'secrets', '*'} & set(r.get('resources') or []):
+                      out.append(f"{d['kind']}/{d['metadata']['name']}:{','.join(sorted(r['verbs']))}")
+          print(' '.join(sorted(out)))
+          PY
+            )"
+            if [ "$actual" != "$expected" ]; then
+              echo "helm template $*: Secrets grants [$actual], expected [$expected]"
+              exit 1
+            fi
+          }
+          check ''
+          check '' --set runner.enableWritePermissions=true
+          check '' --set runner.readOnly=true
+          check '' --set runner.customResourceRead.enabled=true
+          check '' --set runner.customResourceRead.enabled=true --set runner.readOnly=true
+          check 'ClusterRole/nudgebee-agent-runner-scanner-pullsecrets-read:get Role/nudgebee-agent-runner-scanner-pullsecrets:create,delete,patch,update' \
+            --set runner.scannerAutoCopyPullSecrets=true
+          check 'ClusterRole/nudgebee-agent-runner-helm-releases:list' --set runner.helmReleaseDiscovery=true
+          check 'ClusterRole/nudgebee-agent-runner-helm-releases:list' \
+            --set runner.readOnly=true --set runner.helmReleaseDiscovery=true --set runner.scannerAutoCopyPullSecrets=true
+          echo 'ok: no Secrets access outside the two opt-ins'
 
       - name: Install kubeconform
         run: |

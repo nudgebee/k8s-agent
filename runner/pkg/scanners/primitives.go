@@ -175,6 +175,8 @@ func (r *Runner) handleWaitForJob(ctx context.Context, params map[string]any) (a
 	if status == "Running" {
 		if msg, stuck := r.imagePullFailure(ctx, jobName); stuck {
 			status, reason = "Failed", msg
+		} else if msg, stuck := r.unschedulable(ctx, jobName, time.Now()); stuck {
+			status, reason = "Failed", msg
 		}
 	}
 	out := map[string]any{

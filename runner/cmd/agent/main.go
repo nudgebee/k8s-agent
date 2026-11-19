@@ -26,9 +26,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -42,6 +44,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/enrichers"
 	"github.com/nudgebee/nudgebee-agent/pkg/grafana"
+	"github.com/nudgebee/nudgebee-agent/pkg/k8swatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/kube"
 	"github.com/nudgebee/nudgebee-agent/pkg/metrics"
 	"github.com/nudgebee/nudgebee-agent/pkg/mutate"
@@ -57,6 +60,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/podexec"
 	"github.com/nudgebee/nudgebee-agent/pkg/podrunner"
 	"github.com/nudgebee/nudgebee-agent/pkg/podshell"
+	"github.com/nudgebee/nudgebee-agent/pkg/redact"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 	"github.com/nudgebee/nudgebee-agent/pkg/rightsize"
@@ -93,6 +97,7 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 			Priority:         m.Spec.Priority,
 			FindingType:      m.Spec.FindingType,
 			Fingerprint:      m.Fingerprint,
+			OccurrenceKey:    m.OccurrenceKey,
 			Owner:            alerts.OwnerRef{Name: m.Owner.Name, Kind: m.Owner.Kind},
 			SubjectName:      m.SubjectName,
 			SubjectNamespace: m.SubjectNamespace,
@@ -104,6 +109,8 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 	}
 	return out
 }
+
+func (a *triggerAdapter) HandlesKind(kind string) bool { return a.e.HandlesKind(kind) }
 
 // promDiscoveryInterval is how often the agent re-looks for a Prometheus
 // Service when it started without one. Five minutes keeps a freshly installed
@@ -140,6 +147,9 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
+	// When this process started: the runner's own watch sends a create only
+	// for objects created after it, as kubewatch did.
+	processStart := time.Now()
 	handlers := map[string]dispatch.Handler{
 		"ping":   dispatch.SimpleHandler(handlePing),
 		"echo":   dispatch.SimpleHandler(handleEcho),
@@ -208,6 +218,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		cfg.PodExecEnabled = false
 		cfg.ScannersEnabled = false
 		cfg.MutateEnabled = false
+		cfg.K8sWatchEnabled = false
 	}
 
 	// Service-discovery: only fills blank URLs, never overrides env. Mirrors
@@ -217,49 +228,33 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.PrometheusURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.PrometheusSelectors); u != "" {
 			cfg.PrometheusURL = u
-			logger.Info("prometheus auto-discovered", "url", u)
+			logger.Info("prometheus auto-discovered", "url", redact.URL(u))
 		}
 	}
 	if cfg.LokiURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.LokiSelectors); u != "" {
 			cfg.LokiURL = u
-			logger.Info("loki auto-discovered", "url", u)
+			logger.Info("loki auto-discovered", "url", redact.URL(u))
 		}
 	}
 	if cfg.AlertManagerURL == "" {
 		if u := disc.FindFirst(ctx, svcdiscover.AlertManagerSelectors); u != "" {
 			cfg.AlertManagerURL = u
-			logger.Info("alertmanager auto-discovered", "url", u)
+			logger.Info("alertmanager auto-discovered", "url", redact.URL(u))
 		}
 	}
-	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
-	// computed centrally on the server side. When disabled, skip BOTH the
-	// OPENCOST_ENDPOINT env and the cluster-wide Service autodiscovery: discovery
-	// matches `app=opencost` across all namespaces, so otherwise the agent latches
-	// onto a neighbouring namespace's OpenCost and keeps reporting itself
-	// cost-enabled, which suppresses the server-side takeover. Defaults to enabled.
-	opencostEnabled := true
-	if v := os.Getenv("OPENCOST_ENABLED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			opencostEnabled = b
-		} else {
-			logger.Warn("invalid OPENCOST_ENABLED, defaulting to enabled", "value", v, "err", err)
-		}
-	}
-	opencostURL := ""
-	if opencostEnabled {
-		// Mirrors OpenCostDiscovery.find_open_cost_url.
-		// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
-		opencostURL = os.Getenv("OPENCOST_ENDPOINT")
-		if opencostURL == "" {
-			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
-				opencostURL = u
-				logger.Info("opencost auto-discovered", "url", u)
-			}
-		}
-	} else {
-		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
-	}
+	warnMisparsedCredentials(logger, map[string]string{
+		"PROMETHEUS_URL":    cfg.PrometheusURL,
+		"LOKI_URL":          cfg.LokiURL,
+		"LOKI_RULES_URL":    cfg.LokiRulesURL,
+		"ALERTMANAGER_URL":  cfg.AlertManagerURL,
+		"ELASTICSEARCH_URL": cfg.ElasticsearchURL,
+		"SIGNOZ_URL":        cfg.SignozURL,
+		"JAEGER_URL":        cfg.JaegerURL,
+		"CHRONOSPHERE_URL":  cfg.ChronosphereURL,
+		"PINOT_URL":         cfg.PinotURL,
+		"CLICKHOUSE_HOST":   cfg.ClickHouseHost,
+	})
 
 	// The client is built whether or not we have a URL yet. Its actions stay
 	// registered either way and begin working the moment one is discovered
@@ -300,7 +295,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	for name := range ph {
 		lightActions[name] = struct{}{}
 	}
-	logger.Info("prometheus actions registered", "url", promClient.URL(), "actions", len(ph))
+	logger.Info("prometheus actions registered", "url", redact.URL(promClient.URL()), "actions", len(ph))
 
 	// Enrichers: prometheus_enricher / prometheus_queries_enricher
 	// produce Finding-shaped responses; api-server's relay.ExecuteAndExtractResponse
@@ -381,7 +376,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		for name := range ch {
 			lightActions[name] = struct{}{}
 		}
-		logger.Info("loki enabled", "url", cfg.LokiURL, "actions", len(lh)+len(ch))
+		logger.Info("loki enabled", "url", redact.URL(cfg.LokiURL), "actions", len(lh)+len(ch))
 	}
 
 	esEnabled := cfg.ElasticsearchEnabled && cfg.ElasticsearchURL != ""
@@ -396,7 +391,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	ec.ExtraHeaders = config.ParseHeaders(cfg.ElasticsearchHeaders)
 	registerProxy("elasticsearch", esEnabled, elasticsearch.Handlers(ec))
 	if esEnabled {
-		logger.Info("elasticsearch enabled", "url", cfg.ElasticsearchURL)
+		logger.Info("elasticsearch enabled", "url", redact.URL(cfg.ElasticsearchURL))
 	}
 
 	sc := signoz.New(cfg.SignozURL, nil)
@@ -405,7 +400,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	sc.Password = cfg.SignozPassword
 	registerProxy("signoz", cfg.SignozURL != "", signoz.Handlers(sc))
 	if cfg.SignozURL != "" {
-		logger.Info("signoz enabled", "url", cfg.SignozURL)
+		logger.Info("signoz enabled", "url", redact.URL(cfg.SignozURL))
 	}
 
 	// Log which single logs provider will be reported to the UI and why —
@@ -414,7 +409,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// ELASTICSEARCH_URL hiding SigNoz). Making the winner explicit turns that
 	// class of "I configured X but see Y" into a one-line grep.
 	if provider, url := selectedLogsProvider(cfg); provider != "" {
-		logger.Info("logs provider selected", "provider", provider, "url", url)
+		logger.Info("logs provider selected", "provider", provider, "url", redact.URL(url))
 	} else {
 		logger.Info("logs provider: none configured")
 	}
@@ -423,14 +418,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	jc.Token = cfg.JaegerToken
 	registerProxy("jaeger", cfg.JaegerURL != "", jaeger.Handlers(jc))
 	if cfg.JaegerURL != "" {
-		logger.Info("jaeger enabled", "url", cfg.JaegerURL)
+		logger.Info("jaeger enabled", "url", redact.URL(cfg.JaegerURL))
 	}
 
 	cc := chronosphere.New(cfg.ChronosphereURL, nil)
 	cc.APIKey = cfg.ChronosphereAPIKey
 	registerProxy("chronosphere", cfg.ChronosphereURL != "", chronosphere.Handlers(cc))
 	if cfg.ChronosphereURL != "" {
-		logger.Info("chronosphere enabled", "url", cfg.ChronosphereURL)
+		logger.Info("chronosphere enabled", "url", redact.URL(cfg.ChronosphereURL))
 	}
 
 	pc := pinot.New(cfg.PinotURL, nil)
@@ -439,7 +434,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	pc.Password = cfg.PinotPassword
 	registerProxy("pinot", cfg.PinotURL != "", pinot.Handlers(pc))
 	if cfg.PinotURL != "" {
-		logger.Info("pinot enabled", "url", cfg.PinotURL)
+		logger.Info("pinot enabled", "url", redact.URL(cfg.PinotURL))
 	}
 
 	targets := config.ParseTargets(cfg.HTTPProxyTargets)
@@ -498,12 +493,44 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			Database:   cfg.ClickHouseDB,
 			SSLEnabled: cfg.ClickHouseSSL,
 		})
-		logger.Info("query_data enabled", "host", cfg.ClickHouseHost, "port", cfg.ClickHousePort, "db", cfg.ClickHouseDB)
+		logger.Info("query_data enabled", "host", redact.URL(cfg.ClickHouseHost), "port", cfg.ClickHousePort, "db", cfg.ClickHouseDB)
 	} else {
 		logger.Info("query_data registered without ClickHouse — returns empty result")
 	}
-	handlers["query_data"] = enrichers.QueryData(ch)
+	// query_data runs SQL the backend sends, LLM-written log queries included, so
+	// it goes through the read-only user with query limits when the chart
+	// provides one. Schema changes, the trace enricher and the service map keep
+	// the admin client.
+	queryCh := ch
+	if ch != nil && cfg.ClickHouseReaderUser != "" {
+		queryCh = chclient.New(chclient.Config{
+			Host:       cfg.ClickHouseHost,
+			Port:       cfg.ClickHousePort,
+			User:       cfg.ClickHouseReaderUser,
+			Password:   cfg.ClickHousePassword,
+			Database:   cfg.ClickHouseDB,
+			SSLEnabled: cfg.ClickHouseSSL,
+		})
+		logger.Info("query_data uses the read-only ClickHouse user", "user", cfg.ClickHouseReaderUser)
+	}
+	handlers["query_data"] = enrichers.QueryData(queryCh)
 	lightActions["query_data"] = struct{}{}
+
+	// The service map can read its eBPF metrics from the same ClickHouse; the
+	// source stays prometheus unless SERVICE_MAP_SOURCE says otherwise.
+	smSource, ok := servicemap.ParseSource(cfg.ServiceMapSource)
+	if !ok {
+		logger.Warn("unknown SERVICE_MAP_SOURCE; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if smSource != servicemap.SourcePrometheus && ch == nil {
+		logger.Warn("SERVICE_MAP_SOURCE needs ClickHouse, which is not configured; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if typedKube != nil {
+		smSvc.NodeAgentCount = nodeAgentCounter(typedKube, installNamespace(cfg))
+	}
+	smSvc.UseClickHouse(ch, smSource, logger)
+	smSvc.StartSummary(ctx)
+	logger.Info("service map source", "source", string(smSource), "clickhouse", ch != nil)
 
 	// api_traces_enricher_v2: OTel traces query against the same ClickHouse.
 	// Same registration semantics as query_data — register unconditionally so
@@ -514,6 +541,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	if cfg.KubeEnabled {
 		kc := kube.NewClient(dynamicKube, typedKube)
+		kc.MaxResultBytes = cfg.GetResourceMaxBytes
+		kc.SetUnscopedListLimit(cfg.GetResourceUnscopedConcurrency)
 		// AllowWrite lifts the read-only verb allowlist; gated by the chart's
 		// runner.enableWritePermissions, which also grants the write RBAC.
 		kx := &kube.KubectlExecutor{AllowWrite: cfg.KubectlAllowWrite} // uses kubectl on PATH
@@ -530,6 +559,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			lightActions[name] = struct{}{}
 		}
 		logger.Info("kube primitives enabled", "actions", len(kh), "kubectl_allow_write", cfg.KubectlAllowWrite)
+
+		// list_helm_releases decodes Helm release Secrets here and returns chart
+		// metadata only — the release values and manifests stay in the cluster.
+		// Needs the cluster-wide secrets list that runner.helmReleaseDiscovery
+		// grants; without it the call returns ErrHelmReleaseDiscoveryDisabled.
+		if typedKube != nil {
+			handlers["list_helm_releases"] = func(ctx context.Context, p map[string]any) (any, error) {
+				ns, _ := p["namespace"].(string)
+				rels, err := discovery.ListHelmReleases(ctx, typedKube, ns)
+				if err != nil {
+					return nil, err
+				}
+				block, err := enrichers.JSONBlock(rels)
+				if err != nil {
+					return nil, err
+				}
+				return enrichers.FindingResponse(cfg.AccountID, uuid.Nil, block)
+			}
+			lightActions["list_helm_releases"] = struct{}{}
+		}
 	}
 
 	if cfg.ScannersEnabled {
@@ -629,14 +678,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if kubeRestCfg != nil {
 			mut.SetExec(podexec.New(typedKube, kubeRestCfg))
 		}
-		// INSTALLATION_NAMESPACE is set by the chart via the downward API.
-		// Required by the legacy alert-rule path; falls back to the scanner
-		// namespace (also chart-set) so a hand-rolled deployment without
-		// INSTALLATION_NAMESPACE still resolves to the right namespace.
-		installNs := os.Getenv("INSTALLATION_NAMESPACE")
-		if installNs == "" {
-			installNs = cfg.ScannerNamespace
-		}
+		// Required by the legacy alert-rule path.
+		installNs := installNamespace(cfg)
 		if installNs == "" {
 			logger.Warn("install namespace is empty (neither INSTALLATION_NAMESPACE nor SCANNER_NAMESPACE set) — legacy alert-rule actions will error at request time")
 		}
@@ -801,7 +844,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		gp.PrometheusURLFn = promClient.URL
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
-			logger.Info("grafana proxy enabled", "url", grafanaURL)
+			logger.Info("grafana proxy enabled", "url", redact.URL(grafanaURL))
 		} else {
 			logger.Info("api proxy enabled (grafana unset; APIProxy still routed via X-API-Base-URL)")
 		}
@@ -812,11 +855,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		URL:           cfg.RelayURL,
 		AuthSecretKey: cfg.AuthSecretKey,
 		Greeting: relay.Greeting{
-			Action:         "auth",
-			Version:        agentVersion,
-			AgentVersion:   agentVersion,
-			AgentCommit:    version.Commit,
-			AgentBuildTime: version.BuildTime,
+			Action:          "auth",
+			Version:         agentVersion,
+			AgentVersion:    agentVersion,
+			AgentCommit:     version.Commit,
+			AgentBuildTime:  version.BuildTime,
+			ProtocolVersion: version.ProtocolVersion,
 		},
 		Logger:          logger,
 		HandlerPoolSize: cfg.RelayHandlerPoolSize,
@@ -834,6 +878,38 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
+	// One informer factory for discovery and the runner's own watch (when
+	// on), so the objects both read are cached once. With the watch on, the
+	// transform keeps the pod template fields the matchers diff.
+	// The watch feeds the trigger engine, which runs only with the HTTP
+	// listener and a backend to send Findings to. Without them the watch never
+	// starts, so the shared cache must not keep whole objects for it.
+	if cfg.K8sWatchEnabled && (cfg.HTTPListenAddr == "" || cfg.BackendEndpoint == "") {
+		logger.Warn("K8S_WATCH_ENABLED ignored: the trigger engine needs HTTP_LISTEN_ADDR and NUDGEBEE_ENDPOINT")
+		cfg.K8sWatchEnabled = false
+	}
+	var sharedFactory informers.SharedInformerFactory
+	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
+		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
+	}
+	smInventory, ok := servicemap.ParseInventory(cfg.ServiceMapInventory)
+	if !ok {
+		logger.Warn("unknown SERVICE_MAP_INVENTORY; using prometheus", "value", cfg.ServiceMapInventory)
+	}
+	if smInventory == servicemap.InventoryKubernetes {
+		if sharedFactory == nil {
+			logger.Warn("SERVICE_MAP_INVENTORY=kubernetes needs DISCOVERY_ENABLED or K8S_WATCH_ENABLED; using prometheus")
+			smInventory = servicemap.InventoryPrometheus
+		} else {
+			// Asked for before discovery or the k8s watch starts the factory,
+			// which then starts these informers too. Not started here:
+			// discovery sets watch error handlers, which fail once started.
+			smSvc.Kube = servicemap.NewKubeCache(sharedFactory)
+		}
+	}
+	smSvc.Inventory = smInventory
+	logger.Info("service map inventory", "inventory", string(smInventory))
+
 	// Keep looking for a Prometheus we could not find at boot, and point the
 	// client at the first one that appears. Everything downstream reads the URL
 	// per request, so no restart and no re-registration is needed.
@@ -841,7 +917,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		g.Go(func() error {
 			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
 				promClient.SetURL(u)
-				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", u)
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", redact.URL(u))
 			})
 			return nil
 		})
@@ -877,6 +953,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd := alerts.NewForwarder(fwdURL, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		fwd.SetForwardPoolSize(cfg.ForwardPoolSize)
+		fwd.SetKubewatchQueue(cfg.KubewatchWorkers, cfg.KubewatchQueueSize, cfg.KubewatchQueueMaxBytes)
+		fwd.KubewatchMetrics = mreg
+		mreg.RegisterKubewatchQueueDepth(func() float64 { return float64(fwd.KubewatchQueueDepth()) })
 		// Lets the forwarder report a node-exporter alert against the node it
 		// describes rather than the exporter pod that emitted it. Opportunistic:
 		// without a typed client the correction falls back to the alert's own
@@ -925,7 +1004,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
-			eng = eng.WithEventsLister(newK8sEventsLister(typedKube))
+			eventsLister := newK8sEventsLister(typedKube)
+			if cfg.TriggerEventsCache {
+				cached, err := newCachedEventsLister(typedKube, eventsLister)
+				if err != nil {
+					logger.Warn("events cache unavailable; evidence tables use live List calls", "err", err)
+				} else {
+					g.Go(func() error {
+						cached.Run(gctx)
+						return nil
+					})
+					eventsLister = cached
+				}
+			}
+			eng = eng.WithEventsLister(eventsLister)
 			// Service-backends lister lets service_no_endpoints resolve a
 			// Service's selector against live pods + workload templates.
 			// Without it (no K8s client) that matcher never fires. The
@@ -934,6 +1026,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(specs))
+		if cfg.K8sWatchEnabled {
+			// The runner watches Kubernetes itself and kubewatch's posts are
+			// ignored; see pkg/k8swatch.
+			fwd.KubewatchSuperseded = true
+			kw := k8swatch.New(k8swatch.Config{
+				Workers:    cfg.K8sWatchWorkers,
+				MaxPending: cfg.K8sWatchMaxPending,
+				StartTime:  processStart,
+				Namespace:  cfg.K8sWatchNamespace,
+				Kinds:      kindSet(cfg.K8sWatchKinds),
+				Skip: func(kind, namespace, name string) bool {
+					return kind == "ConfigMap" && triggers.ConfigMapIgnored(namespace, name)
+				},
+			}, fwd, eng.Handles, mreg, logger)
+			kw.RegisterShared(sharedFactory)
+			kw.RegisterOwn(typedKube)
+			kw.RegisterRollouts(gctx, typedKube, dynamicKube)
+			g.Go(func() error {
+				logger.Info("starting k8s watch (kubewatch posts are ignored)")
+				if err := kw.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+					return fmt.Errorf("k8s watch: %w", err)
+				}
+				return nil
+			})
+		}
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
@@ -996,11 +1113,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	// Telemetry: periodic ClusterStatus → /v1/k8s/telemetry. The collector
 	// stores activity_stats as the agent's `connection_status`, which the UI
-	// reads to show "Prometheus / Loki / AlertManager / OpenCost / Traces /
+	// reads to show "Prometheus / Loki / AlertManager / Traces /
 	// NodeAgent connected".
 	//
 	// We mirror the legacy IntegrationHealthChecker probe set —
-	// Prometheus, AlertManager, OpenCost get HTTP probes inside the
+	// Prometheus and AlertManager get HTTP probes inside the
 	// telemetry package; node-agent count is a Prometheus query we run
 	// here so we don't wedge a Prom client into the telemetry package.
 	if cfg.BackendEndpoint != "" {
@@ -1097,12 +1214,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
 				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
+				chLogsPresent, chLogsErr, chLogsTable := clickhouseLogsStatus(probeCtx, queryCh, cfg.ClickHouseLogsDatabase, cfg.ClickHouseLogsTable)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              promClient.URL(),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
-					OpencostURL:                opencostURL,
 					LogsProvider:               logsProvider,
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
@@ -1122,6 +1239,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					ClickHouseStatus:           clickhouseStatus,
 					ClickHouseURL:              clickhouseHost,
 					ClickHouseError:            clickhouseErr,
+					ClickHouseLogsTablePresent: chLogsPresent,
+					ClickHouseLogsTableError:   chLogsErr,
+					ClickHouseLogsTable:        chLogsTable,
+					ClickHouseLogsCollected:    cfg.ClickHouseLogsCollected,
 					HasMaterializedColumns:     ensureTraceColumns(probeCtx, ch, logger),
 					AgentURL:                   agentURL,
 					GrafanaEnabled:             grafanaURL != "" && httpProbe(probeCtx, probeClient, grafanaURL+"/api/health"),
@@ -1174,7 +1295,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discoverySink.Metrics = mreg
-		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
+		discSvc := discovery.NewServiceWithFactory(typedKube, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
 			BatchSize:         cfg.DiscoveryBatchSize,
@@ -1442,9 +1563,31 @@ func probeClickhouse(ctx context.Context, c *http.Client, host, port string) (bo
 		return false, "CLICKHOUSE_HOST is not set: no traces backend is configured"
 	}
 	if err := httpProbeErr(ctx, c, fmt.Sprintf("http://%s:%s/ping", host, port)); err != nil {
-		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redactUserinfo(host), port, probeCause(err))
+		return false, fmt.Sprintf("ClickHouse ping failed at %s:%s: %v", redact.URL(host), port, probeCause(err))
 	}
 	return true, ""
+}
+
+// clickhouseLogsStatus is the ClickHouse logs health the agent reports beside
+// its logs provider: ClickHouse answers and database.table, where logs are
+// written, is present. It reads system.tables through the query_data client,
+// never the logs, so it does not say whether logs are arriving. checked is the
+// `database.table` looked at, empty without a client.
+func clickhouseLogsStatus(ctx context.Context, ch *chclient.Client, database, table string) (present bool, reason, checked string) {
+	if ch == nil {
+		return false, "ClickHouse is not configured (CLICKHOUSE_HOST is empty or CLICKHOUSE_ENABLED is false)", ""
+	}
+	checked = database + "." + table
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	present, err := chclient.LogsTablePresent(ctx, ch, database, table)
+	switch {
+	case err != nil:
+		return false, "ClickHouse logs table check failed: " + err.Error(), checked
+	case !present:
+		return false, fmt.Sprintf("ClickHouse logs table %s is not present, or not visible to this ClickHouse user", checked), checked
+	}
+	return true, "", checked
 }
 
 // traceColumnsReady latches the materialized-column check. The columns are
@@ -1500,19 +1643,17 @@ func probeCause(err error) error {
 	return err
 }
 
-// redactUserinfo strips a `user:pass@` prefix from a host. CLICKHOUSE_HOST may
-// be a full URL rather than a bare host (pkg/clickhouse normalizes both forms),
-// and the reason string built above lands in the agent's connection_status
-// JSON, which the UI renders as-is — credentials must not ride along.
-func redactUserinfo(host string) string {
-	at := strings.LastIndex(host, "@")
-	if at < 0 {
-		return host
+// warnMisparsedCredentials flags datasource URLs whose inline credentials the
+// HTTP client will misread (see redact.Misparsed). Such a datasource cannot
+// connect, and the misread is otherwise visible only through confusing errors
+// like "lookup <username>: no such host".
+func warnMisparsedCredentials(logger *slog.Logger, urls map[string]string) {
+	for env, u := range urls {
+		if redact.Misparsed(u) {
+			logger.Warn("datasource URL credentials are not percent-encoded and will not be sent as credentials",
+				"env", env, "url", redact.URL(u))
+		}
 	}
-	if scheme := strings.Index(host, "://"); scheme >= 0 && scheme+3 <= at {
-		return host[:scheme+3] + host[at+1:]
-	}
-	return host[at+1:]
 }
 
 // fetchSignozVersion GETs Signoz's /api/v1/version and returns the reported
@@ -1675,4 +1816,28 @@ func handleHealth(_ map[string]any) (any, error) {
 		"go":         runtime.Version(),
 		"goroutines": runtime.NumGoroutine(),
 	}, nil
+}
+
+// installNamespace is the release namespace the agent runs in.
+// INSTALLATION_NAMESPACE is set by the chart via the downward API; it falls
+// back to the scanner namespace (also chart-set) so a hand-rolled deployment
+// without INSTALLATION_NAMESPACE still resolves to the right namespace.
+func installNamespace(cfg *config.Config) string {
+	if ns := os.Getenv("INSTALLATION_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return cfg.ScannerNamespace
+}
+
+// kindSet turns K8S_WATCH_KINDS into the watcher's kind filter; nil (unset)
+// means every kind.
+func kindSet(kinds []string) map[string]bool {
+	if kinds == nil {
+		return nil
+	}
+	m := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		m[k] = true
+	}
+	return m
 }

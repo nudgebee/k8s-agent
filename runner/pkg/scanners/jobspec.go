@@ -61,6 +61,16 @@ type JobSpec struct {
 	// send it without assuming the agent's posture.
 	ImagePullSecretsFrom *PodRef `json:"image_pull_secrets_from,omitempty"`
 
+	// Resources sets the main container's requests and limits. Empty → none. A scan
+	// of an image that is not on the node carries limits, because nothing else
+	// bounds what it uses there.
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// NodeSelector constrains where the scheduler places the pod, for a Job that
+	// sets no NodeName. A multi-arch tag resolves by the node's architecture, so a
+	// scan that must match a workload's variant selects kubernetes.io/arch.
+	NodeSelector map[string]string `json:"node_selector,omitempty"`
+
 	// TimeoutHintSeconds is the api-server orchestrator's expected upper bound
 	// for this Job. Agent ignores it — the api-server polls and decides when to
 	// give up. Carried through purely so audit logs can record server intent.

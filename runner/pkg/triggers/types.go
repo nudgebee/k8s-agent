@@ -113,6 +113,14 @@ type MatcherSpec struct {
 	// boundary and then stay silent for an hour in the middle of one.
 	FingerprintFn func(obj map[string]any) string
 
+	// OccurrenceKeyFn (optional) names the one occurrence a fire reports —
+	// for pod_oom_killed, the kill. When it returns a non-empty key the
+	// Finding's ID is derived from it, so reporting the same occurrence
+	// again (after an agent restart has emptied the in-memory rate limiter)
+	// updates the event the first report created instead of creating
+	// another. The server dedupes on that ID per account.
+	OccurrenceKeyFn func(obj map[string]any) string
+
 	// SuppressChurn opts the matcher into frequency-based suppression: a
 	// resource that keeps re-firing is classified as machine-written and
 	// dropped for a cooldown. Set for ConfigMap changes, where a controller
@@ -251,6 +259,10 @@ type Match struct {
 
 	// Fingerprint is the dedup key the matcher computed via FingerprintFn.
 	Fingerprint string
+
+	// OccurrenceKey is what MatcherSpec.OccurrenceKeyFn returned; empty
+	// when the matcher has none.
+	OccurrenceKey string
 
 	// Owner is the resolved top-level workload (Deployment / DaemonSet /
 	// StatefulSet / Job). Empty when the obj has no owner refs (e.g. a

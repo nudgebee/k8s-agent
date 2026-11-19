@@ -81,7 +81,17 @@ override with an explicit value and skip the derivation entirely.
 {{- if .Values.runner.goMemLimit -}}
 {{- .Values.runner.goMemLimit -}}
 {{- else -}}
-{{- $lim := (dig "resources" "limits" "memory" "" .Values.runner) | toString -}}
+{{- include "nudgebee-agent.goMemLimitFrom" (dict "limit" (dig "resources" "limits" "memory" "" .Values.runner) "ratio" .Values.runner.goMemLimitRatio) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+GOMEMLIMIT bytes for a memory limit string: limit x ratio (default 0.8).
+Takes (dict "limit" <quantity> "ratio" <float>). Emits nothing for an empty or
+unparseable limit.
+*/}}
+{{- define "nudgebee-agent.goMemLimitFrom" -}}
+{{- $lim := .limit | toString -}}
 {{- $num := regexFind "^[0-9.]+" $lim -}}
 {{- if $num -}}
 {{- $mult := 1.0 -}}
@@ -94,16 +104,68 @@ override with an explicit value and skip the derivation entirely.
 {{- else if hasSuffix "G" $lim -}}{{- $mult = 1000000000.0 -}}
 {{- else if hasSuffix "T" $lim -}}{{- $mult = 1000000000000.0 -}}
 {{- end -}}
-{{- $ratio := .Values.runner.goMemLimitRatio | default 0.8 -}}
+{{- $ratio := .ratio | default 0.8 -}}
 {{- printf "%d" (int64 (mulf (float64 $num) $mult $ratio)) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Memory limit of the forwarder (kubewatch) container. The limit equals the
+request: kubewatch's footprint is its informer caches, which do not burst.
+*/}}
+{{- define "nudgebee-agent.kubewatchMemory" -}}
+{{- if .Values.isSmallCluster -}}64Mi{{- else -}}{{- .Values.kubewatch.resources.requests.memory -}}{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when the bundled ClickHouse gets the read-only user query_data uses
+(templates/clickhouse-reader-users.yaml): the bundled ClickHouse is installed and
+clickhouse.reader.enabled. The StatefulSet mounts the users file itself. An
+upgrade with --reuse-values keeps a release's old values, and values from before
+the reader have no clickhouse.reader; then the user doesn't exist, so nothing
+names it.
+*/}}
+{{- define "nudgebee-agent.clickhouseReader" -}}
+{{- $reader := (default (dict) .Values.clickhouse).reader -}}
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (kindIs "map" $reader) (get $reader "enabled") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The cluster's container-log collection mode (logs.collection), validated:
+"none" (default) or "node-agent". One mode per cluster, so no second source
+double-ingests. The runner reports clickhouseLogsCollected from it, so the
+report can't disagree with what the chart deploys.
+*/}}
+{{- define "nudgebee-agent.logsCollection" -}}
+{{- $mode := dig "collection" "none" (default (dict) .Values.logs) | default "none" -}}
+{{- if eq $mode "node-agent" -}}
+{{- if not (index (default (dict) (index .Values "opentelemetry-collector")) "enabled") -}}
+{{- fail "logs.collection=node-agent sends container logs to ClickHouse through the bundled OpenTelemetry collector: set opentelemetry-collector.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.nodeAgent.enabled -}}
+{{- fail "logs.collection=node-agent needs nodeAgent.enabled=true" -}}
+{{- end -}}
+{{- if .Values.nodeAgent.logsEndpoint -}}
+{{- fail "logs.collection=node-agent sets the node-agent's logs endpoint itself: unset nodeAgent.logsEndpoint" -}}
+{{- end -}}
+{{- range (default (list) .Values.nodeAgent.env) -}}
+{{- if and (kindIs "map" .) (eq (toString (get . "name")) "LOGS_ENDPOINT") -}}
+{{- fail "logs.collection=node-agent sets the node-agent's logs endpoint itself: remove LOGS_ENDPOINT from nodeAgent.env" -}}
+{{- end -}}
+{{- end -}}
+{{- else if eq $mode "otel-daemonset" -}}
+{{- fail "logs.collection=otel-daemonset is not available yet: use node-agent or none" -}}
+{{- else if ne $mode "none" -}}
+{{- fail (printf "logs.collection must be none or node-agent, not %q" $mode) -}}
+{{- end -}}
+{{- $mode -}}
 {{- end -}}
 
 {{/*
 Runner container template. Invoked with root context: include "nudgebee.runner.container" .
 */}}
 {{- define "nudgebee.runner.container" -}}
+{{- $logsCollection := include "nudgebee-agent.logsCollection" . }}
 - name: runner
   image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}"
   imagePullPolicy: {{ .Values.runner.imagePullPolicy }}
@@ -148,13 +210,11 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     # SCANNER_AUTO_COPY_PULL_SECRETS lets an image scan pull a private workload
     # image by copying that workload's imagePullSecrets into this namespace for
-    # the life of the scan Job. Default on — the node-local image the scan reuses
-    # is often gone by scan time, and an unauthenticated re-pull leaves every
-    # private image unscannable. Forced off under runner.readOnly, which has no
-    # Secrets access at all. The `eq ... false` pattern is intentional: `default
-    # true` would treat an explicit false as unset and re-enable the copy.
+    # the life of the scan Job. Opt-in: it needs read access to registry
+    # Secrets in every namespace a scanned workload runs in. Forced off under
+    # runner.readOnly, which has no Secrets access at all.
     - name: SCANNER_AUTO_COPY_PULL_SECRETS
-      value: {{ if or .Values.runner.readOnly (eq .Values.runner.scannerAutoCopyPullSecrets false) }}"false"{{ else }}"true"{{ end }}
+      value: {{ if and .Values.runner.scannerAutoCopyPullSecrets (not .Values.runner.readOnly) }}"true"{{ else }}"false"{{ end }}
     {{- with .Values.runner.scaling }}
     {{- if hasKey . "snapshotBatching" }}
     - name: DISCOVERY_SNAPSHOT_BATCHING
@@ -179,6 +239,47 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- if .relayHandlerPoolSize }}
     - name: RELAY_HANDLER_POOL_SIZE
       value: {{ .relayHandlerPoolSize | quote }}
+    {{- end }}
+    {{- if .kubewatchWorkers }}
+    - name: KUBEWATCH_WORKERS
+      value: {{ .kubewatchWorkers | quote }}
+    {{- end }}
+    {{- if .kubewatchQueueSize }}
+    - name: KUBEWATCH_QUEUE_SIZE
+      value: {{ .kubewatchQueueSize | quote }}
+    {{- end }}
+    {{- if .kubewatchQueueMaxBytes }}
+    - name: KUBEWATCH_QUEUE_MAX_BYTES
+      value: {{ .kubewatchQueueMaxBytes | int64 | quote }}
+    {{- end }}
+    {{- if hasKey . "eventsCache" }}
+    - name: TRIGGER_EVENTS_CACHE
+      value: {{ .eventsCache | quote }}
+    {{- end }}
+    {{- end }}
+    {{- if and (not .Values.kubewatch.enabled) (not .Values.runner.k8sWatch.enabled) }}
+    {{- fail "\n\nkubewatch.enabled=false with runner.k8sWatch.enabled=false leaves nothing watching the cluster, so no Kubernetes change alerts are raised. Set runner.k8sWatch.enabled=true (the runner watches the cluster itself) or leave kubewatch.enabled=true." }}
+    {{- end }}
+    {{- with .Values.runner.k8sWatch }}
+    {{- if .enabled }}
+    - name: K8S_WATCH_ENABLED
+      value: "true"
+    {{- with $.Values.kubewatch.config }}
+    {{- if .namespace }}
+    - name: K8S_WATCH_NAMESPACE
+      value: {{ .namespace | quote }}
+    {{- end }}
+    {{- end }}
+    - name: K8S_WATCH_KINDS
+      value: {{ include "nudgebee-agent.k8sWatchKinds" $ | quote }}
+    {{- if .workers }}
+    - name: K8S_WATCH_WORKERS
+      value: {{ .workers | quote }}
+    {{- end }}
+    {{- if .maxPending }}
+    - name: K8S_WATCH_MAX_PENDING
+      value: {{ .maxPending | quote }}
+    {{- end }}
     {{- end }}
     {{- end }}
     {{- if .Values.runner.profilerImage }}
@@ -229,8 +330,8 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ .Values.runner.nudgebee.relay_signing_public_key | quote }}
     {{- end }}
     {{- /*
-    ClickHouse wiring for the runner. The in-chart ClickHouse subchart is
-    conditioned on `opentelemetry-collector.enabled`, so with the collector off
+    ClickHouse wiring for the runner. The in-chart ClickHouse is installed
+    only with `opentelemetry-collector.enabled`, so with the collector off
     neither the `<release>-clickhouse` Service nor its Secret exists. Point the
     runner at either of them anyway and kubelet cannot resolve the secretKeyRef:
     the pod never starts and sits in phase Pending with CreateContainerConfigError.
@@ -254,9 +355,47 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.clickhouse.servicename" . }}
     {{- end }}
     {{- /*
+    Where the bundled collector writes logs, for the runner's ClickHouse logs
+    check. Read from the exporter config, as clickhouse-schema-upgrade-job.yaml
+    does. With the collector off (or an external writer) these stay unset and
+    the runner falls back to otel_logs in CLICKHOUSE_DB.
+    */}}
+    {{- if $otelEnabled }}
+    {{- $chExporter := dig "config" "exporters" "clickhouse" (dict) (index .Values "opentelemetry-collector") }}
+    {{- if not (has "CLICKHOUSE_LOGS_DATABASE" $envVarNames) }}
+    - name: CLICKHOUSE_LOGS_DATABASE
+      value: {{ default "default" (get $chExporter "database") | quote }}
+    {{- end }}
+    {{- if not (has "CLICKHOUSE_LOGS_TABLE" $envVarNames) }}
+    - name: CLICKHOUSE_LOGS_TABLE
+      value: {{ default "otel_logs" (get $chExporter "logs_table_name") | quote }}
+    {{- end }}
+    {{- /*
+    query_data reads through the read-only user templates/clickhouse-reader-users.yaml
+    creates, which exists only where the bundled ClickHouse mounts it: not when an
+    operator points CLICKHOUSE_HOST elsewhere.
+    */}}
+    {{- if and (include "nudgebee-agent.clickhouseReader" .) (not (has "CLICKHOUSE_HOST" $envVarNames)) (not (has "CLICKHOUSE_READER_USER" $envVarNames)) }}
+    - name: CLICKHOUSE_READER_USER
+      value: nudgebee_reader
+    {{- end }}
+    {{- /* Reported as clickhouseLogsCollected; set only by the switch. */}}
+    {{- if eq $logsCollection "node-agent" }}
+    - name: CLICKHOUSE_LOGS_COLLECTED
+      value: "true"
+    {{- end }}
+    {{- with include "nudgebee-agent.timeseriesCluster" . }}
+    {{- if not (has "TIMESERIES_CLUSTER" $envVarNames) }}
+    - name: TIMESERIES_CLUSTER
+      value: {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in
     the runner Secret), runner.clickhouse_secret (operator-provisioned), then the
-    subchart Secret — the last only when the subchart is actually installed.
+    bundled ClickHouse's Secret (clickhouse.auth.existingSecret when set) — the
+    last only when the bundled ClickHouse is actually installed.
     No source at all means no env var rather than a reference to a missing Secret.
     */}}
     {{- if .Values.runner.clickhouse_password }}
@@ -275,8 +414,8 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: CLICKHOUSE_PASSWORD
       valueFrom:
         secretKeyRef:
-          name: {{ include "nudgebee-agent.clickhouse.servicename" . }}
-          key: admin-password
+          name: {{ include "nudgebee-agent.clickhouse.secretName" . }}
+          key: {{ include "nudgebee-agent.clickhouse.secretKey" . }}
     {{- end }}
     {{- end }}
     {{- if kindIs "string" .Values.runner.additional_env_vars }}
@@ -349,10 +488,7 @@ volumes:
 Runner imagePullSecrets template. Invoked with root context.
 */}}
 {{- define "nudgebee.runner.imagePullSecrets" -}}
-{{- with .Values.runner.imagePullSecrets }}
-imagePullSecrets:
-{{- toYaml . | nindent 0 }}
-{{- end }}
+{{- include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.runner.imagePullSecrets "root" .) }}
 {{- end }}
 
 {{/*
@@ -447,7 +583,81 @@ alert rules created from the UI.
 {{- end }}
 
 {{/*
-ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse subchart
+"true" when the chart installs its own ClickHouse (templates/clickhouse-*.yaml).
+It follows opentelemetry-collector.enabled, the condition the Bitnami subchart
+had, so turning the chart upgrade on installs exactly what it did before.
+*/}}
+{{- define "nudgebee-agent.clickhouse.installed" -}}
+{{- if index (default (dict) (index .Values "opentelemetry-collector")) "enabled" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+imagePullSecrets for a pod spec or ServiceAccount: the component's own list
+followed by global.imagePullSecrets, as the Bitnami charts combined them.
+Called with (dict "secrets" <component list> "root" $). Entries are a secret
+name or a {name: ...} map. Empty entries and duplicates are dropped; renders
+nothing when no name is left.
+*/}}
+{{- define "nudgebee-agent.imagePullSecrets" -}}
+{{- $names := list }}
+{{- $global := (default (dict) .root.Values.global).imagePullSecrets }}
+{{- range concat (default list .secrets) (default list $global) }}
+{{- if kindIs "map" . }}{{ with .name }}{{ $names = append $names . }}{{ end }}{{ else if . }}{{ $names = append $names . }}{{ end }}
+{{- end }}
+{{- with $names | uniq -}}
+imagePullSecrets:
+{{- range . }}
+  - name: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+app.kubernetes.io/name of the ClickHouse objects. nameOverride changes it, as it
+did in the Bitnami subchart.
+*/}}
+{{- define "nudgebee-agent.clickhouse.name" -}}
+{{- default "clickhouse" .Values.clickhouse.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+ClickHouse selector labels. They are in the StatefulSet selector and its
+volumeClaimTemplates, which Kubernetes does not let an upgrade change, and the
+Services and the ServiceMonitor select on them: keep them as the Bitnami
+subchart rendered them.
+*/}}
+{{- define "nudgebee-agent.clickhouse.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "nudgebee-agent.clickhouse.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: clickhouse
+{{- end -}}
+
+{{- define "nudgebee-agent.clickhouse.labels" -}}
+{{ include "nudgebee-agent.clickhouse.selectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ include "nudgebee-agent.chart" . }}
+{{- end -}}
+
+{{/*
+The Secret and key that hold the ClickHouse admin password:
+clickhouse.auth.existingSecret / existingSecretKey when set, else the chart's own
+<fullname> Secret under admin-password.
+*/}}
+{{- define "nudgebee-agent.clickhouse.secretName" -}}
+{{- default (include "nudgebee-agent.clickhouse.servicename" .) (dig "auth" "existingSecret" "" .Values.clickhouse) -}}
+{{- end -}}
+
+{{- define "nudgebee-agent.clickhouse.secretKey" -}}
+{{- if dig "auth" "existingSecret" "" .Values.clickhouse -}}
+{{- default "admin-password" (dig "auth" "existingSecretKey" "" .Values.clickhouse) -}}
+{{- else -}}
+admin-password
+{{- end -}}
+{{- end -}}
+
+{{/*
+ClickHouse fullname (Services, Secret, ConfigMaps, StatefulSet prefix). Same
+rules as the Bitnami subchart's common.names.fullname, so the names don't change.
 */}}
 {{- define "nudgebee-agent.clickhouse.servicename" -}}
 {{- if .Values.clickhouse.fullnameOverride -}}
@@ -459,6 +669,45 @@ ClickHouse service name - handles fullnameOverride/nameOverride for clickhouse s
 {{- else -}}
 {{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+PromQL label matchers for this release's ClickHouse scrape target. The Prometheus
+operator labels every ServiceMonitor target with the Service's namespace and name;
+job is the Service name too, unless serviceMonitor.jobLabel renames it.
+*/}}
+{{- define "nudgebee-agent.clickhouse.target" -}}
+{{- $ns := default .Release.Namespace .Values.clickhouse.namespaceOverride | trunc 63 | trimSuffix "-" -}}
+{{- printf "namespace=%q,service=%q" $ns (include "nudgebee-agent.clickhouse.servicename" .) -}}
+{{- end -}}
+
+{{/*
+A value copied into the collector config by a {{ }} reference in its values (the
+clickhouse/logs exporter). The collector chart renders its config with
+tpl (toYaml ...), which leaves the reference inside single quotes, so a ' in the
+value is doubled to keep the rendered YAML valid.
+*/}}
+{{- define "nudgebee-agent.collectorQuoted" -}}
+{{- replace "'" "''" (toString .) -}}
+{{- end -}}
+
+{{/*
+The cluster label the collector puts on the node-agent metrics it writes to
+ClickHouse's TimeSeries table, and the runner's TIMESERIES_CLUSTER, while
+clickhouse.timeseries is on: clickhouse.timeseries.clusterName, else the
+kube-system namespace's UID (unique per cluster, never changes). Empty when
+neither is known: lookup returns nothing under helm template (ArgoCD) and
+client-side dry runs. The runner's CLUSTER_NAME is left alone, as it also reports
+it to the backend.
+*/}}
+{{- define "nudgebee-agent.timeseriesCluster" -}}
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (dig "timeseries" "enabled" false .Values.clickhouse) -}}
+{{- $name := dig "timeseries" "clusterName" "" .Values.clickhouse -}}
+{{- if not $name -}}
+{{- $name = dig "metadata" "uid" "" (lookup "v1" "Namespace" "" "kube-system") -}}
+{{- end -}}
+{{- $name -}}
 {{- end -}}
 {{- end -}}
 
@@ -479,17 +728,25 @@ OpenTelemetry Collector service name - handles fullnameOverride/nameOverride for
 {{- end -}}
 
 {{/*
-OpenCost service name - handles fullnameOverride/nameOverride for opencost subchart
+kubewatch is deployed only while the runner does not watch the cluster itself:
+with runner.k8sWatch.enabled the runner ignores kubewatch's posts anyway.
 */}}
-{{- define "nudgebee-agent.opencost.servicename" -}}
-{{- if .Values.opencost.fullnameOverride -}}
-{{- .Values.opencost.fullnameOverride | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- $name := default "opencost" .Values.opencost.nameOverride -}}
-{{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- define "nudgebee-agent.kubewatchDeployed" -}}
+{{- if and .Values.kubewatch.enabled (not .Values.runner.k8sWatch.enabled) }}true{{ end -}}
+{{- end }}
+
+{{/*
+The kinds the runner's own watch covers, from kubewatch.config.resource, so
+switching from kubewatch keeps the same kinds. Kinds missing from the map count
+as on, as in the chart defaults.
+*/}}
+{{- define "nudgebee-agent.k8sWatchKinds" -}}
+{{- $r := default dict .Values.kubewatch.config.resource -}}
+{{- $kinds := list -}}
+{{- range $key, $kind := dict "pod" "pod" "job" "job" "node" "node" "deployment" "deployment" "daemonset" "daemonset" "statefulset" "statefulset" "services" "service" "configmap" "configmap" "ingress" "ingress" "rollout" "rollout" -}}
+{{- if (ne (toString (index $r $key)) "false") -}}
+{{- $kinds = append $kinds $kind -}}
 {{- end -}}
 {{- end -}}
-{{- end -}}
+{{- join "," $kinds -}}
+{{- end }}

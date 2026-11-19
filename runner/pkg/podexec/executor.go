@@ -15,7 +15,6 @@
 package podexec
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +27,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	clientexec "k8s.io/client-go/util/exec"
+
+	"github.com/nudgebee/nudgebee-agent/pkg/cmdout"
 )
 
 // Request describes one pod-exec invocation.
@@ -38,6 +39,10 @@ type Request struct {
 	Command   []string // already-tokenized command (e.g. ["bash","-c","ls"])
 	Stdin     string   // optional; piped to the container's stdin
 	Timeout   time.Duration
+	// OutputEncoding selects how stdout is collected (see pkg/cmdout): "" keeps
+	// it as text in Stdout; cmdout.Gzip compresses it as it streams in and
+	// returns it in StdoutGzipB64.
+	OutputEncoding string
 }
 
 // Result captures the exec outcome. ExitCode is 0 on success, non-zero
@@ -48,6 +53,11 @@ type Result struct {
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
 	Error    string `json:"error,omitempty"`
+
+	// Set instead of Stdout when the request asked for cmdout.Gzip.
+	StdoutGzipB64  string `json:"stdout_gzip_b64,omitempty"`
+	OutputEncoding string `json:"output_encoding,omitempty"`
+	StdoutBytes    int64  `json:"stdout_bytes,omitempty"`
 }
 
 // Executor abstracts the SPDY exec call so unit tests can substitute a stub.
@@ -101,9 +111,12 @@ func (e *clientGoExecutor) Exec(ctx context.Context, req *Request) (*Result, err
 	streamCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	var stdout, stderr bytes.Buffer
+	// strings.Builder for stderr and plain stdout: String() hands the buffer
+	// over without copying it.
+	stdout := cmdout.New(req.OutputEncoding)
+	var stderr strings.Builder
 	streamOpts := remotecommand.StreamOptions{
-		Stdout: &stdout,
+		Stdout: stdout,
 		Stderr: &stderr,
 	}
 	if req.Stdin != "" {
@@ -112,8 +125,15 @@ func (e *clientGoExecutor) Exec(ctx context.Context, req *Request) (*Result, err
 
 	streamErr := exec.StreamWithContext(streamCtx, streamOpts)
 	res := &Result{
-		Stdout: stdout.String(),
+		Stdout: stdout.Text(),
 		Stderr: stderr.String(),
+	}
+	if stdout.Encoding() == cmdout.Gzip {
+		enc, err := stdout.GzipBase64()
+		if err != nil {
+			return nil, fmt.Errorf("podexec: encode stdout: %w", err)
+		}
+		res.StdoutGzipB64, res.OutputEncoding, res.StdoutBytes = enc, cmdout.Gzip, stdout.Len()
 	}
 	if streamErr != nil {
 		// remotecommand returns a CodeExitError when the remote process

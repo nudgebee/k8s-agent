@@ -149,8 +149,19 @@ func (v *Validator) LightActionsSet() map[string]struct{} {
 // rejected.
 func (v *Validator) Validate(r *Request) error {
 	if r.RelaySig.Present() && v.RelayVerifier != nil && v.RelayVerifier.Enabled() {
-		if err := v.RelayVerifier.VerifyBody(r.BodyRaw, r.RelaySig); err == nil {
+		err := v.RelayVerifier.VerifyBody(r.BodyRaw, r.RelaySig)
+		if err == nil {
 			return nil // valid relay signature authorizes any action
+		}
+		// A replay is a request this agent already accepted, delivered again
+		// (the broker redelivers what was unacked when a channel dropped). When
+		// falling through would reject it — a mutation with no other credentials
+		// — it would be reported as unauthorized while the first delivery may
+		// have applied it; say what it is instead. A read, or a request carrying
+		// another signature, falls through as before.
+		if errors.Is(err, relaysig.ErrReplay) && !v.isLightAction(r.ActionName) &&
+			r.Signature == "" && r.PartialAuthA == "" && r.PartialAuthB == "" {
+			return fmt.Errorf("%w: %s", ErrDuplicateDelivery, r.ActionName)
 		}
 		// Verification failed — fall through to the existing modes (reads keep
 		// working via lightActions; mutations get rejected there).
@@ -163,6 +174,17 @@ func (v *Validator) Validate(r *Request) error {
 	default:
 		return v.validateLightAction(r)
 	}
+}
+
+// ErrDuplicateDelivery is Validate's error for a mutation whose valid relay
+// signature carries a nonce already seen: a second delivery of a request the
+// agent accepted before. Its outcome is the first delivery's, not a denial.
+var ErrDuplicateDelivery = errors.New("auth: duplicate delivery of a request already received")
+
+// isLightAction reports whether action is on the light-action allowlist.
+func (v *Validator) isLightAction(action string) bool {
+	_, ok := v.LightActionsSet()[action]
+	return ok
 }
 
 func (v *Validator) validateLightAction(r *Request) error {

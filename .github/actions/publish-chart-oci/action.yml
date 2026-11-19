@@ -1,0 +1,46 @@
+name: Publish chart to OCI
+description: >
+  Push packaged charts to oci://ghcr.io/nudgebee/charts and sign them keyless
+  with cosign, via .github/scripts/publish-chart-oci.sh. The calling job needs
+  a checkout, packages:write and id-token:write.
+
+inputs:
+  packages:
+    description: Glob of chart packages to publish, relative to the workspace.
+    required: true
+  token:
+    description: Token that can push to ghcr.io/nudgebee.
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Helm
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      with:
+        version: v3.10.0
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v3.0.6
+
+    # cosign does not read Helm's credential store, so log in with both.
+    - name: Log in to GHCR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+    - name: Publish to OCI
+      shell: bash
+      env:
+        COSIGN_YES: "true"
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        shopt -s nullglob
+        # Unquoted on purpose: PACKAGES is a glob to expand.
+        # shellcheck disable=SC2086
+        "$GITHUB_WORKSPACE/.github/scripts/publish-chart-oci.sh" $PACKAGES

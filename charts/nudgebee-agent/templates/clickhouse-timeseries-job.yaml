@@ -1,0 +1,87 @@
+{{- /*
+Creates the node-agent TimeSeries table (clickhouse.timeseries) after each
+install and upgrade. Neither the collector nor ClickHouse creates it: the
+collector's prometheus_remote_write exporter only sends HTTP, and ClickHouse
+refuses writes to a missing table.
+
+Same image, Secret and shape as clickhouse-schema-upgrade-job.yaml. The table
+is created with IF NOT EXISTS, so the Job does nothing once it exists.
+
+After a fresh install ClickHouse may still be starting, so the Job waits for
+it. Helm waits for this hook up to --timeout (5m by default) and fails the
+install or upgrade when the hook fails, so a ClickHouse that is not up within
+about 4 minutes is not an error: the Job exits 0 and says so, and the next
+upgrade creates the table. A failing CREATE fails the Job.
+*/}}
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (dig "timeseries" "enabled" false .Values.clickhouse) }}
+{{- $chFullname := include "nudgebee-agent.clickhouse.servicename" . }}
+{{- $chSecretName := include "nudgebee-agent.clickhouse.secretName" . }}
+{{- $chSecretKey := include "nudgebee-agent.clickhouse.secretKey" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-ch-timeseries-table
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: Never
+      # The job only talks to clickhouse, never the K8s API.
+      automountServiceAccountToken: false
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.clickhouse.image.pullSecrets "root" .) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      containers:
+        - name: timeseries-table
+          image: "{{ .Values.clickhouse.image.registry }}/{{ .Values.clickhouse.image.repository }}:{{ .Values.clickhouse.image.tag }}"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          env:
+            - name: CH_HOST
+              value: {{ $chFullname | quote }}
+            - name: CH_USER
+              value: {{ .Values.clickhouse.auth.username | default "default" | quote }}
+            - name: CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $chSecretName | quote }}
+                  key: {{ $chSecretKey | quote }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              cc() { clickhouse-client --host "$CH_HOST" --user "$CH_USER" --password "$CH_PASSWORD" "$@"; }
+              for i in $(seq 1 48); do
+                cc --query "SELECT 1" >/dev/null 2>&1 && break
+                echo "waiting for clickhouse ($i/48)..."; sleep 5
+              done
+              if ! cc --query "SELECT 1" >/dev/null; then
+                echo "clickhouse is not reachable yet; default.node_agent_ts is not created. The next helm upgrade creates it."
+                exit 0
+              fi
+              # TimeSeries tables are experimental in ClickHouse 26.10; the
+              # setting is needed to create one, not to use it.
+              cc --allow_experimental_time_series_table=1 --query "
+                CREATE TABLE IF NOT EXISTS default.node_agent_ts ENGINE = TimeSeries
+                  SAMPLES ENGINE = MergeTree
+                    PARTITION BY toDate(timestamp)
+                    ORDER BY (id, timestamp)
+                    TTL toDateTime(timestamp) + INTERVAL 7 DAY
+                    SETTINGS ttl_only_drop_parts = 1"
+              echo "default.node_agent_ts is in place."
+{{- end }}

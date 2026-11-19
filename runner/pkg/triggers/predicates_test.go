@@ -438,6 +438,29 @@ func TestCrashLoopEnrichBlocks_NoWaitingState(t *testing.T) {
 
 // ---------- pod_oom_killed ----------
 
+// oomNow is the clock the pod_oom_killed tests run at: just after the
+// 2026-05-08T03:00Z kills the fixtures carry, so those count as fresh and
+// the 2026-05-07 ones as old.
+var oomNow = time.Date(2026, 5, 8, 3, 5, 0, 0, time.UTC)
+
+func oomMatcher() MatcherSpec {
+	return podOOMKilledMatcherAt(func() time.Time { return oomNow })
+}
+
+// oomPod is a Pod whose app container is running again after an OOM kill
+// that finished at finishedAt.
+func oomPod(t *testing.T, finishedAt string) map[string]any {
+	t.Helper()
+	return asObj(t, `{
+		"metadata":{"name":"web-0","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","restartCount":1,
+			 "state":{"running":{"startedAt":"2026-05-07T10:53:53Z"}},
+			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"`+finishedAt+`"}}}
+		]}
+	}`)
+}
+
 func TestPodOOMKilled_FiresWhenNewOOMObserved(t *testing.T) {
 	// Container OOMed at a new finishedAt timestamp the previous obj
 	// didn't carry → fresh OOM event → fire.
@@ -456,7 +479,7 @@ func TestPodOOMKilled_FiresWhenNewOOMObserved(t *testing.T) {
 			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-08T02:59:30Z"}}}
 		]}
 	}`)
-	if !podOOMKilledMatcher().Predicate(newPod, oldPod) {
+	if !oomMatcher().Predicate(newPod, oldPod) {
 		t.Error("new OOM (different finishedAt) must fire")
 	}
 }
@@ -464,18 +487,94 @@ func TestPodOOMKilled_FiresWhenNewOOMObserved(t *testing.T) {
 func TestPodOOMKilled_FiresOnResyncAndCreate(t *testing.T) {
 	// kubewatch's wire shape has obj==oldObj; resync de-dup is the rate
 	// limiter's job, not the predicate's.
-	pod := asObj(t, `{
+	pod := oomPod(t, "2026-05-08T02:30:00Z")
+	if !oomMatcher().Predicate(pod, pod) {
+		t.Error("predicate must fire when obj==oldObj on a Pod with a recent OOMKilled lastState")
+	}
+	if !oomMatcher().Predicate(pod, nil) {
+		t.Error("predicate must fire on first observation (oldObj=nil)")
+	}
+}
+
+func TestPodOOMKilled_DropsOldKill(t *testing.T) {
+	// lastState keeps an OOM for as long as the container keeps running,
+	// and every later Pod update (an eviction, a node drain, a probe
+	// flip) carries it. A kill older than the fresh window is history,
+	// not a new failure.
+	if oomMatcher().Predicate(oomPod(t, "2026-05-01T03:00:00Z"), nil) {
+		t.Error("a week-old OOM in lastState must not fire")
+	}
+	if oomMatcher().Predicate(oomPod(t, "2026-05-08T02:04:59Z"), nil) {
+		t.Error("an OOM just past the 1h window must not fire")
+	}
+	if !oomMatcher().Predicate(oomPod(t, "2026-05-08T02:05:00Z"), nil) {
+		t.Error("an OOM exactly at the window edge must fire")
+	}
+	// A Job / restartPolicy:Never Pod keeps its OOM in state.terminated
+	// until it is deleted, so the same check applies there.
+	job := asObj(t, `{
+		"metadata":{"name":"oom-never","namespace":"prod"},
+		"status":{"containerStatuses":[
+			{"name":"app","restartCount":0,
+			 "state":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-01T03:00:00Z"}}}
+		]}
+	}`)
+	if oomMatcher().Predicate(job, nil) {
+		t.Error("an old OOM in state.terminated must not fire")
+	}
+}
+
+func TestPodOOMKilled_FiresOnSkewedOrMissingFinishedAt(t *testing.T) {
+	// finishedAt comes from the node's clock; a node a few minutes ahead
+	// of the agent is skew, not an old kill.
+	if !oomMatcher().Predicate(oomPod(t, "2026-05-08T03:08:00Z"), nil) {
+		t.Error("a finishedAt ahead of the agent clock must fire")
+	}
+	noTS := asObj(t, `{
 		"metadata":{"name":"web-0","namespace":"prod"},
 		"status":{"containerStatuses":[
 			{"name":"app","restartCount":1,
-			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-07T13:00:00Z"}}}
+			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137}}}
 		]}
 	}`)
-	if !podOOMKilledMatcher().Predicate(pod, pod) {
-		t.Error("predicate must fire when obj==oldObj on a Pod with an OOMKilled lastState")
+	if !oomMatcher().Predicate(noTS, nil) {
+		t.Error("an OOM with no finishedAt must still fire")
 	}
-	if !podOOMKilledMatcher().Predicate(pod, nil) {
-		t.Error("predicate must fire on first observation (oldObj=nil)")
+	if got := oomOccurrenceKey(noTS); got != "" {
+		t.Errorf("oomOccurrenceKey = %q; want empty without a finishedAt", got)
+	}
+}
+
+func TestPodOOMKilled_EngineFiresOnceForOneKill(t *testing.T) {
+	// The reported failure end to end: a Pod updated every hour for a
+	// day. An old kill must never fire; a fresh one fires once, not once
+	// per hour after the rate limit lapses.
+	run := func(finishedAt time.Time) int {
+		clock := finishedAt.Add(time.Minute)
+		now := func() time.Time { return clock }
+		eng := NewEngine([]MatcherSpec{podOOMKilledMatcherAt(now)}, clock.Add(-time.Hour))
+		eng.rl.now = now
+		pod := oomPod(t, finishedAt.Format(time.RFC3339))
+		fires := 0
+		for h := 0; h < 24; h++ {
+			fires += len(eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: pod, OldObj: pod}))
+			clock = clock.Add(61 * time.Minute)
+		}
+		return fires
+	}
+	if got := run(oomNow.Add(-time.Minute)); got != 1 {
+		t.Errorf("fresh kill re-observed hourly for 24h fired %d times; want 1", got)
+	}
+	clock := oomNow
+	now := func() time.Time { return clock }
+	eng := NewEngine([]MatcherSpec{podOOMKilledMatcherAt(now)}, clock.Add(-time.Hour))
+	eng.rl.now = now
+	pod := oomPod(t, oomNow.Add(-7*24*time.Hour).Format(time.RFC3339))
+	for h := 0; h < 24; h++ {
+		if ms := eng.Match(IncomingK8sEvent{Operation: "update", Kind: "Pod", Obj: pod, OldObj: pod}); len(ms) != 0 {
+			t.Fatalf("week-old kill fired at hour %d", h)
+		}
+		clock = clock.Add(61 * time.Minute)
 	}
 }
 
@@ -513,7 +612,7 @@ func TestPodOOMKilled_DropsStaleLastStateOOMUnderNonOOMTermination(t *testing.T)
 			 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-07T10:53:50Z"}}}
 		]}
 	}`)
-	if podOOMKilledMatcher().Predicate(pod, nil) {
+	if oomMatcher().Predicate(pod, nil) {
 		t.Error("non-OOM state.terminated supersedes the OOM in lastState; must not fire")
 	}
 	if got := oomKilledEnrichBlocks(pod, nil, EnrichContext{}); got != nil {
@@ -521,35 +620,21 @@ func TestPodOOMKilled_DropsStaleLastStateOOMUnderNonOOMTermination(t *testing.T)
 	}
 }
 
-func TestPodOOMKilled_FingerprintIsStableForTheSameOOM(t *testing.T) {
-	// The bucket must come from the OOM's finishedAt, not the wall
-	// clock: the same kill observed in two different hours has to keep
-	// one fingerprint, or the 1h rate limit never suppresses it and a
-	// single OOM mints a Finding every hour the container stays up.
-	podAt := func(finishedAt string) map[string]any {
-		return asObj(t, `{
-			"metadata":{"name":"web-0","namespace":"prod"},
-			"status":{"containerStatuses":[
-				{"name":"app","restartCount":1,
-				 "state":{"running":{"startedAt":"2026-05-07T10:53:53Z"}},
-				 "lastState":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"`+finishedAt+`"}}}
-			]}
-		}`)
+func TestPodOOMKilled_FingerprintPerWorkloadOccurrencePerKill(t *testing.T) {
+	// The fingerprint names the workload, so the 1h rate limit caps a
+	// Pod stuck OOMing at ~1 fire/hour. The occurrence key names the
+	// kill, so the same kill re-reported after an agent restart gets the
+	// same Finding ID and a different kill a different one.
+	spec := oomMatcher()
+	a, b := oomPod(t, "2026-05-08T02:30:00Z"), oomPod(t, "2026-05-08T02:58:00Z")
+	if spec.FingerprintFn(a) != spec.FingerprintFn(b) {
+		t.Error("two kills of one workload must share a fingerprint")
 	}
-	fpFn := podOOMKilledMatcher().FingerprintFn
-	same := podAt("2026-05-07T10:53:50Z")
-	if a, b := fpFn(same), fpFn(podAt("2026-05-07T10:58:00Z")); a != b {
-		t.Errorf("same OOM hour must share a fingerprint; got %s vs %s", a, b)
+	if spec.OccurrenceKeyFn(a) != spec.OccurrenceKeyFn(oomPod(t, "2026-05-08T02:30:00Z")) {
+		t.Error("the same kill must keep one occurrence key")
 	}
-	if a, b := fpFn(same), fpFn(podAt("2026-05-07T11:00:01Z")); a == b {
-		t.Error("an OOM in a later hour must get a fresh fingerprint")
-	}
-	// metav1.Time marshals at second precision, so the API server never
-	// emits a fractional finishedAt — but time.RFC3339 parses one anyway
-	// (Go accepts an optional fractional second on that layout), so the
-	// bucket must not silently fall back to the wall clock if one shows up.
-	if a, b := fpFn(same), fpFn(podAt("2026-05-07T10:53:50.123456789Z")); a != b {
-		t.Errorf("a fractional-second finishedAt must bucket like its whole-second form; got %s vs %s", a, b)
+	if spec.OccurrenceKeyFn(a) == spec.OccurrenceKeyFn(b) {
+		t.Error("two kills must get different occurrence keys")
 	}
 }
 
@@ -565,7 +650,7 @@ func TestPodOOMKilled_FiresOnStateTerminatedWithoutRestart(t *testing.T) {
 			 "state":{"terminated":{"reason":"OOMKilled","exitCode":137,"finishedAt":"2026-05-08T03:00:00Z"}}}
 		]}
 	}`)
-	if !podOOMKilledMatcher().Predicate(pod, nil) {
+	if !oomMatcher().Predicate(pod, nil) {
 		t.Error("OOMKilled in state.terminated (restartPolicy:Never, no lastState) must fire")
 	}
 }
