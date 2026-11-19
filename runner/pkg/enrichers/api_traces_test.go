@@ -12,9 +12,10 @@ import (
 )
 
 // TestApiTraces_NoClickHouseReturnsEmpty covers the "CH not configured"
-// path. The legacy get_application_traces would crash on the run_query
-// call in that case; we surface a clean empty Finding with `error` set
-// so the api-server caller can render the empty state.
+// path. We return a clean, successful empty Finding with NO `error` key,
+// so the backend traces parser renders "no traces" rather than surfacing
+// a hard error. Matches the legacy get_application_traces empty-result
+// behavior when the trace store is absent.
 func TestApiTraces_NoClickHouseReturnsEmpty(t *testing.T) {
 	a := NewAPITracesEnricher(nil, "acc-1")
 	resp, err := a.Handler()(context.Background(), map[string]any{
@@ -35,8 +36,8 @@ func TestApiTraces_NoClickHouseReturnsEmpty(t *testing.T) {
 	if rows := body["data"].([]any); len(rows) != 0 {
 		t.Errorf("data = %v; want []", rows)
 	}
-	if body["error"] != "clickhouse: not configured" {
-		t.Errorf("error = %v", body["error"])
+	if _, hasErr := body["error"]; hasErr {
+		t.Errorf("expected no error key when CH unconfigured; got error = %v", body["error"])
 	}
 }
 
