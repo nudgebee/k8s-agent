@@ -79,6 +79,10 @@ type GetParams struct {
 	LabelSelector string
 	FieldSelector string
 	AllNamespaces bool
+	// OmitDataValues blanks ConfigMap values (see omitConfigMapValues) for
+	// callers that only need the key names. It has no effect on any other
+	// kind; Secret values are always blanked.
+	OmitDataValues bool
 }
 
 func ParseGetParams(p map[string]any) GetParams {
@@ -102,6 +106,9 @@ func ParseGetParams(p map[string]any) GetParams {
 		LabelSelector: strParam(p, "label_selector"),
 		FieldSelector: strParam(p, "field_selector"),
 		AllNamespaces: boolParam(p, "all_namespaces"),
+		// Opt-in: older agents ignore the key and send the values, so a caller
+		// must not depend on them being blank.
+		OmitDataValues: boolParam(p, "omit_data_values"),
 	}
 	// Backward-compat with the legacy `kind`-based contract (and the UI built
 	// on it): callers that address a resource by `kind` ("Deployment") instead
@@ -328,6 +335,9 @@ func (c *Client) eachItem(ctx context.Context, gvr schema.GroupVersionResource, 
 		// Secret values never leave the cluster: callers get keys, not values.
 		if gvr.Group == "" && gvr.Resource == "secrets" {
 			redactSecretData(obj)
+		}
+		if p.OmitDataValues && gvr.Group == "" && gvr.Resource == "configmaps" {
+			omitConfigMapValues(obj)
 		}
 		if err := fn(obj); err != nil {
 			return err
