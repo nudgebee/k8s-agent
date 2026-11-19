@@ -1,0 +1,113 @@
+{{- /*
+The collector's second config file (see opentelemetry-collector.extraVolumes
+in values.yaml), merged into its main config: with clickhouse.timeseries.enabled
+a pipeline that scrapes this release's node agents and remote-writes the
+metrics the service map reads into ClickHouse's TimeSeries table
+(clickhouse-configmap.yaml serves the endpoint, clickhouse-timeseries-job.yaml
+creates the table). Otherwise the file is empty and the collector runs as
+before. The ConfigMap exists whenever the collector does, as its pod mounts it.
+
+The Role lets the collector find the node-agent pods in this namespace.
+*/ -}}
+{{- if index (default (dict) (index .Values "opentelemetry-collector")) "enabled" }}
+{{- $ts := and (include "nudgebee-agent.clickhouse.installed" .) (dig "timeseries" "enabled" false .Values.clickhouse) }}
+{{- $collector := index .Values "opentelemetry-collector" }}
+{{- $chUser := default "default" (dig "config" "exporters" "clickhouse" "username" "" $collector) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-collector-timeseries
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+data:
+  {{- if not $ts }}
+  timeseries.yaml: |
+    # clickhouse.timeseries.enabled is false: nothing to add.
+    {}
+  {{- else }}
+  timeseries.yaml: |
+    receivers:
+      prometheus/node_agent_ts:
+        config:
+          scrape_configs:
+            - job_name: nudgebee-node-agent
+              scrape_interval: 15s
+              scrape_timeout: 10s
+              honor_labels: true
+              kubernetes_sd_configs:
+                - role: pod
+                  # Only this release's node agents.
+                  namespaces:
+                    own_namespace: true
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_label_app]
+                  regex: nudgebee-node-agent
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_container_port_name]
+                  regex: http
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_phase]
+                  regex: Pending|Succeeded|Failed|Completed
+                  action: drop
+    processors:
+      # Only the metrics the service map reads (runner/pkg/servicemap/queries.go).
+      filter/node_agent_ts:
+        error_mode: ignore
+        metrics:
+          metric:
+            - not IsMatch(name, "^container_(net_tcp_(successful_connects|bytes_sent|bytes_received)|(http_requests|postgres_queries|mysql_queries|mongo_queries|redis_queries|memcached_queries|cassandra_queries|clickhouse_queries|foundationdb_requests|zookeeper_requests|kafka_requests|rabbitmq_messages|nats_messages|dubbo_requests|dns_requests)|oom_kills|restarts|resources_cpu_throttled_seconds|resources_disk_(size|used)_bytes)")
+    exporters:
+      # Writes as the clickhouse exporter's user: the read-only user can't insert.
+      prometheus_remote_write/clickhouse_ts:
+        endpoint: http://{{ include "nudgebee-agent.clickhouse.servicename" . }}:8123/prometheus/api/v1/write
+        headers:
+          X-ClickHouse-User: {{ $chUser | quote }}
+          X-ClickHouse-Key: ${env:CLICKHOUSE_PASSWORD}
+        {{- with include "nudgebee-agent.timeseriesCluster" . }}
+        # The runner selects this label (TIMESERIES_CLUSTER), so a shared
+        # ClickHouse never mixes clusters.
+        external_labels:
+          cluster: {{ . | quote }}
+        {{- end }}
+    service:
+      pipelines:
+        # Counters stay cumulative, as remote write carries them.
+        metrics/node_agent_ts:
+          receivers: [prometheus/node_agent_ts]
+          processors: [memory_limiter, filter/node_agent_ts, batch]
+          exporters: [prometheus_remote_write/clickhouse_ts]
+  {{- end }}
+{{- if $ts }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-collector-timeseries
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-collector-timeseries
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-collector-timeseries
+subjects:
+  - kind: ServiceAccount
+    {{- /* The collector chart's serviceAccountName rule. */}}
+    {{- $saDefault := ternary (include "nudgebee-agent.otelcollector.servicename" .) "default" (dig "serviceAccount" "create" true $collector) }}
+    name: {{ default $saDefault (dig "serviceAccount" "name" "" $collector) }}
+    namespace: {{ .Release.Namespace | quote }}
+{{- end }}
+{{- end }}

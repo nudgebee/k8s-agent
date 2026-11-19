@@ -384,6 +384,12 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: CLICKHOUSE_LOGS_COLLECTED
       value: "true"
     {{- end }}
+    {{- with include "nudgebee-agent.timeseriesCluster" . }}
+    {{- if not (has "TIMESERIES_CLUSTER" $envVarNames) }}
+    - name: TIMESERIES_CLUSTER
+      value: {{ . | quote }}
+    {{- end }}
+    {{- end }}
     {{- end }}
     {{- /*
     Password source, in precedence order: runner.clickhouse_password (lands in
@@ -684,6 +690,25 @@ value is doubled to keep the rendered YAML valid.
 */}}
 {{- define "nudgebee-agent.collectorQuoted" -}}
 {{- replace "'" "''" (toString .) -}}
+{{- end -}}
+
+{{/*
+The cluster label the collector puts on the node-agent metrics it writes to
+ClickHouse's TimeSeries table, and the runner's TIMESERIES_CLUSTER, while
+clickhouse.timeseries is on: clickhouse.timeseries.clusterName, else the
+kube-system namespace's UID (unique per cluster, never changes). Empty when
+neither is known: lookup returns nothing under helm template (ArgoCD) and
+client-side dry runs. The runner's CLUSTER_NAME is left alone, as it also reports
+it to the backend.
+*/}}
+{{- define "nudgebee-agent.timeseriesCluster" -}}
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (dig "timeseries" "enabled" false .Values.clickhouse) -}}
+{{- $name := dig "timeseries" "clusterName" "" .Values.clickhouse -}}
+{{- if not $name -}}
+{{- $name = dig "metadata" "uid" "" (lookup "v1" "Namespace" "" "kube-system") -}}
+{{- end -}}
+{{- $name -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
