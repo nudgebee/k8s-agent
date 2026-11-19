@@ -5,7 +5,8 @@
 //   - jaeger_query_services     : GET /api/services
 //   - jaeger_query_trace_by_id  : GET /api/traces/{id}
 //   - jaeger_query_operations   : GET /api/services/{service}/operations
-//   - jaeger_query_metrics      : GET /api/metrics/{type} (Jaeger SPM)
+//   - jaeger_query_metrics      : fan-out to /api/metrics/{calls,errors,
+//     latencies?quantile=0.95,latencies?quantile=0.99} (Jaeger SPM)
 package jaeger
 
 import (
@@ -62,13 +63,102 @@ func (c *Client) Operations(ctx context.Context, service string) (json.RawMessag
 	return c.get(ctx, "/api/services/"+url.PathEscape(service)+"/operations", nil)
 }
 
-// Metrics queries Jaeger SPM metrics. metricType is one of latencies,
-// call_rates, error_rates, min_step.
-func (c *Client) Metrics(ctx context.Context, metricType string, params map[string]any) (json.RawMessage, error) {
-	if metricType == "" {
-		return nil, errors.New("jaeger: metric_type required")
+// Metrics queries Jaeger SPM (Service Performance Monitoring) metrics. It
+// replicates the legacy get_metrics: the backend composer sends `services`
+// and `spanKinds` (plural) plus a time window and NO metric_type. We remap
+// those to Jaeger's singular `service` / `spanKind` query params and fan out
+// to the four SPM endpoints, assembling a single object the backend parser
+// reads: {calls, errors, latencies_p95, latencies_p99}.
+func (c *Client) Metrics(ctx context.Context, params map[string]any) (json.RawMessage, error) {
+	base := metricsQuery(params)
+
+	subs := []struct {
+		key      string
+		metric   string
+		quantile string
+	}{
+		{"calls", "calls", ""},
+		{"errors", "errors", ""},
+		{"latencies_p95", "latencies", "0.95"},
+		{"latencies_p99", "latencies", "0.99"},
 	}
-	return c.get(ctx, "/api/metrics/"+url.PathEscape(metricType), paramsToQuery(params))
+
+	out := make(map[string]json.RawMessage, len(subs))
+	for _, s := range subs {
+		q := cloneValues(base)
+		if s.quantile != "" {
+			q.Set("quantile", s.quantile)
+		}
+		raw, status, err := c.getRaw(ctx, "/api/metrics/"+s.metric, q)
+		if err != nil {
+			return nil, err
+		}
+		if status == http.StatusNotFound {
+			// Jaeger 404s /api/metrics/* when SPM isn't wired up (no
+			// monitor/OTel metrics storage). Preserve the legacy friendly
+			// message instead of leaking a raw 404.
+			return nil, fmt.Errorf("jaeger: SPM metrics not available (monitoring storage not configured)")
+		}
+		if status >= 400 {
+			return nil, fmt.Errorf("jaeger metrics %s: HTTP %d: %s", s.metric, status, string(raw))
+		}
+		out[s.key] = raw
+	}
+	return json.Marshal(out)
+}
+
+// metricsQuery builds the shared SPM query params, remapping the composer's
+// plural `services`/`spanKinds` to Jaeger's singular `service`/`spanKind` and
+// dropping any legacy `metric_type` (the fan-out covers all four metrics).
+//
+// Any window param the composer omits is defaulted exactly as the legacy
+// get_metrics did — it filled lookback/endTs/step/ratePer/groupByOperation/
+// spanKinds before calling Jaeger, so a caller that sends only `services`
+// still gets a well-formed query rather than whatever Jaeger does with a
+// missing window.
+func metricsQuery(params map[string]any) url.Values {
+	remapped := make(map[string]any, len(params)+5)
+	for k, v := range params {
+		switch k {
+		case "services", "service":
+			remapped["service"] = v
+		case "spanKinds", "spanKind":
+			remapped["spanKind"] = v
+		case "metric_type":
+			// dropped
+		default:
+			remapped[k] = v
+		}
+	}
+	// lookback drives three other defaults, so resolve it first.
+	lookback, ok := remapped["lookback"]
+	if !ok {
+		lookback = defaultLookbackMillis
+		remapped["lookback"] = lookback
+	}
+	for k, v := range map[string]any{
+		"step":             lookback,
+		"ratePer":          lookback,
+		"endTs":            time.Now().UnixMilli(),
+		"groupByOperation": true,
+		"spanKind":         "server",
+	} {
+		if _, ok := remapped[k]; !ok {
+			remapped[k] = v
+		}
+	}
+	return paramsToQuery(remapped)
+}
+
+// defaultLookbackMillis is the legacy get_metrics default window (1h in ms).
+const defaultLookbackMillis = 3600000
+
+func cloneValues(v url.Values) url.Values {
+	out := make(url.Values, len(v))
+	for k, vs := range v {
+		out[k] = append([]string(nil), vs...)
+	}
+	return out
 }
 
 func paramsToQuery(params map[string]any) url.Values {
@@ -93,6 +183,10 @@ func paramsToQuery(params map[string]any) url.Values {
 			v.Set(k, fmt.Sprintf("%g", x))
 		case int:
 			v.Set(k, fmt.Sprintf("%d", x))
+		case int64:
+			// Millisecond timestamps arrive as int64 (time.UnixMilli); without
+			// this case they were silently dropped from the query.
+			v.Set(k, fmt.Sprintf("%d", x))
 		case bool:
 			v.Set(k, fmt.Sprintf("%t", x))
 		}
@@ -100,9 +194,24 @@ func paramsToQuery(params map[string]any) url.Values {
 	return v
 }
 
+// get issues a request and treats HTTP >= 400 as an error.
 func (c *Client) get(ctx context.Context, path string, params url.Values) (json.RawMessage, error) {
+	raw, status, err := c.getRaw(ctx, path, params)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("jaeger %s: HTTP %d: %s", path, status, string(raw))
+	}
+	return raw, nil
+}
+
+// getRaw issues a request and returns the body + HTTP status without treating
+// a 4xx as an error, so callers (Metrics) can act on a 404. err is non-nil
+// only for transport/read failures.
+func (c *Client) getRaw(ctx context.Context, path string, params url.Values) (json.RawMessage, int, error) {
 	if c.BaseURL == "" {
-		return nil, errors.New("jaeger: base URL not configured")
+		return nil, 0, errors.New("jaeger: base URL not configured")
 	}
 	u := c.BaseURL + path
 	if len(params) > 0 {
@@ -110,7 +219,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) (json.
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -122,15 +231,12 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) (json.
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("jaeger get %s: %w", path, err)
+		return nil, 0, fmt.Errorf("jaeger get %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("jaeger %s: HTTP %d: %s", path, resp.StatusCode, string(body))
-	}
-	return json.RawMessage(body), nil
+	return json.RawMessage(body), resp.StatusCode, nil
 }
