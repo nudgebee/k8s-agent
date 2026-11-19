@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,11 @@ type Service struct {
 	// then does a past window take its inventory from the kube_* queries
 	// instead of the cache. Nil: any configured URL counts, as before.
 	HasPrometheus func() bool
-	Logger        *slog.Logger
+	// TimeSeriesCluster is the cluster label on ClickHouse's TimeSeries
+	// data. While Prom is ClickHouse's Prometheus query API (HasPrometheus
+	// false) it filters the queries in place of ClusterName.
+	TimeSeriesCluster string
+	Logger            *slog.Logger
 	// NodeAgentCount, when set, lets the ClickHouse coverage check confirm
 	// that every running node agent is being scraped into ClickHouse.
 	NodeAgentCount NodeAgentCounter
@@ -198,8 +203,8 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		nsFilter = dictToPrometheusFilter(map[string]string{"namespace": p.WorkloadNamespace})
 	}
 	clusterFilter := ""
-	if s.ClusterName != "" {
-		clusterFilter = `cluster="` + s.ClusterName + `",`
+	if c := s.queryCluster(); c != "" {
+		clusterFilter = `cluster=` + strconv.Quote(c) + `,`
 	}
 
 	queryList := Queries
@@ -313,6 +318,15 @@ func withoutKube(queryList map[string]string) map[string]string {
 // promReady reports whether a Prometheus is configured to query.
 func (s *Service) promReady() bool {
 	return s.Prom != nil && s.Prom.URL() != ""
+}
+
+// queryCluster is the cluster the queries select: TimeSeriesCluster while
+// Prom is ClickHouse's Prometheus query API, else ClusterName.
+func (s *Service) queryCluster() string {
+	if s.TimeSeriesCluster != "" && s.HasPrometheus != nil && !s.HasPrometheus() {
+		return s.TimeSeriesCluster
+	}
+	return s.ClusterName
 }
 
 // kubeQueries says Prom can answer the kube_* queries: configured, and a real

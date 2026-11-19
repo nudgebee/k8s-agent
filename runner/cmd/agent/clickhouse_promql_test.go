@@ -100,7 +100,7 @@ func TestProbeClickHousePromQL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ch := &fakeClickHouse{body: func() (int, string) { return tc.status, tc.body }}
 			c, chURL := newFallbackClient(t, ch)
-			err := probeClickHousePromQL(context.Background(), c, chURL)
+			err := probeClickHousePromQL(context.Background(), c, chURL, "")
 			switch {
 			case tc.wantReason == "" && err != nil:
 				t.Errorf("probe failed: %v; want it to pass", err)
@@ -109,7 +109,7 @@ func TestProbeClickHousePromQL(t *testing.T) {
 			}
 			ch.mu.Lock()
 			defer ch.mu.Unlock()
-			if ch.queries[0] != clickhousePromQLProbe || ch.auth[0] != "default:pw" || ch.paths[0] != "/prometheus/api/v1/query" {
+			if ch.queries[0] != clickhousePromQLProbe("") || ch.auth[0] != "default:pw" || ch.paths[0] != "/prometheus/api/v1/query" {
 				t.Errorf("probe sent query=%q auth=%q path=%q", ch.queries[0], ch.auth[0], ch.paths[0])
 			}
 		})
@@ -134,7 +134,7 @@ func TestWatchClickHousePromQLHandover(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		watchClickHousePromQL(ctx, c, chURL, 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		watchClickHousePromQL(ctx, c, chURL, "", 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		close(done)
 	}()
 
@@ -152,7 +152,7 @@ func TestWatchClickHousePromQLHandover(t *testing.T) {
 	if got := proxyURL(); got != "" {
 		t.Errorf("proxy upstream on the fallback = %q; want empty (503)", got)
 	}
-	if got := nodeAgentCountQuery(promBackend(c, chURL)); !strings.Contains(got, "count by (instance)") {
+	if got := nodeAgentCountQuery(promBackend(c, chURL), ""); !strings.Contains(got, "count by (instance)") {
 		t.Errorf("node-agent count query on clickhouse = %q", got)
 	}
 
@@ -171,7 +171,7 @@ func TestWatchClickHousePromQLHandover(t *testing.T) {
 	if got := proxyURL(); got != prom.URL {
 		t.Errorf("proxy upstream after discovery = %q; want %q", got, prom.URL)
 	}
-	if got := nodeAgentCountQuery(promBackend(c, chURL)); !strings.HasPrefix(got, "up{") {
+	if got := nodeAgentCountQuery(promBackend(c, chURL), ""); !strings.HasPrefix(got, "up{") {
 		t.Errorf("node-agent count query on prometheus = %q", got)
 	}
 	if _, err := c.Query(context.Background(), "vector(1)", "1", ""); err != nil {
@@ -189,7 +189,7 @@ func TestWatchClickHousePromQLPrometheusFirst(t *testing.T) {
 	c, chURL := newFallbackClient(t, ch)
 	c.SetURL("http://prometheus:9090")
 
-	watchClickHousePromQL(context.Background(), c, chURL, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	watchClickHousePromQL(context.Background(), c, chURL, "", time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if got := c.URL(); got != "http://prometheus:9090" {
 		t.Errorf("URL = %q; want the discovered Prometheus", got)
 	}
@@ -213,7 +213,7 @@ func TestWatchClickHousePromQLLogsReasonOnce(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	watchClickHousePromQL(ctx, c, chURL, time.Millisecond, logger)
+	watchClickHousePromQL(ctx, c, chURL, "", time.Millisecond, logger)
 
 	out := buf.String()
 	if n := strings.Count(out, "fallback not available yet"); n != 1 {
@@ -224,6 +224,35 @@ func TestWatchClickHousePromQLLogsReasonOnce(t *testing.T) {
 	}
 	if !strings.Contains(out, "PromQL goes to ClickHouse") {
 		t.Errorf("switch not logged:\n%s", out)
+	}
+}
+
+// With a cluster label set, the probe and the node-agent count select this
+// cluster's series only, so another cluster's data in a shared ClickHouse
+// neither turns the fallback on nor counts as this cluster's node agents.
+func TestClickHousePromQLClusterLabel(t *testing.T) {
+	if got, want := clickhousePromQLProbe(""), "count(container_net_tcp_bytes_sent_total)"; got != want {
+		t.Errorf("probe without cluster = %q; want %q", got, want)
+	}
+	if got, want := clickhousePromQLProbe("c1"), `count(container_net_tcp_bytes_sent_total{cluster="c1"})`; got != want {
+		t.Errorf("probe = %q; want %q", got, want)
+	}
+	if got, want := nodeAgentCountQuery(promBackendClickHouse, "c1"), `count by (instance) (container_net_tcp_bytes_sent_total{cluster="c1"})`; got != want {
+		t.Errorf("node-agent count = %q; want %q", got, want)
+	}
+	if got := nodeAgentCountQuery(promBackendPrometheus, "c1"); strings.Contains(got, "c1") {
+		t.Errorf("node-agent count on prometheus = %q; want no cluster label", got)
+	}
+
+	ch := &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }}
+	c, chURL := newFallbackClient(t, ch)
+	if err := probeClickHousePromQL(context.Background(), c, chURL, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if ch.queries[0] != `count(container_net_tcp_bytes_sent_total{cluster="c1"})` {
+		t.Errorf("probe sent %q", ch.queries[0])
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"time"
 
 	chclient "github.com/nudgebee/nudgebee-agent/pkg/clickhouse"
@@ -24,10 +25,23 @@ const (
 const clickhousePromQLPath = "/prometheus"
 
 // clickhousePromQLProbe passes only when the TimeSeries table holds node-agent
-// series, so a handler over an empty table, or one with no collector writing
-// to it, is not taken for a working backend. The table has no scrape-made
-// `up` series: the collector remote-writes node-agent's own metrics only.
-const clickhousePromQLProbe = "count(container_net_tcp_bytes_sent_total)"
+// series of this cluster (its cluster label, when set), so a handler over an
+// empty table, one with no collector writing to it, or one holding only
+// another cluster's data, is not taken for a working backend. The table has
+// no scrape-made `up` series: the collector remote-writes node-agent's own
+// metrics only.
+func clickhousePromQLProbe(cluster string) string {
+	return "count(container_net_tcp_bytes_sent_total" + clusterSelector(cluster) + ")"
+}
+
+// clusterSelector selects the TimeSeries data's cluster label, or is "" with
+// none.
+func clusterSelector(cluster string) string {
+	if cluster == "" {
+		return ""
+	}
+	return "{cluster=" + strconv.Quote(cluster) + "}"
+}
 
 // clickhousePromQLURL is the URL of ClickHouse's Prometheus query API that
 // PromQL may fall back to, or "" when it cannot: a Prometheus is configured
@@ -58,12 +72,12 @@ var errNoNodeAgentSeries = errors.New("no node-agent series")
 // probeClickHousePromQL returns nil when ClickHouse's Prometheus query API at
 // chURL answers the probe with at least one series, else why not. It uses the
 // client's HTTP client, headers and authorizer.
-func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL string) error {
+func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL, cluster string) error {
 	p := prometheus.New(chURL, c.HTTP)
 	p.ExtraHeaders, p.Auth = c.ExtraHeaders, c.Auth
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	raw, err := p.Query(cctx, clickhousePromQLProbe, "", "")
+	raw, err := p.Query(cctx, clickhousePromQLProbe(cluster), "", "")
 	if err != nil {
 		return err
 	}
@@ -92,13 +106,13 @@ func probeClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL stri
 // and table may appear only after the runner started, hence the re-probe.
 // The first failed probe is logged at Info with its reason, later ones at
 // Debug.
-func watchClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL string, interval time.Duration, logger *slog.Logger) {
+func watchClickHousePromQL(ctx context.Context, c *prometheus.Client, chURL, cluster string, interval time.Duration, logger *slog.Logger) {
 	logged := false
 	for {
 		if c.URL() != "" {
 			return
 		}
-		err := probeClickHousePromQL(ctx, c, chURL)
+		err := probeClickHousePromQL(ctx, c, chURL, cluster)
 		switch {
 		case err == nil:
 			if c.SetURLIfEmpty(chURL) {
@@ -147,10 +161,11 @@ func prometheusProxyURL(c *prometheus.Client, chURL string) func() string {
 
 // nodeAgentCountQuery returns one series per node agent on the given backend.
 // A Prometheus has the scrape-made `up` series; ClickHouse's TimeSeries table
-// does not, so there each node agent is one instance of its own metrics.
-func nodeAgentCountQuery(backend string) string {
+// does not, so there each node agent is one instance of its own metrics, of
+// this cluster when the data carries a cluster label.
+func nodeAgentCountQuery(backend, cluster string) string {
 	if backend == promBackendClickHouse {
-		return `count by (instance) (container_net_tcp_bytes_sent_total)`
+		return `count by (instance) (container_net_tcp_bytes_sent_total` + clusterSelector(cluster) + `)`
 	}
 	return `up{job=~"(.+/)?nudgebee(-.*)?-node-agent"}`
 }

@@ -386,10 +386,9 @@ runner:
   # (service map, rightsizing, prometheus_* actions) to ClickHouse's Prometheus
   # query API at /prometheus/api/v1 as soon as a probe finds node-agent data
   # there; a Prometheus discovered later takes over. The handler and the
-  # TimeSeries table it reads are not set up by this chart yet. With
-  # CLUSTER_NAME set the service map comes back empty from ClickHouse: its
-  # queries filter on cluster, and the table has no cluster label until one is
-  # added at ingest.
+  # TimeSeries table it reads are not set up by this chart yet. On ClickHouse
+  # the queries and the probe select the TIMESERIES_CLUSTER label when that is
+  # set, never CLUSTER_NAME.
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.

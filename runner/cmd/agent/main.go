@@ -359,6 +359,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// On the ClickHouse fallback there are no kube_* series: past windows keep
 	// taking their inventory from the cache until a Prometheus is discovered.
 	smSvc.HasPrometheus = func() bool { return promBackend(promClient, chPromQL) == promBackendPrometheus }
+	smSvc.TimeSeriesCluster = cfg.TimeSeriesCluster
 	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
 	maps.Copy(handlers, smHandlers)
 	for name := range smHandlers {
@@ -951,7 +952,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// or a Prometheus is discovered, whichever comes first.
 	if chPromQL != "" {
 		g.Go(func() error {
-			watchClickHousePromQL(gctx, promClient, chPromQL, promDiscoveryInterval, logger)
+			watchClickHousePromQL(gctx, promClient, chPromQL, cfg.TimeSeriesCluster, promDiscoveryInterval, logger)
 			return nil
 		})
 	}
@@ -1261,7 +1262,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogProviderConfig:          logCfg,
 					PrometheusConnected:        promConnected,
 					PrometheusConnectedError:   promErr,
-					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, nodeAgentCountQuery(promBackend(promClient, chPromQL)), logger),
+					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, nodeAgentCountQuery(promBackend(promClient, chPromQL), cfg.TimeSeriesCluster), logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
 					TraceTable:                 traceTable,

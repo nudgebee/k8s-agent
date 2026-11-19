@@ -7,6 +7,8 @@
 //	NUDGEBEE_ENDPOINT          - backend HTTP base URL (for discovery/alert forward)
 //	ACCOUNT_ID                 - tenant account id (sent in greeting; informational)
 //	CLUSTER_NAME               - cluster name (informational)
+//	TIMESERIES_CLUSTER         - cluster label on ClickHouse's TimeSeries data; filters
+//	                             PromQL sent to ClickHouse (empty = no filter)
 package config
 
 import (
@@ -24,6 +26,10 @@ type Config struct {
 	BackendEndpoint string
 	AccountID       string
 	ClusterName     string
+	// TimeSeriesCluster is the cluster label the collector puts on the
+	// node-agent metrics it writes to ClickHouse's TimeSeries table. Kept
+	// apart from ClusterName, which the runner also reports to the backend.
+	TimeSeriesCluster string
 
 	// Optional datasource URLs. Empty = subsystem disabled.
 	PrometheusURL     string
@@ -293,6 +299,7 @@ func FromEnv() (*Config, error) {
 		BackendEndpoint:       os.Getenv("NUDGEBEE_ENDPOINT"),
 		AccountID:             os.Getenv("ACCOUNT_ID"),
 		ClusterName:           os.Getenv("CLUSTER_NAME"),
+		TimeSeriesCluster:     os.Getenv("TIMESERIES_CLUSTER"),
 		PrometheusURL:         os.Getenv("PROMETHEUS_URL"),
 		PrometheusHeaders:     os.Getenv("PROMETHEUS_HEADERS"), // matches runner.yaml secret
 		LokiURL:               os.Getenv("LOKI_URL"),

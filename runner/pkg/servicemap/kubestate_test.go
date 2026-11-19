@@ -430,3 +430,40 @@ func TestBuild_KubernetesInventoryPastWindowWithoutRealPrometheus(t *testing.T) 
 		})
 	}
 }
+
+// On the ClickHouse fallback the queries select TimeSeriesCluster, the label
+// the collector writes; on a real Prometheus they keep ClusterName.
+func TestBuild_TimeSeriesClusterOnClickHouseOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		real        bool
+		wantCluster string // "" means no cluster matcher at all
+	}{
+		{"clickhouse fallback", false, `cluster="ts-uid"`},
+		{"real prometheus", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fp := newKubeTestService(t, trafficResponses, testCluster()...)
+			isReal := tc.real
+			s.HasPrometheus = func() bool { return isReal }
+			s.TimeSeriesCluster = "ts-uid"
+
+			if _, err := s.Build(context.Background(), FilterParams{Duration: 60}); err != nil {
+				t.Fatal(err)
+			}
+			fp.mu.Lock()
+			defer fp.mu.Unlock()
+			if len(fp.queries) == 0 {
+				t.Fatal("no queries sent")
+			}
+			for _, q := range fp.queries {
+				switch has := strings.Contains(q, "cluster="); {
+				case tc.wantCluster == "" && has:
+					t.Errorf("query has a cluster matcher on a real Prometheus: %s", q)
+				case tc.wantCluster != "" && strings.Contains(q, "container_") && !strings.Contains(q, tc.wantCluster):
+					t.Errorf("query lacks %s: %s", tc.wantCluster, q)
+				}
+			}
+		})
+	}
+}
