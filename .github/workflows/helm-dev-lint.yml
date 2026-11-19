@@ -311,6 +311,96 @@ jobs:
           '
           echo 'ok: query_data reads through the read-only ClickHouse user'
 
+      # clickhouse.timeseries (off by default) adds the node-agent TimeSeries
+      # table: ClickHouse's /prometheus/api/v1 handler, the Job that creates
+      # the table, and the collector pipeline in its second config file. Off,
+      # or with no bundled ClickHouse, none of it renders and the collector's
+      # second file is empty.
+      - name: Assert clickhouse.timeseries
+        run: |
+          render() { helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@"; }
+          check() {
+            python3 -c '
+          import sys, yaml
+          want_on = sys.argv[1] == "on"
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          def find(kind, name):
+              return next((d for d in docs if d["kind"] == kind and d["metadata"]["name"] == name), None)
+          ch = find("ConfigMap", "nudgebee-agent-clickhouse")
+          job = find("Job", "nudgebee-agent-ch-timeseries-table")
+          role = find("RoleBinding", "nudgebee-agent-collector-timeseries")
+          col = find("ConfigMap", "nudgebee-agent-collector-timeseries")
+          ts = yaml.safe_load(col["data"]["timeseries.yaml"]) if col else None
+          if not want_on:
+              assert ch is None or "20_timeseries.xml" not in ch["data"], "handler rendered"
+              assert job is None and role is None, "Job or RoleBinding rendered"
+              assert col is None or ts == {}, ts
+              sys.exit(0)
+          xml = ch["data"]["20_timeseries.xml"]
+          for want in ("<url_prefix>/prometheus/api/v1</url_prefix>", "<type>prometheus_api_v1</type>", "<table>node_agent_ts</table>", "<defaults/>"):
+              assert want in xml, want
+          assert job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+          script = job["spec"]["template"]["spec"]["containers"][0]["command"][-1]
+          for want in ("CREATE TABLE IF NOT EXISTS default.node_agent_ts ENGINE = TimeSeries", "PARTITION BY toDate(timestamp)", "INTERVAL 7 DAY", "ttl_only_drop_parts = 1"):
+              assert want in script, want
+          assert role["subjects"][0]["name"] == "nudgebee-agent-opentelemetry-collector", role["subjects"]
+          exp = ts["exporters"]["prometheus_remote_write/clickhouse_ts"]
+          assert exp["endpoint"] == "http://nudgebee-agent-clickhouse:8123/prometheus/api/v1/write", exp
+          assert exp["headers"]["X-ClickHouse-User"] == "default", exp
+          p = ts["service"]["pipelines"]["metrics/node_agent_ts"]
+          assert p["processors"][0] == "memory_limiter", p
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "nudgebee-agent-opentelemetry-collector")
+          c = dep["spec"]["template"]["spec"]["containers"][0]
+          assert "--config=/conf/nudgebee/timeseries.yaml" in c["args"], c["args"]
+          ' "$1"
+          }
+          fail() { echo "$*"; exit 1; }
+
+          render | check off || fail "default: timeseries rendered"
+          render --set clickhouse.timeseries.enabled=true | check on || fail "enabled: incomplete"
+          render --set clickhouse.timeseries.enabled=true --set opentelemetry-collector.enabled=false | check off \
+            || fail "no bundled ClickHouse: timeseries rendered"
+          # --reuse-values from a release without clickhouse.timeseries.
+          render --set clickhouse.timeseries=null | check off || fail "timeseries=null: render failed or rendered"
+          # ClickHouse would merge an extraOverrides <http_handlers> with the
+          # chart's into one broken rule, so the render refuses.
+          if render --set clickhouse.timeseries.enabled=true \
+               --set-string 'clickhouse.extraOverrides=<clickhouse><http_handlers><rule/></http_handlers></clickhouse>' >/dev/null 2>&1; then
+            fail "extraOverrides with <http_handlers>: render did not fail"
+          fi
+          # The RoleBinding names the ServiceAccount the collector pod runs as.
+          sa() { render --set clickhouse.timeseries.enabled=true "$@" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          rb = next(d for d in docs if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "nudgebee-agent-collector-timeseries")
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("opentelemetry-collector"))
+          print(rb["subjects"][0]["name"], dep["spec"]["template"]["spec"].get("serviceAccountName", "default"))'; }
+          for args in "" "--set opentelemetry-collector.serviceAccount.create=false" "--set opentelemetry-collector.serviceAccount.name=otel-sa"; do
+            read -r bound runs <<<"$(sa $args)"
+            [ "$bound" = "$runs" ] || fail "${args:-default}: RoleBinding names $bound, the collector runs as $runs"
+          done
+          # The cluster label and the runner's TIMESERIES_CLUSTER carry the same
+          # value; CLUSTER_NAME is never set. With no clusterName and no lookup
+          # (helm template) neither is set. An operator's own TIMESERIES_CLUSTER
+          # is not doubled.
+          cluster() { render --set clickhouse.timeseries.enabled=true "$@" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          col = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nudgebee-agent-collector-timeseries")
+          exp = yaml.safe_load(col["data"]["timeseries.yaml"])["exporters"]["prometheus_remote_write/clickhouse_ts"]
+          label = (exp.get("external_labels") or {}).get("cluster", "-")
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "nudgebee-agent-runner")
+          env = [e for c in dep["spec"]["template"]["spec"]["containers"] for e in c.get("env") or []]
+          ts = [e.get("value", "") for e in env if e["name"] == "TIMESERIES_CLUSTER"]
+          assert not any(e["name"] == "CLUSTER_NAME" for e in env), "CLUSTER_NAME set"
+          print(label, ",".join(ts) or "-")'; }
+          [ "$(cluster --set clickhouse.timeseries.clusterName=prod-eu)" = "prod-eu prod-eu" ] || fail "clusterName: label and env differ"
+          [ "$(cluster)" = "- -" ] || fail "no cluster known: label or env set"
+          [ "$(cluster --set clickhouse.timeseries.clusterName=prod-eu \
+                 --set 'runner.additional_env_vars[0].name=TIMESERIES_CLUSTER' --set 'runner.additional_env_vars[0].value=mine')" = "prod-eu mine" ] \
+            || fail "own TIMESERIES_CLUSTER: doubled or overridden"
+          echo 'ok: clickhouse.timeseries'
+
       # logs.collection is the one switch for where container logs go. node-agent
       # points the node-agent's log push at the bundled collector and is the only
       # thing that makes the runner report clickhouseLogsCollected. A value it
