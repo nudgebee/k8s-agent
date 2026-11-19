@@ -597,7 +597,9 @@ opentelemetry-collector:
   # A second config file, rendered by templates/collector-timeseries.yaml: the
   # node-agent pipeline into ClickHouse's TimeSeries table when
   # clickhouse.timeseries.enabled, otherwise nothing. Helm replaces lists, so
-  # an override of any of these three lists has to keep its entry.
+  # an override of any of these three lists has to keep its entry: dropping
+  # the mount but keeping the --config argument stops the collector from
+  # starting (config file not found), even with clickhouse.timeseries off.
   extraVolumes:
     - name: nudgebee-timeseries
       configMap:
@@ -832,13 +834,23 @@ clickhouse:
   #   extraVolumes, extraVolumeMounts and command.extraArgs: keep those
   #   entries when overriding the lists. Turning this on or off on a running
   #   install reaches the collector when its pod restarts.
+  # The pipeline scrapes every node agent, so the collector needs more memory:
+  # raise opentelemetry-collector.resources.limits.memory above the 1Gi
+  # default on larger clusters (a 24-node cluster runs at about 1.3GiB with a
+  # 2Gi limit) and watch the collector's memory.
+  # Where this was set up by hand, remove in the same change that turns it on:
+  # <prometheus><handlers> and <http_handlers> from clickhouse.extraOverrides
+  # (the render fails while <http_handlers> is there), and the collector's own
+  # metrics/node_agent_ts pipeline with its exporter and extension.
   timeseries:
     enabled: false
     # The cluster label on the written metrics, which the runner's queries
     # select (TIMESERIES_CLUSTER). Empty: the kube-system namespace's UID,
     # read at install. Under helm template (ArgoCD) that lookup finds nothing:
     # set this there, or the data has no cluster label (fine while only this
-    # cluster writes to the ClickHouse, as with the bundled one).
+    # cluster writes to the ClickHouse, as with the bundled one). Changing it
+    # later: the runner selects only the new label, so data written before
+    # the change (up to 7 days) drops out of queries until it expires.
     clusterName: ""
   # More volumes and mounts for the ClickHouse container. Both go through tpl.
   # The reader user is no longer mounted from here: an entry named
