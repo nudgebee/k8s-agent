@@ -160,6 +160,9 @@ func (m *Mutator) CreateWorkload(ctx context.Context, kind, namespace, name stri
 	if err != nil {
 		return nil, err
 	}
+	if containsRedactionMarker(u.Object) {
+		return nil, errors.New("mutate: create_workload: the manifest holds a redacted value, not a real one")
+	}
 	// Force kind/apiVersion so a body that omits them still targets the right
 	// GVR; name/namespace from params win over the body when provided (the
 	// delete/replace handlers do the same), otherwise we trust metadata.name.
@@ -213,10 +216,16 @@ func (m *Mutator) ReplaceWorkload(ctx context.Context, kind, namespace, name str
 	if entry.namespaced && namespace == "" {
 		return nil, fmt.Errorf("mutate: namespace required for %s", kind)
 	}
-
 	u, err := unstructuredFromBody(body)
 	if err != nil {
 		return nil, err
+	}
+	// A recorded manifest with redacted values is not the object as it was; replacing the
+	// workload with it would write the markers in (see redactionMarker). Checked on the
+	// normalized object, so a []byte or typed body is covered too.
+	if containsRedactionMarker(u.Object) {
+		return nil, fmt.Errorf("mutate: replace_workload %s/%s: the manifest holds a redacted value; "+
+			"roll it back with `kubectl rollout undo` or the tool that deploys it", kind, name)
 	}
 	// Force kind/apiVersion + name/namespace so a body without them still
 	// hits the right URL (kind is derived from the trigger event, not

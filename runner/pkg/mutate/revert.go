@@ -26,6 +26,35 @@ import (
 // change actually touched.
 const revertConflictRetries = 3
 
+// redactionMarker starts what Nudgebee stores in a recorded change in place of a
+// secret or an inline env value: "[redacted]" or "[redacted:<fingerprint>]". It is
+// never the field's real value, so writing it back would set the field to the
+// marker itself. The server already refuses such a revert; this is the agent's own
+// check, so a server or caller that does not can never put a marker into a workload.
+// Matched anywhere in a string: a credential inside a longer value (a connection
+// string's password) is replaced in place.
+const redactionMarker = "[redacted"
+
+func containsRedactionMarker(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.Contains(t, redactionMarker)
+	case map[string]any:
+		for _, child := range t {
+			if containsRedactionMarker(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range t {
+			if containsRedactionMarker(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RevertEntry is one recorded field change to undo. Path is the field path
 // as it appears in the diff evidence's updated_values; Old is the value the
 // field held before the change. HasOld is false when the change ADDED the
@@ -55,6 +84,12 @@ func (m *Mutator) RevertWorkload(ctx context.Context, kind, namespace, name stri
 	}
 	if entry.namespaced && namespace == "" {
 		return nil, fmt.Errorf("mutate: namespace required for %s", canonical)
+	}
+	for _, e := range entries {
+		if e.HasOld && containsRedactionMarker(e.Old) {
+			return nil, fmt.Errorf("mutate: revert %s/%s: %s holds a redacted value, not the one it had; "+
+				"roll it back with `kubectl rollout undo` or the tool that deploys it", canonical, name, e.Path)
+		}
 	}
 
 	ri := m.dynamic.Resource(entry.gvr)
