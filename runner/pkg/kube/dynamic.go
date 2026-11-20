@@ -83,6 +83,11 @@ type GetParams struct {
 	// callers that only need the key names. It has no effect on any other
 	// kind; Secret values are always blanked.
 	OmitDataValues bool
+	// Fields, when set, keeps only these dotted camelCase paths of each object
+	// (plus apiVersion, kind and metadata name/namespace/uid); see projectFields.
+	// It shrinks the reply, not the list the API server sends. Opt-in: older
+	// agents ignore the key and send whole objects, so a caller must handle both.
+	Fields []string
 }
 
 func ParseGetParams(p map[string]any) GetParams {
@@ -109,6 +114,7 @@ func ParseGetParams(p map[string]any) GetParams {
 		// Opt-in: older agents ignore the key and send the values, so a caller
 		// must not depend on them being blank.
 		OmitDataValues: boolParam(p, "omit_data_values"),
+		Fields:         strListParam(p, "fields"),
 	}
 	// Backward-compat with the legacy `kind`-based contract (and the UI built
 	// on it): callers that address a resource by `kind` ("Deployment") instead
@@ -277,6 +283,7 @@ func (p GetParams) isScoped() bool {
 // name/namespace filters to fn. A list error returns before fn is called.
 func (c *Client) eachItem(ctx context.Context, gvr schema.GroupVersionResource, p GetParams, fn func(map[string]any) error) error {
 	opts := metav1.ListOptions{LabelSelector: p.LabelSelector, FieldSelector: p.FieldSelector}
+	fields := newFieldTree(p.Fields)
 	// One name is selected server-side. Without this a lookup by name listed the
 	// whole namespace — or the cluster, when no namespace came with it — and
 	// threw away everything but one object.
@@ -338,6 +345,11 @@ func (c *Client) eachItem(ctx context.Context, gvr schema.GroupVersionResource, 
 		}
 		if p.OmitDataValues && gvr.Group == "" && gvr.Resource == "configmaps" {
 			omitConfigMapValues(obj)
+		}
+		// After redaction, so a projection can only remove fields, never bring
+		// a redacted value back.
+		if fields != nil {
+			obj = projectFields(obj, fields)
 		}
 		if err := fn(obj); err != nil {
 			return err
