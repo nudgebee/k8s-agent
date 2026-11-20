@@ -29,3 +29,18 @@ forwards only this namespace's alerts -- see `alertmanager:` in values.yaml for
 the two CR layouts that do work, or
 https://docs.nudgebee.com/docs/installation/agent/connect/alertmanager/
 ============================================================================
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (dig "timeseries" "enabled" false .Values.clickhouse) (not (include "nudgebee-agent.timeseriesCluster" .)) }}
+
+WARNING: clickhouse.timeseries is on, but the cluster name is unknown: the
+kube-system lookup found nothing (as under helm template or ArgoCD) and
+clickhouse.timeseries.clusterName is empty. Node-agent metrics go to ClickHouse
+without a cluster label. That is fine while only this cluster writes to that
+ClickHouse (the bundled one); otherwise set clickhouse.timeseries.clusterName.
+{{- end }}
+{{- if and (include "nudgebee-agent.clickhouse.installed" .) (dig "timeseries" "enabled" false .Values.clickhouse) }}
+
+clickhouse.timeseries is on: the collector now scrapes every node agent. On
+larger clusters raise opentelemetry-collector.resources.limits.memory above the
+1Gi default and watch the collector's memory. Turning the flag on or off on a
+running install reaches the collector when its pod restarts.
+{{- end }}

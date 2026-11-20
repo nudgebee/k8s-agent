@@ -14,7 +14,7 @@
 
 # golang 1.27.3: 1.27.1 builds carry the stdlib CVEs GO-2026-6612 (critical) and
 # GO-2026-6603/6605/6607/6608/6610/6611/6613/6617 (high), fixed in 1.27.2.
-FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 WORKDIR /src
 
 ARG VERSION=dev
@@ -46,7 +46,7 @@ RUN go build -tags timetzdata \
 # `fork/exec /usr/local/bin/kubectl: exec format error` (pkg/kube/exec.go).
 # Pinned to BUILDPLATFORM: Go cross-compiles, so there is no reason to run this
 # emulated on the arm64 leg.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS kubectl
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS kubectl
 ARG TARGETARCH
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 ARG KUBECTL_VERSION=v1.36.6
@@ -83,11 +83,11 @@ RUN set -eu; \
 
 # Throwaway stage: bring the CA trust store up to date. Only its files are
 # copied into the final image (never /var/lib/rpm or system binaries).
-FROM registry.access.redhat.com/ubi9@sha256:87f66688da4e206d5a1877088626c542288a5ccd97898cf363b588d57817e6be AS pkgs
+FROM registry.access.redhat.com/ubi9@sha256:e45746866f611d164042b961cd83f1093c4fdb422d9b99fcf23ff951626044f8 AS pkgs
 RUN dnf install -y --setopt=install_weak_deps=false --nodocs ca-certificates \
  && dnf clean all
 
-FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:d3499a0896e2d6a1642f922615831bc5c2fd513bbb34f3446cabba530d9d54a2
+FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:dbd325b96bcd432dd42816d31412bdf1dc0fb973b79ed310344bc23c76c068db
 ARG IMAGE_VERSION=0.0.0
 ARG IMAGE_RELEASE=1
 LABEL name="nudgebee-agent" \

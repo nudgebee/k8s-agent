@@ -73,6 +73,32 @@ data:
       <listen_host>0.0.0.0</listen_host>
       <remote_servers remove="remove"/>
     </clickhouse>
+  {{- if (dig "timeseries" "enabled" false .Values.clickhouse) }}
+  {{- /* ClickHouse merges two <http_handlers> blocks into one corrupt rule
+         rather than adding the rules, so an extraOverrides with its own block
+         would break both. */}}
+  {{- if contains "<http_handlers" (default "" .Values.clickhouse.extraOverrides) }}
+  {{- fail "clickhouse.timeseries.enabled adds an <http_handlers> rule for /prometheus/api/v1, and clickhouse.extraOverrides defines <http_handlers> too: ClickHouse would merge them into one broken rule. Remove <http_handlers> from extraOverrides, or turn clickhouse.timeseries off and keep your own handlers." }}
+  {{- end }}
+  # Prometheus remote write and PromQL queries over the node-agent TimeSeries
+  # table (clickhouse.timeseries), on the HTTP port, as the caller's ClickHouse
+  # user. <defaults/> keeps ClickHouse's own handlers (/ping for the probes,
+  # SQL queries), which listing any handler would otherwise turn off.
+  20_timeseries.xml: |
+    <clickhouse>
+      <http_handlers>
+        <rule>
+          <url_prefix>/prometheus/api/v1</url_prefix>
+          <handler>
+            <type>prometheus_api_v1</type>
+            <database>default</database>
+            <table>node_agent_ts</table>
+          </handler>
+        </rule>
+        <defaults/>
+      </http_handlers>
+    </clickhouse>
+  {{- end }}
 {{- if .Values.clickhouse.extraOverrides }}
 ---
 apiVersion: v1
