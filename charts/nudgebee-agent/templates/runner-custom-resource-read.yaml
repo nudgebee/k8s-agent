@@ -1,0 +1,95 @@
+{{- /*
+Opt-in (runner.customResourceRead.enabled): read access behind the UI's CRDs
+tab, which lists the cluster's CRDs and, per CRD, its objects (get_resource,
+all namespaces). Read-only and rendered in both standard and read-only mode.
+
+  - customresourcedefinitions: the CRD list itself.
+  - viewRole: a binding to the built-in `view` ClusterRole, which reads
+    built-in kinds plus every CRD whose operator labels its roles
+    aggregate-to-view (cert-manager, Argo, Elastic, ...). The default `view`
+    grants no Secrets; anything a cluster later aggregates into `view` is
+    granted to the runner too.
+  - groups: API group -> resources, always get/list/watch, so values cannot
+    widen the verbs. A map, not a list, so an install adds a group without
+    repeating the defaults (Helm merges maps, replaces lists) and drops one
+    with `<group>: null`. The core group, `*` and `secrets` are refused at
+    render time: the CI Secrets gate only sees the chart's own values.
+
+The default groups name VictoriaMetrics and prometheus-operator kinds, whose
+operators do not aggregate to `view`. Named, not `*`: vmusers
+(password/bearerToken may be inline) and vmalertmanagers (configRawYaml may
+embed receiver credentials) are left out on purpose. Secret-type kinds are
+also refused by the runner itself (pkg/kube/secretpolicy.go).
+*/}}
+{{- $cr := .Values.runner.customResourceRead }}
+{{- if and $cr (not (kindIs "map" $cr)) }}
+{{- fail "runner.customResourceRead is a map: set runner.customResourceRead.enabled=true (not runner.customResourceRead=true)" }}
+{{- end }}
+{{- if and (kindIs "map" $cr) $cr.enabled }}
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-custom-resource-read
+rules:
+  - apiGroups:
+      - "apiextensions.k8s.io"
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  {{- range $group, $resources := $cr.groups }}
+  {{- if $resources }}
+  {{- if not (kindIs "slice" $resources) }}
+  {{- fail (printf "runner.customResourceRead.groups.%s must be a list of resources" $group) }}
+  {{- end }}
+  {{- if or (eq $group "") (eq $group "*") }}
+  {{- fail (printf "runner.customResourceRead.groups: %q is not allowed; use runner.customClusterRoleRules for core or wildcard grants" $group) }}
+  {{- end }}
+  {{- range $resources }}
+  {{- if or (eq . "*") (eq . "secrets") }}
+  {{- fail (printf "runner.customResourceRead.groups.%s: %q is not allowed" $group .) }}
+  {{- end }}
+  {{- end }}
+  - apiGroups:
+      - {{ $group | quote }}
+    resources:
+      {{- range $resources }}
+      - {{ . }}
+      {{- end }}
+    verbs:
+      - get
+      - list
+      - watch
+  {{- end }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-custom-resource-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-custom-resource-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+{{- if $cr.viewRole }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

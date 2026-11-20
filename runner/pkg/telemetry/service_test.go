@@ -581,6 +581,26 @@ func TestActivityStats_ClickhouseLogsFieldsAlwaysEmitted(t *testing.T) {
 	}
 }
 
+// The agent no longer probes OpenCost, but a probe must still report it as off
+// explicitly: the collector merges the payload into what an older agent stored,
+// so a missing key would keep opencostConnection true and the server would never
+// take over cost for that cluster.
+func TestProbe_OpencostReportedOff(t *testing.T) {
+	s := &Service{HTTP: &http.Client{Timeout: time.Second}}
+	buf, err := json.Marshal(s.probe(context.Background(), Datasources{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"opencostConnection":false`, `"opencostConnectionError":""`} {
+		if !strings.Contains(string(buf), key) {
+			t.Errorf("probe output lacks %s: %s", key, buf)
+		}
+	}
+	if strings.Contains(string(buf), "opencostUrl") {
+		t.Errorf("probe output still reports an OpenCost URL: %s", buf)
+	}
+}
+
 // TestRedactReportedURLs_CoversEveryField is the guard for redactReportedURLs'
 // explicit field lists: it fills every URL-, error- or config-shaped field of
 // ActivityStats with a credential-bearing URL, so a field added later without

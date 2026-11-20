@@ -1,3 +1,4 @@
+{{- if include "nudgebee-agent.kubewatchDeployed" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,9 +27,8 @@ spec:
     spec:
       serviceAccountName: {{ include "nudgebee-agent.fullname" . }}-forwarder-service-account
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
-      {{- if .Values.kubewatch.imagePullSecrets }}
-      imagePullSecrets:
-      {{- toYaml .Values.kubewatch.imagePullSecrets | nindent 6 }}
+      {{- with include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.kubewatch.imagePullSecrets "root" .) }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
       - name: kubewatch
@@ -80,3 +80,4 @@ spec:
       {{- if .Values.kubewatch.tolerations }}
       tolerations:  {{ toYaml .Values.kubewatch.tolerations | nindent 8 }}
       {{- end }}
+{{ end -}}

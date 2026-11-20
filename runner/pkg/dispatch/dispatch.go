@@ -315,6 +315,14 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 			},
 		}
 		if err := d.auth.Validate(authReq); err != nil {
+			// A second delivery of a mutation already received: its outcome is
+			// the first delivery's. A 401 here would tell the caller a change
+			// that may have applied was denied.
+			if errors.Is(err, auth.ErrDuplicateDelivery) {
+				logger.Warn("dispatch: duplicate delivery of a request already received, not running it again", "err", err)
+				d.respond(send, raw.RequestID, 409, map[string]any{"error": err.Error()})
+				return
+			}
 			logger.Warn("dispatch: auth rejected", "err", err)
 			d.respond(send, raw.RequestID, 401, map[string]any{"error": err.Error()})
 			return

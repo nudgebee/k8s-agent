@@ -70,6 +70,12 @@ type Forwarder struct {
 	OnForward func()
 	OnDrop    func(source string)
 
+	// KubewatchSuperseded is set when the runner watches Kubernetes itself
+	// (pkg/k8swatch). /api/handle then drops kubewatch's changes, counted as
+	// "superseded", so one change never produces a Finding twice while a
+	// cluster still runs kubewatch. Set before serving.
+	KubewatchSuperseded bool
+
 	// KubewatchMetrics, if set, receives the kubewatch intake's per-kind
 	// outcome counts and latencies.
 	KubewatchMetrics KubewatchMetrics
@@ -245,6 +251,10 @@ func (f *Forwarder) handleK8sEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if probe.Type == "cluster_snapshot" {
 		f.Logger.Info("kubewatch: cluster_snapshot dropped (pkg/discovery already handles full sync)")
+		return
+	}
+	if f.KubewatchSuperseded {
+		f.recordKubewatch("other", KubewatchOutcomeSuperseded)
 		return
 	}
 	if len(probe.Data) == 0 {

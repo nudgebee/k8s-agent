@@ -17,10 +17,9 @@ openshift:
   # `nodeAgent.enabled: false` to install without any privileged workload.
   createPrivilegedScc: true
 
-# The ClickHouse subchart hardcodes uid/fsGroup 1001, which OpenShift's
-# restricted SCC rejects (the namespace's own UID range applies instead). With
-# these off, the SCC assigns the UID and fsGroup. Only used when ClickHouse is
-# enabled.
+# ClickHouse runs with uid/fsGroup 1001, which OpenShift's restricted SCC
+# rejects (the namespace's own UID range applies instead). With these off, the
+# SCC assigns the UID and fsGroup. Only used when ClickHouse is enabled.
 clickhouse:
   podSecurityContext:
     enabled: false

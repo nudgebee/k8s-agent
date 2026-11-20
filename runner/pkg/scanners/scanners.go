@@ -175,6 +175,13 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		orchestratorLabel: orchestratorValue,
 		jobUUIDLabel:      jobUUID,
 	}
+	// The pod carries the Job's labels too, so anything watching pods (the
+	// agent's own finding triggers, kube-state-metrics alerting) can tell a scan
+	// pod from a workload pod without looking up its owner.
+	podLabels := map[string]string{jobNameSelectorLabel: jobName}
+	for k, v := range labels {
+		podLabels[k] = v
+	}
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -187,7 +194,7 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 			ActiveDeadlineSeconds:   &deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{jobNameSelectorLabel: jobName},
+					Labels: podLabels,
 				},
 				Spec: podSpec,
 			},

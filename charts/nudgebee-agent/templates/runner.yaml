@@ -107,10 +107,6 @@ stringData:
   {{- else }}
   NUDGEBEE_AUTH_SECRET_KEY: {{ .Values.runner.nudgebee.auth_secret_key }}
   {{- end }}
-  # Tie cost polling/discovery to the OpenCost subchart toggle. When OpenCost is
-  # disabled the runner must NOT autodiscover a neighbouring namespace's OpenCost,
-  # so the server side detects cost is off and takes over centrally.
-  OPENCOST_ENABLED: {{ .Values.opencost.enabled | quote }}
   {{- if .Values.globalConfig.prometheus_url }}
   PROMETHEUS_URL: {{ .Values.globalConfig.prometheus_url | quote }}
   {{- end }}
@@ -251,4 +247,7 @@ stringData:
   {{- end }}
   {{- if .Values.runner.serviceMapSource }}
   SERVICE_MAP_SOURCE: {{ .Values.runner.serviceMapSource | quote }}
+  {{- end }}
+  {{- with .Values.runner.serviceMapInventory }}
+  SERVICE_MAP_INVENTORY: {{ . | quote }}
   {{- end }}

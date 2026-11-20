@@ -40,6 +40,7 @@ const (
 	KubewatchOutcomeShed        = "shed"         // queue full; dropped
 	KubewatchOutcomeInvalid     = "invalid"      // unparseable payload
 	KubewatchOutcomePanic       = "panic"        // a matcher panicked
+	KubewatchOutcomeSuperseded  = "superseded"   // the runner's own watch is on; kubewatch ignored
 )
 
 // Intake defaults, used when SetKubewatchQueue is not called.
@@ -134,6 +135,17 @@ func (f *Forwarder) enqueueKubewatch(job kubewatchJob, key string) bool {
 		f.kwBytes.Add(-n)
 		return false
 	}
+}
+
+// HandleK8sChange matches one Kubernetes change from the runner's own watch
+// (pkg/k8swatch) on the caller's goroutine. data is kubewatch's CloudEvent
+// `data` object; it goes through the same decode, match and forward path as
+// a change kubewatch posted, and becomes the evidence the same way.
+func (f *Forwarder) HandleK8sChange(operation, kind string, data json.RawMessage) {
+	if f.Engine == nil {
+		return
+	}
+	f.matchKubewatch(kubewatchJob{operation: operation, kind: kind, data: data, queued: time.Now()})
 }
 
 func (f *Forwarder) runKubewatchWorker(ch <-chan kubewatchJob) {

@@ -140,6 +140,9 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 	if ev.Obj == nil {
 		return nil
 	}
+	if AgentOwned(ev.Obj) {
+		return nil
+	}
 	matches := make([]Match, 0, 1)
 	ec := e.enrichContext()
 	for i := range e.specs {
@@ -269,6 +272,18 @@ func (e *Engine) HandlesKind(kind string) bool {
 	return false
 }
 
+// Handles reports whether any matcher reads changes of this kind and
+// operation. The runner's own watch uses it to skip encoding changes nothing
+// would match: every built-in matcher reads updates only.
+func (e *Engine) Handles(kind, operation string) bool {
+	for i := range e.specs {
+		if kindMatches(e.specs[i].Kind, kind) && operationMatches(e.specs[i].Operations, operation) {
+			return true
+		}
+	}
+	return false
+}
+
 // kindMatches compares a spec's Kind against the kind kubewatch reported.
 // Case-insensitive: kubewatch's per-resource handlers are not consistent
 // about casing across kinds ("Deployment" but "configmap"), and a spec
@@ -292,4 +307,24 @@ func operationMatches(specOps []string, eventOp string) bool {
 		}
 	}
 	return false
+}
+
+// agentManagedByLabel / agentManagedByValue mark objects the agent creates for
+// its own work: scan Jobs and their pods (pkg/scanners) and profiler pods
+// (pkg/podexec). Keep in sync with those packages.
+const (
+	agentManagedByLabel = "app.kubernetes.io/managed-by"
+	agentManagedByValue = "nudgebee-agent"
+)
+
+// AgentOwned reports whether obj is one of the agent's own Jobs or pods. Their
+// failures are not the cluster's problems: a scan that cannot pull its image or
+// runs out of memory is reported through the scan's own result, and raising a
+// finding for it as well would put the agent's housekeeping in the user's
+// event stream (once per scan, on every agent watching the cluster).
+func AgentOwned(obj map[string]any) bool {
+	m, _ := obj["metadata"].(map[string]any)
+	labels, _ := m["labels"].(map[string]any)
+	v, _ := labels[agentManagedByLabel].(string)
+	return v == agentManagedByValue
 }

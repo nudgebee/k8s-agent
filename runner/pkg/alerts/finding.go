@@ -642,12 +642,11 @@ func severityToPriority(severity string) string {
 // so existing UI parsers (KubernetesPVC.jsx walks blocks[0]) keep
 // reading the raw JSON from index 0.
 func newJSONEvidence(findingID, accountID string, raw json.RawMessage, extras []map[string]any) Evidence {
-	blocks := make([]map[string]any, 0, 1+len(extras))
-	blocks = append(blocks, map[string]any{
+	blocks := []map[string]any{{
 		"type":            "json",
 		"data":            cappedRawPayload(raw),
 		"additional_info": map[string]any{},
-	})
+	}}
 	for _, extra := range extras {
 		if extra == nil {
 			continue

@@ -2,9 +2,13 @@ package servicemap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,12 +30,27 @@ type Service struct {
 	// Build is PromQL only, as before.
 	CH     *chclient.Client
 	Source Source
-	Logger *slog.Logger
+	// Inventory InventoryKubernetes reads pods, readiness, replicas, labels
+	// and services from Kube instead of the kube_* queries.
+	Inventory Inventory
+	Kube      *KubeCache
+	// HasPrometheus, when set, says whether Prom is a real Prometheus (one
+	// with kube-state metrics), not ClickHouse's Prometheus query API. Only
+	// then does a past window take its inventory from the kube_* queries
+	// instead of the cache. Nil: any configured URL counts, as before.
+	HasPrometheus func() bool
+	// TimeSeriesCluster is the cluster label on ClickHouse's TimeSeries
+	// data. While Prom is ClickHouse's Prometheus query API (HasPrometheus
+	// false) it filters the queries in place of ClusterName; empty, they
+	// select no cluster.
+	TimeSeriesCluster string
+	Logger            *slog.Logger
 	// NodeAgentCount, when set, lets the ClickHouse coverage check confirm
 	// that every running node agent is being scraped into ClickHouse.
 	NodeAgentCount NodeAgentCounter
 
-	summaryReady atomic.Bool // set by StartSummary once the tables exist
+	summaryReady atomic.Bool  // set by StartSummary once the tables exist
+	kubeWarnedAt atomic.Int64 // unix nanos of the last "cache unavailable" warning
 
 	shadowMu   sync.Mutex
 	lastShadow map[string]time.Time
@@ -65,6 +84,37 @@ func ParseSource(v string) (Source, bool) {
 	}
 	return SourcePrometheus, false
 }
+
+// Inventory is where the map's pods, readiness, replicas, labels and services
+// come from.
+type Inventory string
+
+const (
+	// InventoryPrometheus reads them with the kube_* queries (the default).
+	InventoryPrometheus Inventory = "prometheus"
+	// InventoryKubernetes reads them from the runner's informer cache, so the
+	// map needs no kube-state-metrics. A window that ends more than
+	// kubeCacheMaxAge ago still uses the kube_* queries when a Prometheus is
+	// configured: the cache holds the cluster as it is now.
+	InventoryKubernetes Inventory = "kubernetes"
+)
+
+// ParseInventory maps the SERVICE_MAP_INVENTORY value to an Inventory;
+// anything it does not recognise is reported as not ok so the caller can warn
+// and keep the default.
+func ParseInventory(v string) (Inventory, bool) {
+	switch i := Inventory(strings.ToLower(strings.TrimSpace(v))); i {
+	case "", InventoryPrometheus:
+		return InventoryPrometheus, true
+	case InventoryKubernetes:
+		return i, true
+	}
+	return InventoryPrometheus, false
+}
+
+// kubeCacheMaxAge is how far before now a window may end and still take its
+// inventory from the cache when a Prometheus could answer for that time.
+var kubeCacheMaxAge = 10 * time.Minute
 
 // shadowInterval caps how often shadow mode re-runs the ClickHouse build for
 // the same window and filter: SLO and anomaly checks call service_map often,
@@ -107,15 +157,18 @@ func New(prom *prometheus.Client, clusterName string) *Service {
 // is set), constructs the world, and renders applications. Returns the
 // list ready for JSON encoding.
 func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, error) {
-	if s.Prom == nil {
-		return nil, fmt.Errorf("servicemap: prometheus client not configured")
-	}
-
 	end := time.Now().UTC()
 	if p.EndTime != "" {
 		if t, err := time.Parse(time.RFC3339, p.EndTime); err == nil {
 			end = t
 		}
+	}
+	kube, kubeErr := s.kubeRows(end)
+	if s.Prom == nil && (kube == nil || s.source() != SourceClickHouse) {
+		if kubeErr != nil {
+			return nil, fmt.Errorf("servicemap: %w and no prometheus to fall back to", kubeErr)
+		}
+		return nil, fmt.Errorf("servicemap: prometheus client not configured")
 	}
 	durationMin := p.Duration
 	if durationMin <= 0 {
@@ -151,13 +204,16 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		nsFilter = dictToPrometheusFilter(map[string]string{"namespace": p.WorkloadNamespace})
 	}
 	clusterFilter := ""
-	if s.ClusterName != "" {
-		clusterFilter = `cluster="` + s.ClusterName + `",`
+	if c := s.queryCluster(); c != "" {
+		clusterFilter = `cluster=` + strconv.Quote(c) + `,`
 	}
 
 	queryList := Queries
 	if p.WorkloadName != "" || p.WorkloadNamespace != "" {
 		queryList = ApplicationQueries
+	}
+	if kube != nil {
+		queryList = withoutKube(queryList)
 	}
 
 	// Each query is evaluated once, at the end of the window, over the whole
@@ -172,10 +228,19 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 
 	// ClickHouse is read over the same window the PromQL $RANGE spans.
 	start = end.Add(-window)
+	var failed queryFailures
 	fetch := func(ctx context.Context, keys map[string]string) map[string][]promResult {
-		return s.fetchProm(ctx, keys, endStr, func(q string) string {
+		if !s.promReady() {
+			// Only reached without a Prometheus when ClickHouse cannot serve
+			// the window: the map cannot be drawn.
+			failed.add(slices.Collect(maps.Keys(keys)))
+			return map[string][]promResult{}
+		}
+		metrics, bad := s.fetchProm(ctx, keys, endStr, func(q string) string {
 			return expandPlaceholders(q, rangeStr, srcFilter, dstFilter, podFilter, nsFilter, clusterFilter)
 		})
+		failed.add(bad)
+		return metrics
 	}
 
 	var metrics map[string][]promResult
@@ -184,7 +249,11 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 		metrics = s.clickhouseMetrics(ctx, start, end, window, p, queryList, fetch)
 	case SourceShadow:
 		metrics = fetch(ctx, queryList)
+		maps.Copy(metrics, kube)
 		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := failed.err(s.logger()); err != nil {
 			return nil, err
 		}
 		apps := render(build(metrics))
@@ -193,12 +262,80 @@ func (s *Service) Build(ctx context.Context, p FilterParams) ([]Application, err
 	default:
 		metrics = fetch(ctx, queryList)
 	}
+	maps.Copy(metrics, kube)
 	// Queries cut short by the caller's deadline are dropped, so the map would
 	// be empty or partial; report that instead of returning it as "no edges".
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := failed.err(s.logger()); err != nil {
+		return nil, err
+	}
 	return render(build(metrics)), nil
+}
+
+// kubeRows is the kube_* rows from the informer cache, or nil when the map
+// takes them from Prometheus: InventoryPrometheus, no cache, a cache not
+// synced yet, or a window that ended too long ago for the cache to describe
+// it while a Prometheus can. The error is why the cache could not answer.
+func (s *Service) kubeRows(end time.Time) (map[string][]promResult, error) {
+	if s.Inventory != InventoryKubernetes || s.Kube == nil {
+		return nil, nil
+	}
+	if time.Since(end) > kubeCacheMaxAge && s.kubeQueries() {
+		return nil, nil
+	}
+	rows, err := s.Kube.rows()
+	if err != nil {
+		if s.kubeQueries() && s.shouldWarnKube() {
+			s.logger().Warn("service map: kubernetes cache unavailable, using kube_* queries", "err", err)
+		}
+		return nil, err
+	}
+	return rows, nil
+}
+
+// kubeWarnEvery limits the "cache unavailable" warning: a cache that never
+// syncs (missing RBAC, say) would otherwise log on every request.
+const kubeWarnEvery = time.Minute
+
+func (s *Service) shouldWarnKube() bool {
+	now := time.Now().UnixNano()
+	last := s.kubeWarnedAt.Load()
+	return now-last >= int64(kubeWarnEvery) && s.kubeWarnedAt.CompareAndSwap(last, now)
+}
+
+// withoutKube drops the kube_* queries the informer cache answers.
+func withoutKube(queryList map[string]string) map[string]string {
+	out := make(map[string]string, len(queryList))
+	for k, q := range queryList {
+		if !strings.HasPrefix(k, "kube_") {
+			out[k] = q
+		}
+	}
+	return out
+}
+
+// promReady reports whether a Prometheus is configured to query.
+func (s *Service) promReady() bool {
+	return s.Prom != nil && s.Prom.URL() != ""
+}
+
+// queryCluster is the cluster the queries select: TimeSeriesCluster while
+// Prom is ClickHouse's Prometheus query API, even when empty (the TimeSeries
+// data carries no other cluster label, so ClusterName would match nothing),
+// else ClusterName.
+func (s *Service) queryCluster() string {
+	if s.HasPrometheus != nil && !s.HasPrometheus() {
+		return s.TimeSeriesCluster
+	}
+	return s.ClusterName
+}
+
+// kubeQueries says Prom can answer the kube_* queries: configured, and a real
+// Prometheus when HasPrometheus says which.
+func (s *Service) kubeQueries() bool {
+	return s.promReady() && (s.HasPrometheus == nil || s.HasPrometheus())
 }
 
 // clickhouseMetrics reads the edges and container health from ClickHouse
@@ -242,8 +379,9 @@ func (s *Service) fetchSummary(ctx context.Context, start, end time.Time, p Filt
 }
 
 // fetchProm runs the given queries in parallel, at most MaxParallel at a time.
-// A query that fails is left out rather than failing the whole map.
-func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, endStr string, expand func(string) string) map[string][]promResult {
+// A query that fails is left out of the result and its key returned in failed;
+// Build decides whether the map can be drawn without it.
+func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, endStr string, expand func(string) string) (metrics map[string][]promResult, failed []string) {
 	type fetchResult struct {
 		key  string
 		data []promResult
@@ -279,16 +417,71 @@ func (s *Service) fetchProm(ctx context.Context, queryList map[string]string, en
 	wg.Wait()
 	close(resultsCh)
 
-	metrics := map[string][]promResult{}
+	metrics = map[string][]promResult{}
 	for r := range resultsCh {
 		if r.err != nil {
-			// Don't fail the whole map for one bad query — log via the
-			// caller. Continue with partial data.
+			s.logger().Warn("service map: prometheus query failed", "key", r.key, "err", r.err)
+			failed = append(failed, r.key)
 			continue
 		}
 		metrics[r.key] = r.data
 	}
-	return metrics
+	return metrics, failed
+}
+
+// optionalQueries only decorate applications that the other queries already
+// place: pod labels and container health. Without them the map is still right,
+// just less detailed, so their failure is logged and the map is drawn anyway.
+var optionalQueries = map[string]bool{
+	"kube_pod_labels":           true,
+	"container_oom_kills_total": true,
+	"container_restarts":        true,
+	"container_throttled_time":  true,
+	"container_volume_size":     true,
+	"container_volume_used":     true,
+}
+
+// errQueriesFailed is Build's error when a query the map's shape depends on
+// failed. A map drawn without it is missing applications or links but looks
+// complete, and the knowledge graph builds its CALLS edges from it.
+var errQueriesFailed = errors.New("servicemap: prometheus queries the map depends on failed")
+
+// queryFailures collects the keys of failed queries across the fetches of one
+// Build, which may run concurrently (see clickhouseMetrics).
+type queryFailures struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (f *queryFailures) add(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	f.mu.Lock()
+	f.keys = append(f.keys, keys...)
+	f.mu.Unlock()
+}
+
+// err is errQueriesFailed naming every required query that failed, or nil when
+// only optional ones did.
+func (f *queryFailures) err(logger *slog.Logger) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var required []string
+	for _, k := range f.keys {
+		if !optionalQueries[k] {
+			required = append(required, k)
+		}
+	}
+	if len(required) == 0 {
+		if len(f.keys) > 0 {
+			logger.Info("service map: drawn without optional queries that failed", "keys", f.keys)
+		}
+		return nil
+	}
+	sort.Strings(required)
+	logger.Error("service map: required prometheus queries failed, not drawing a partial map", "keys", required)
+	return fmt.Errorf("%w: %s", errQueriesFailed, strings.Join(required, ", "))
 }
 
 // kubeKeys keeps the kube-state-metrics entries of a query list or result

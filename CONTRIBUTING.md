@@ -60,7 +60,7 @@ Both must pass before merge.
 
 ## Releases
 
-Releases are cut from `main` by the maintainers using `release.yml` (publishes a packaged chart to the GitHub Pages Helm repo at `https://nudgebee.github.io/k8s-agent/`).
+Releases are cut from `main` by the maintainers using `release.yml` (publishes a packaged chart to the GitHub Pages Helm repo at `https://nudgebee.github.io/k8s-agent/` and to `oci://ghcr.io/nudgebee/charts/nudgebee-agent`). `publish-chart-oci.yml` pushes already-released versions to the OCI registry, for backfills and to recover a failed OCI step.
 
 ## Code of Conduct
 

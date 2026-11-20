@@ -8,10 +8,12 @@ global:
   # default StorageClass, set to a name (e.g. "gp3", "managed-csi") on clusters
   # that have no default, or to "-" to disable dynamic provisioning and bind a
   # pre-created PV. When set, this wins over `clickhouse.persistence.storageClass`.
-  # Helm propagates this to every subchart, but only subcharts that read it act
-  # on it — the OpenCost one does not, so if you enable its PVC set
-  # `opencost.opencost.exporter.persistence.storageClass` too.
   storageClass: ""
+  # Pull secrets added to every pod this chart renders and to the runner's
+  # ServiceAccount, after each component's own list. Secret names or
+  # {name: ...} entries. The opentelemetry-collector subchart reads only its
+  # own opentelemetry-collector.imagePullSecrets.
+  imagePullSecrets: []
 enablePrometheusStack: true
 # Labels stamped onto the PrometheusRule, ServiceMonitor and PodMonitor this chart ships,
 # so the cluster's Prometheus will actually select them. Must match the Prometheus CR's
@@ -42,6 +44,13 @@ globalConfig:
 enableServiceMonitors: true
 # parameters for the nudgebee forwarder deployment
 kubewatch:
+  # Deploys kubewatch (the `forwarder` Deployment, its ServiceAccount,
+  # ClusterRole, ClusterRoleBinding and ConfigMap), which posts every
+  # Kubernetes change to the runner for alert matching. Not deployed when
+  # runner.k8sWatch.enabled=true, where the runner watches the cluster itself;
+  # config.namespace and config.resource below then apply to that watch.
+  # Setting both false is rejected: nothing would raise change alerts.
+  enabled: true
   image:
     repository: ghcr.io/nudgebee/kubewatch
     tag: 2.14.1-nb.4
@@ -209,6 +218,16 @@ runner:
     # kubewatchQueueSize: 2048     # kubewatch events allowed to wait; beyond it they are shed and counted
     # kubewatchQueueMaxBytes: 67108864  # bytes of waiting kubewatch events (64 MiB); beyond it they are shed
     # eventsCache: true            # serve Finding event tables from an Event informer instead of API Lists
+  # The runner watches the Kubernetes objects its alert matchers read, with its
+  # own informers, instead of receiving them from kubewatch. While on, the
+  # runner ignores kubewatch's posts, so set kubewatch.enabled=false with it.
+  # The runner watches the cluster itself and matches changes, instead of
+  # kubewatch posting them; kubewatch is then not deployed. Covers the same
+  # namespace and kinds as kubewatch.config.namespace / kubewatch.config.resource.
+  k8sWatch:
+    enabled: false
+    # workers: 8          # workers matching changes; one object is never matched by two at once
+    # maxPending: 10000   # objects with changes waiting; updates to one object coalesce; beyond it changes are shed and counted
   tolerations: []
   annotations: {}
   nodeSelector: ~
@@ -245,6 +264,13 @@ runner:
   # not here. Set to false for a strictly read-only deployment where every
   # mutate action — light-action or not — is unregistered at startup.
   mutateEnabled: true
+  # Refuse unsigned pod_script_run_enricher requests (runs a pod from a given
+  # image and command, with env from a Secret). With this on, a request needs a
+  # relay signature (runner.nudgebee.relay_signing_public_key) or an HMAC /
+  # partial-keys signature. Off by default: requests the relay cannot sign
+  # (HTTP fallback, signing turned off, clock skew) would be refused, which
+  # breaks database connection tests and scripted runbook steps on this cluster.
+  podScriptRunRequireSignature: false
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
   # Job. An image scan runs the target image as its own container, and the
@@ -268,6 +294,56 @@ runner:
   # cluster. Off by default: the upgrade check then reports Helm release
   # compatibility as unknown. Also applies under runner.readOnly.
   helmReleaseDiscovery: false
+  # Read access for the UI's CRDs tab. Read-only (get/list/watch); also
+  # applies under runner.readOnly. Off by default: the CRDs tab then shows
+  # "not allowed" until enabled. See templates/runner-custom-resource-read.yaml
+  # for what is left out and why.
+  customResourceRead:
+    enabled: false
+    # Bind the built-in `view` ClusterRole (no Secrets by default): built-in
+    # kinds plus every CRD whose operator aggregates to `view`.
+    viewRole: true
+    # API group -> resources to read. A map so an install can add a group
+    # without repeating these (Helm merges maps), e.g.
+    #   --set-json 'runner.customResourceRead.groups={"traefik.io":["ingressroutes"]}'
+    # and drop one with `<group>: null`. The core group, "*" and "secrets"
+    # fail the render.
+    groups:
+      # vmusers and vmalertmanagers are left out: they can carry credentials inline.
+      operator.victoriametrics.com:
+        - vlagents
+        - vlclusters
+        - vlogs
+        - vlsingles
+        - vmagents
+        - vmalertmanagerconfigs
+        - vmalerts
+        - vmanomalies
+        - vmanomalyconfigs
+        - vmauths
+        - vmclusters
+        - vmdistributed
+        - vmnodescrapes
+        - vmpodscrapes
+        - vmprobes
+        - vmrules
+        - vmscrapeconfigs
+        - vmservicescrapes
+        - vmsingles
+        - vmstaticscrapes
+        - vtclusters
+        - vtsingles
+      monitoring.coreos.com:
+        - alertmanagerconfigs
+        - alertmanagers
+        - podmonitors
+        - probes
+        - prometheusagents
+        - prometheuses
+        - prometheusrules
+        - scrapeconfigs
+        - servicemonitors
+        - thanosrulers
   customClusterRoleRules: []
   imagePullSecrets: []
   # Extra volumes on the runner pod. The common use is trusting a private CA
@@ -288,8 +364,8 @@ runner:
   #   shadow      serves the PromQL map; every 15 min per window also builds the
   #               ClickHouse map and logs how the two differ.
   #   clickhouse  edges and container health from ClickHouse, pods/services
-  #               still from Prometheus; falls back to Prometheus whenever
-  #               ClickHouse does not cover the requested window.
+  #               as set by serviceMapInventory; falls back to Prometheus
+  #               whenever ClickHouse does not cover the requested window.
   # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
   # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
   # holds this cluster's metrics only (the bundled one does). They create
@@ -298,6 +374,22 @@ runner:
   # rights. A window from before the tables existed falls back to Prometheus.
   # The prometheus default creates nothing.
   serviceMapSource: prometheus
+  # Where service_map gets pods, readiness, replicas, labels and services:
+  #   kubernetes  the runner's own Kubernetes cache (default); needs no
+  #               kube-state-metrics. Needs discovery (on by default) or
+  #               k8sWatch.enabled. A window ending more than 10 min ago still
+  #               uses the kube_* queries when a Prometheus is configured, as
+  #               the cache holds the cluster as it is now.
+  #   prometheus  the kube_* queries; needs kube-state-metrics.
+  serviceMapInventory: kubernetes
+  # With no Prometheus configured or discovered, the runner sends its PromQL
+  # (service map, rightsizing, prometheus_* actions) to ClickHouse's Prometheus
+  # query API at /prometheus/api/v1 as soon as a probe finds node-agent data
+  # there; a Prometheus discovered later takes over. ClickHouse holds that data
+  # with clickhouse.timeseries.enabled (off by default), which sets up the
+  # API, the TimeSeries table and the collector pipeline that fills it. On
+  # ClickHouse the queries and the probe select the TIMESERIES_CLUSTER label
+  # when that is set, and no cluster otherwise; never CLUSTER_NAME.
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.
@@ -450,6 +542,16 @@ nodeAgent:
     # Empty means the operator default (the PodMonitor's own namespace).
     # e.g. { matchNames: [ nudgebee ] } or { any: true }
     namespaceSelector: {}
+    # Relabeling for the node-agent scrape endpoint, rendered as-is into
+    # podMetricsEndpoints[0]. metricRelabelings run after the scrape and can
+    # drop series before Prometheus stores them, e.g. the DNS latency histogram:
+    #   metricRelabelings:
+    #     - sourceLabels: [__name__]
+    #       regex: container_dns_requests_duration_seconds_total_.*
+    #       action: drop
+    # relabelings run before the scrape, on the target's labels.
+    metricRelabelings: []
+    relabelings: []
   service:
     enabled: false
     annotations: {}
@@ -476,37 +578,6 @@ nodeAgent:
   env:
     - name: SENSITIVE_HEADERS
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
-# OpenCost is disabled by default: cost is computed centrally on the server side.
-# With opencost.enabled=false the agent ships no in-cluster OpenCost AND the runner
-# stops discovering/polling cost (see OPENCOST_ENABLED), so the server detects cost
-# is off and computes this cluster's allocations centrally (reaching its Prometheus
-# via the relay). To run OpenCost per-cluster in the agent, set
-# `--set opencost.enabled=true`.
-opencost:
-  enabled: false
-  nameOverride: ""
-  fullnameOverride: ""
-  opencost:
-    exporter:
-      image:
-        registry: ghcr.io
-        repository: nudgebee/opencost
-        tag: 1.114.0
-    prometheus:
-      external:
-        url: ""
-        enabled: true
-      internal:
-        enabled: false
-      serviceMonitor:
-        enabled: true
-      defaultRules:
-        create: true
-    service:
-      labels:
-        app: opencost
-    ui:
-      enabled: false
 rsa: ~
 # custom parameters for OpenShift clusters
 openshift:
@@ -538,6 +609,22 @@ opentelemetry-collector:
         secretKeyRef:
           name: "nudgebee-agent-clickhouse" # Default name, can be overridden
           key: admin-password
+  # A second config file, rendered by templates/collector-timeseries.yaml: the
+  # node-agent pipeline into ClickHouse's TimeSeries table when
+  # clickhouse.timeseries.enabled, otherwise nothing. Helm replaces lists, so
+  # an override of any of these three lists has to keep its entry: dropping
+  # the mount but keeping the --config argument stops the collector from
+  # starting (config file not found), even with clickhouse.timeseries off.
+  extraVolumes:
+    - name: nudgebee-timeseries
+      configMap:
+        name: '{{ .Release.Name }}-collector-timeseries'
+  extraVolumeMounts:
+    - name: nudgebee-timeseries
+      mountPath: /conf/nudgebee
+  command:
+    extraArgs:
+      - --config=/conf/nudgebee/timeseries.yaml
   ports:
     jaeger-compact:
       enabled: false
@@ -672,10 +759,19 @@ opentelemetry-collector:
           receivers: [otlp]
 clickhouse:
   enabled: true
+  # The official clickhouse/clickhouse-server image, mirrored with OS patches
+  # (nudgebee/nudgebee: deploy/kubernetes/nudgebee-mirrors/clickhouse-official-26).
+  # 26.10 reads a data volume that 24.12 (earlier charts) wrote, but 24.12
+  # cannot read one that 26.10 has written. Snapshot the volume before
+  # upgrading, and roll back by restoring the snapshot, not by setting an
+  # older tag.
   image:
     registry: ghcr.io
     repository: nudgebee/clickhouse
-    tag: 24.12.4-debian-12-r0-nb-3
+    tag: 26.10.4-nb-1
+    # Secrets for pulling the image from a private registry, as secret names
+    # or {name: ...} entries. Used by the ClickHouse pod and the schema job.
+    pullSecrets: []
   nameOverride: ""
   fullnameOverride: ""
   persistence:
@@ -684,17 +780,24 @@ clickhouse:
     # StorageClass; "-" disables dynamic provisioning. Only consulted when
     # `global.storageClass` is empty.
     storageClass: ""
-  replicaCount: 1
-  shards: 1
-  zookeeper:
-    enabled: false
   auth:
     username: default
-    # Leave empty to let the Bitnami subchart auto-generate a random password
-    # on first install (persisted in the `<release>-clickhouse` Secret under
-    # key `admin-password`). To pin a value, set it here or pass via
-    # `--set clickhouse.auth.password=...`.
+    # Leave empty to generate a random password on first install. It is kept in
+    # the `<release>-clickhouse` Secret under `admin-password`, and an upgrade
+    # keeps the password already in that Secret. To pin a value, set it here or
+    # pass `--set clickhouse.auth.password=...` (it applies when the Secret is
+    # first created).
     password: ""
+    # Use a Secret you manage instead. The chart then creates no Secret.
+    existingSecret: ""
+    existingSecretKey: ""     # default: admin-password
+  # Pod and container security contexts. OpenShift turns both off so its SCC
+  # assigns the UID (see openshift-values.yaml). Elsewhere ClickHouse runs as
+  # UID 1001, the owner of the files on volumes the Bitnami image created.
+  podSecurityContext:
+    enabled: true
+  containerSecurityContext:
+    enabled: true
   # Most system logs are off to save disk. query_views_log stays: the runner's
   # ClickHouse service map reads failed summary-view runs from it, and serves
   # only windows it still covers (without it every map read falls back to
@@ -719,10 +822,9 @@ clickhouse:
   # set them to 0. It shares the admin password (the
   # runner holds that one anyway); schema changes and the collector's inserts
   # keep the admin user. Defined in templates/clickhouse-reader-users.yaml and
-  # mounted by the extraVolumes / extraVolumeMounts entries below. If you set
-  # your own lists, keep both nudgebee-reader-users entries or drop both (a
-  # mount without its volume fails the StatefulSet); without them query_data
-  # uses the admin user. Changed limits apply after the ClickHouse pod restarts.
+  # mounted into ClickHouse's users.d by the StatefulSet. Set enabled: false to
+  # drop it; query_data then uses the admin user. Changed limits apply after the
+  # ClickHouse pod restarts.
   reader:
     enabled: true
     maxExecutionTime: 60        # seconds, when a query sets none
@@ -734,27 +836,51 @@ clickhouse:
     # A sort or GROUP BY past this many bytes spills to disk rather than
     # reaching maxMemoryUsage.
     maxBytesBeforeSpill: 500000000
-  extraVolumes:
-    - name: nudgebee-reader-users
-      configMap:
-        name: '{{ include "common.names.fullname" . }}-reader-users'
-        optional: true
-  extraVolumeMounts:
-    - name: nudgebee-reader-users
-      # The image copies files under /bitnami/clickhouse/etc/users.d/*/ into
-      # ClickHouse's users.d.
-      mountPath: /bitnami/clickhouse/etc/users.d/nudgebee-reader
+  # Node-agent metrics in a ClickHouse TimeSeries table (default.node_agent_ts),
+  # for PromQL from ClickHouse when there is no Prometheus. Off by default:
+  # ClickHouse's TimeSeries tables and Prometheus API are still experimental,
+  # and the table takes disk. When on:
+  # - ClickHouse serves Prometheus remote write and PromQL queries under
+  #   /prometheus/api/v1 on its HTTP port;
+  # - a Job after each install and upgrade creates the table (7-day TTL);
+  # - the collector scrapes this release's node agents and remote-writes the
+  #   metrics the service map reads (templates/collector-timeseries.yaml). It
+  #   does this through a second config file, added by the collector's
+  #   extraVolumes, extraVolumeMounts and command.extraArgs: keep those
+  #   entries when overriding the lists. Turning this on or off on a running
+  #   install reaches the collector when its pod restarts.
+  # The pipeline scrapes every node agent, so the collector needs more memory:
+  # raise opentelemetry-collector.resources.limits.memory above the 1Gi
+  # default on larger clusters (a 24-node cluster runs at about 1.3GiB with a
+  # 2Gi limit) and watch the collector's memory.
+  # Where this was set up by hand, remove in the same change that turns it on:
+  # <prometheus><handlers> and <http_handlers> from clickhouse.extraOverrides
+  # (the render fails while <http_handlers> is there), and the collector's own
+  # metrics/node_agent_ts pipeline with its exporter and extension.
+  timeseries:
+    enabled: false
+    # The cluster label on the written metrics, which the runner's queries
+    # select (TIMESERIES_CLUSTER). Empty: the kube-system namespace's UID,
+    # read at install. Under helm template (ArgoCD) that lookup finds nothing:
+    # set this there, or the data has no cluster label (fine while only this
+    # cluster writes to the ClickHouse, as with the bundled one). Changing it
+    # later: the runner selects only the new label, so data written before
+    # the change (up to 7 days) drops out of queries until it expires.
+    clusterName: ""
+  # More volumes and mounts for the ClickHouse container. Both go through tpl.
+  # The reader user is no longer mounted from here: an entry named
+  # nudgebee-reader-users (from values written for earlier charts) is skipped.
+  extraVolumes: []
+  extraVolumeMounts: []
   resources:
     requests:
       cpu: 100m
       memory: 2000Mi
     limits:
       memory: 2000Mi
-  # The ClickHouse ServiceMonitor is rendered by this chart
-  # (templates/clickhouse-servicemonitor.yaml), not by the Bitnami subchart: a
-  # parent cannot add a condition to a subchart's template, and the subchart's
-  # copy failed installs on clusters with no Prometheus operator. This chart's
-  # copy is gated like its other monitoring CRs, so on such a cluster the one
+  # The ClickHouse ServiceMonitor (templates/clickhouse-servicemonitor.yaml) is
+  # gated like the chart's other monitoring CRs, so on a cluster with no
+  # Prometheus operator the one
   # setting needed is `--set enablePrometheusStack=false` (installation.sh sets
   # it when the operator's CRDs are absent). Set nudgebeeServiceMonitor.enabled
   # to false to drop the scrape target entirely.
@@ -764,13 +890,13 @@ clickhouse:
     # Also opens the http-metrics port the ServiceMonitor scrapes; keep it on.
     enabled: true
     serviceMonitor:
-      # The subchart's own copy, ungated. Leave false; interval and
-      # scrapeTimeout below are still read by this chart's copy.
+      # Kept for values written for earlier charts, where it turned on the
+      # Bitnami subchart's own copy: true now also renders this chart's copy.
+      # interval and scrapeTimeout below are read either way.
       enabled: false
       interval: 30s
       scrapeTimeout: 10s
-    # Rendered by this chart (templates/clickhouse-prometheusrule.yaml), not by
-    # the Bitnami subchart, which has no PrometheusRule template. Each expr goes
+    # Rendered by templates/clickhouse-prometheusrule.yaml. Each expr goes
     # through tpl: nudgebee-agent.clickhouse.target expands to this release's
     # scrape target (namespace="...",service="..."), so the rules never match
     # another release's ClickHouse in the same Prometheus.

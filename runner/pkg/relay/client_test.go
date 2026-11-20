@@ -283,15 +283,20 @@ func TestClient_ReconnectsWhenRelayStopsReading(t *testing.T) {
 		_ = send(&Response{Data: big})
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Generous waits: under the race detector on a busy CI runner, encoding
+	// the 64 MiB reply alone has taken about 3s, and the session only ends
+	// after that. A session that never ends still fails here.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	go func() { _ = client.Run(ctx) }()
 
 	for i := 0; i < 2; i++ {
 		select {
 		case <-dials:
-		case <-time.After(3 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatalf("timeout waiting for dial %d; a relay that stopped reading did not end the session", i+1)
+		case <-ctx.Done():
+			t.Fatalf("context ended waiting for dial %d; a relay that stopped reading did not end the session", i+1)
 		}
 	}
 }

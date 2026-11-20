@@ -30,6 +30,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -43,6 +44,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/enrichers"
 	"github.com/nudgebee/nudgebee-agent/pkg/grafana"
+	"github.com/nudgebee/nudgebee-agent/pkg/k8swatch"
 	"github.com/nudgebee/nudgebee-agent/pkg/kube"
 	"github.com/nudgebee/nudgebee-agent/pkg/metrics"
 	"github.com/nudgebee/nudgebee-agent/pkg/mutate"
@@ -145,6 +147,9 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
+	// When this process started: the runner's own watch sends a create only
+	// for objects created after it, as kubewatch did.
+	processStart := time.Now()
 	handlers := map[string]dispatch.Handler{
 		"ping":   dispatch.SimpleHandler(handlePing),
 		"echo":   dispatch.SimpleHandler(handleEcho),
@@ -213,6 +218,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		cfg.PodExecEnabled = false
 		cfg.ScannersEnabled = false
 		cfg.MutateEnabled = false
+		cfg.K8sWatchEnabled = false
 	}
 
 	// Service-discovery: only fills blank URLs, never overrides env. Mirrors
@@ -237,41 +243,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Info("alertmanager auto-discovered", "url", redact.URL(u))
 		}
 	}
-	// OpenCost can be disabled at the agent (OPENCOST_ENABLED=false) — cost is then
-	// computed centrally on the server side. When disabled, skip BOTH the
-	// OPENCOST_ENDPOINT env and the cluster-wide Service autodiscovery: discovery
-	// matches `app=opencost` across all namespaces, so otherwise the agent latches
-	// onto a neighbouring namespace's OpenCost and keeps reporting itself
-	// cost-enabled, which suppresses the server-side takeover. Defaults to enabled.
-	opencostEnabled := true
-	if v := os.Getenv("OPENCOST_ENABLED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			opencostEnabled = b
-		} else {
-			logger.Warn("invalid OPENCOST_ENABLED, defaulting to enabled", "value", v, "err", err)
-		}
-	}
-	opencostURL := ""
-	if opencostEnabled {
-		// Mirrors OpenCostDiscovery.find_open_cost_url.
-		// OPENCOST_ENDPOINT env wins; falls back to in-cluster Service lookup.
-		opencostURL = os.Getenv("OPENCOST_ENDPOINT")
-		if opencostURL == "" {
-			if u := disc.FindFirst(ctx, svcdiscover.OpencostSelectors); u != "" {
-				opencostURL = u
-				logger.Info("opencost auto-discovered", "url", redact.URL(u))
-			}
-		}
-	} else {
-		logger.Info("opencost disabled (OPENCOST_ENABLED=false); skipping discovery and cost polling")
-	}
-
 	warnMisparsedCredentials(logger, map[string]string{
 		"PROMETHEUS_URL":    cfg.PrometheusURL,
 		"LOKI_URL":          cfg.LokiURL,
 		"LOKI_RULES_URL":    cfg.LokiRulesURL,
 		"ALERTMANAGER_URL":  cfg.AlertManagerURL,
-		"OPENCOST_ENDPOINT": opencostURL,
 		"ELASTICSEARCH_URL": cfg.ElasticsearchURL,
 		"SIGNOZ_URL":        cfg.SignozURL,
 		"JAEGER_URL":        cfg.JaegerURL,
@@ -313,6 +289,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		} else {
 			logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
 		}
+	}
+	// With no Prometheus, PromQL can fall back to ClickHouse's Prometheus
+	// query API once a probe finds node-agent data there (see the watcher
+	// below); ForURL keeps each backend's auth.
+	chPromQL := clickhousePromQLURL(cfg)
+	if chPromQL != "" {
+		clickhousePromQLAuth(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
 	}
 	ph := prometheus.Handlers(promClient)
 	maps.Copy(handlers, ph)
@@ -363,8 +346,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// agent — which read prometheus_url from the Robusta global_config ConfigMap
 	// — by bumping only the image tag on the old chart, which never sets the
 	// PROMETHEUS_URL env the Go agent reads.
-	watchForPrometheus := promClient.URL() == ""
-	if watchForPrometheus {
+	watchForPrometheus := cfg.PrometheusURL == ""
+	if promClient.URL() == "" {
 		logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
 			"retry_interval", promDiscoveryInterval)
 	}
@@ -373,6 +356,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// metrics in-cluster). Registered unconditionally; the handlers report
 	// the missing URL themselves until one is found.
 	smSvc := servicemap.New(promClient, cfg.ClusterName)
+	// On the ClickHouse fallback there are no kube_* series: past windows keep
+	// taking their inventory from the cache until a Prometheus is discovered.
+	smSvc.HasPrometheus = func() bool { return promBackend(promClient, chPromQL) == promBackendPrometheus }
+	smSvc.TimeSeriesCluster = cfg.TimeSeriesCluster
 	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
 	maps.Copy(handlers, smHandlers)
 	for name := range smHandlers {
@@ -565,6 +552,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	if cfg.KubeEnabled {
 		kc := kube.NewClient(dynamicKube, typedKube)
+		kc.MaxResultBytes = cfg.GetResourceMaxBytes
+		kc.SetUnscopedListLimit(cfg.GetResourceUnscopedConcurrency)
 		// AllowWrite lifts the read-only verb allowlist; gated by the chart's
 		// runner.enableWritePermissions, which also grants the write RBAC.
 		kx := &kube.KubectlExecutor{AllowWrite: cfg.KubectlAllowWrite} // uses kubectl on PATH
@@ -673,11 +662,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// the cluster". Allowlist it here to close the gap without forcing
 		// signing into api-server's relay client. pod_bash_enricher / pod_profiler
 		// stay OUT — they have no unsigned api-server caller.
-		// TODO(security): this trades per-request HMAC/RSA verification for the
-		// relay's shared-secret gate, so a relay/secret compromise yields
-		// arbitrary in-cluster command execution. Remove this entry once
-		// api-server's relay client signs pod_script_run_enricher.
-		lightActions["pod_script_run_enricher"] = struct{}{}
+		// This trades per-request verification for the relay's shared-secret
+		// gate, so a relay/secret compromise yields arbitrary in-cluster command
+		// execution. The relay signs what it forwards over the WebSocket, so
+		// POD_SCRIPT_RUN_REQUIRE_SIGNATURE drops the carve-out (see the
+		// validator's SignedOnly below).
+		if !cfg.PodScriptRunRequireSignature {
+			lightActions["pod_script_run_enricher"] = struct{}{}
+		}
 		logger.Info("pod-runner enabled",
 			"default_namespace", cfg.ScannerNamespace,
 			"service_account", cfg.ScannerServiceAccount,
@@ -789,6 +781,16 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		return fmt.Errorf("init relay signature verifier: %w", err)
 	}
 	validator.RelayVerifier = relayVerifier
+	if cfg.PodScriptRunRequireSignature {
+		validator.SignedOnly = map[string]struct{}{"pod_script_run_enricher": {}}
+		if !relayVerifier.Enabled() {
+			// The backend reaches this action through the relay, so without the
+			// relay's key only HMAC- or partial-key-signed requests get through.
+			logger.Warn("POD_SCRIPT_RUN_REQUIRE_SIGNATURE is on but RELAY_SIGNING_PUBLIC_KEY is not set; pod_script_run_enricher requests without an HMAC or partial-key signature will be refused")
+		} else {
+			logger.Info("pod_script_run_enricher requires a signed request")
+		}
+	}
 
 	// refresh_playbook hot-reloads the allowlist from the backend so we can
 	// add new actions to a running agent without a customer Helm upgrade.
@@ -859,11 +861,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			promClient.URL(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			prometheusProxyURL(promClient, chPromQL)(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
 		// Read the URL per request rather than pinning the one we had at
 		// startup, so the /prometheus-v2/* route works on a Prometheus that
-		// only shows up later.
-		gp.PrometheusURLFn = promClient.URL
+		// only shows up later. Not the ClickHouse fallback: the proxy does not
+		// carry the client's authorizer.
+		gp.PrometheusURLFn = prometheusProxyURL(promClient, chPromQL)
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
 			logger.Info("grafana proxy enabled", "url", redact.URL(grafanaURL))
@@ -900,6 +903,38 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
+	// One informer factory for discovery and the runner's own watch (when
+	// on), so the objects both read are cached once. With the watch on, the
+	// transform keeps the pod template fields the matchers diff.
+	// The watch feeds the trigger engine, which runs only with the HTTP
+	// listener and a backend to send Findings to. Without them the watch never
+	// starts, so the shared cache must not keep whole objects for it.
+	if cfg.K8sWatchEnabled && (cfg.HTTPListenAddr == "" || cfg.BackendEndpoint == "") {
+		logger.Warn("K8S_WATCH_ENABLED ignored: the trigger engine needs HTTP_LISTEN_ADDR and NUDGEBEE_ENDPOINT")
+		cfg.K8sWatchEnabled = false
+	}
+	var sharedFactory informers.SharedInformerFactory
+	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
+		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
+	}
+	smInventory, ok := servicemap.ParseInventory(cfg.ServiceMapInventory)
+	if !ok {
+		logger.Warn("unknown SERVICE_MAP_INVENTORY; using prometheus", "value", cfg.ServiceMapInventory)
+	}
+	if smInventory == servicemap.InventoryKubernetes {
+		if sharedFactory == nil {
+			logger.Warn("SERVICE_MAP_INVENTORY=kubernetes needs DISCOVERY_ENABLED or K8S_WATCH_ENABLED; using prometheus")
+			smInventory = servicemap.InventoryPrometheus
+		} else {
+			// Asked for before discovery or the k8s watch starts the factory,
+			// which then starts these informers too. Not started here:
+			// discovery sets watch error handlers, which fail once started.
+			smSvc.Kube = servicemap.NewKubeCache(sharedFactory)
+		}
+	}
+	smSvc.Inventory = smInventory
+	logger.Info("service map inventory", "inventory", string(smInventory))
+
 	// Keep looking for a Prometheus we could not find at boot, and point the
 	// client at the first one that appears. Everything downstream reads the URL
 	// per request, so no restart and no re-registration is needed.
@@ -907,8 +942,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		g.Go(func() error {
 			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
 				promClient.SetURL(u)
-				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", redact.URL(u))
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map now use it", "url", redact.URL(u))
 			})
+			return nil
+		})
+	}
+
+	// Probe ClickHouse's Prometheus query API until it holds node-agent data
+	// or a Prometheus is discovered, whichever comes first.
+	if chPromQL != "" {
+		g.Go(func() error {
+			watchClickHousePromQL(gctx, promClient, chPromQL, cfg.TimeSeriesCluster, promDiscoveryInterval, logger)
 			return nil
 		})
 	}
@@ -1016,6 +1060,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(specs))
+		if cfg.K8sWatchEnabled {
+			// The runner watches Kubernetes itself and kubewatch's posts are
+			// ignored; see pkg/k8swatch.
+			fwd.KubewatchSuperseded = true
+			kw := k8swatch.New(k8swatch.Config{
+				Workers:    cfg.K8sWatchWorkers,
+				MaxPending: cfg.K8sWatchMaxPending,
+				StartTime:  processStart,
+				Namespace:  cfg.K8sWatchNamespace,
+				Kinds:      kindSet(cfg.K8sWatchKinds),
+				Skip: func(kind, namespace, name string) bool {
+					return kind == "ConfigMap" && triggers.ConfigMapIgnored(namespace, name)
+				},
+			}, fwd, eng.Handles, mreg, logger)
+			kw.RegisterShared(sharedFactory)
+			kw.RegisterOwn(typedKube)
+			kw.RegisterRollouts(gctx, typedKube, dynamicKube)
+			g.Go(func() error {
+				logger.Info("starting k8s watch (kubewatch posts are ignored)")
+				if err := kw.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+					return fmt.Errorf("k8s watch: %w", err)
+				}
+				return nil
+			})
+		}
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
@@ -1078,11 +1147,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	// Telemetry: periodic ClusterStatus → /v1/k8s/telemetry. The collector
 	// stores activity_stats as the agent's `connection_status`, which the UI
-	// reads to show "Prometheus / Loki / AlertManager / OpenCost / Traces /
+	// reads to show "Prometheus / Loki / AlertManager / Traces /
 	// NodeAgent connected".
 	//
 	// We mirror the legacy IntegrationHealthChecker probe set —
-	// Prometheus, AlertManager, OpenCost get HTTP probes inside the
+	// Prometheus and AlertManager get HTTP probes inside the
 	// telemetry package; node-agent count is a Prometheus query we run
 	// here so we don't wedge a Prom client into the telemetry package.
 	if cfg.BackendEndpoint != "" {
@@ -1183,9 +1252,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              promClient.URL(),
+					PrometheusBackend:          promBackend(promClient, chPromQL),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
-					OpencostURL:                opencostURL,
 					LogsProvider:               logsProvider,
 					LogsProviderURL:            logsURL,
 					LogsProviderStatus:         logsOK,
@@ -1193,7 +1262,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogProviderConfig:          logCfg,
 					PrometheusConnected:        promConnected,
 					PrometheusConnectedError:   promErr,
-					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
+					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, nodeAgentCountQuery(promBackend(promClient, chPromQL), cfg.TimeSeriesCluster), logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
 					TraceTable:                 traceTable,
@@ -1261,7 +1330,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discoverySink.Metrics = mreg
-		discSvc := discovery.NewService(typedKube, discoverySink, cfg.DiscoveryResync, logger)
+		discSvc := discovery.NewServiceWithFactory(typedKube, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
 			BatchSize:         cfg.DiscoveryBatchSize,
@@ -1399,20 +1468,18 @@ func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog
 }
 
 // queryNodeAgentCount
-// (lines 246-264). Counts pods that match the upstream nudgebee node-agent
-// job regex; the daemonset reports `up{job=~"...nudgebee(-.*)?-node-agent"}`
-// per-pod, so len(result) is the count. Returns 0 on any error so the UI
+// (lines 246-264). Runs q (nodeAgentCountQuery), which returns one series per
+// node agent, so len(result) is the count. Returns 0 on any error so the UI
 // shows Disconnected rather than panicking the telemetry tick.
 //
 // Note: the legacy query embeds `__CLUSTER__` for multi-cluster Prom setups;
 // __CLUSTER__ is replaced upstream by the relay before queries reach the
 // agent. Our local probe runs against the agent's own cluster so we drop
 // the token entirely.
-func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog.Logger) int {
+func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, q string, logger *slog.Logger) int {
 	if c == nil || c.URL() == "" {
 		return 0
 	}
-	const q = `up{job=~"(.+/)?nudgebee(-.*)?-node-agent"}`
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := c.Query(cctx, q, "", "")
@@ -1793,4 +1860,17 @@ func installNamespace(cfg *config.Config) string {
 		return ns
 	}
 	return cfg.ScannerNamespace
+}
+
+// kindSet turns K8S_WATCH_KINDS into the watcher's kind filter; nil (unset)
+// means every kind.
+func kindSet(kinds []string) map[string]bool {
+	if kinds == nil {
+		return nil
+	}
+	m := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		m[k] = true
+	}
+	return m
 }

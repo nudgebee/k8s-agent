@@ -72,7 +72,7 @@ run:
 	go run ./cmd/agent
 
 docker-build:
-	docker build -t nudgebee-agent:$(VERSION) -f Dockerfile .
+	docker buildx build --build-context repo=.. -t nudgebee-agent:$(VERSION) -f Dockerfile .
 
 clean:
 	rm -rf bin/ coverage.out coverage.html

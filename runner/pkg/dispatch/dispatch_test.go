@@ -2,15 +2,21 @@ package dispatch
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/auth"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
+	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
 // captureSend records every Response written so tests can inspect them.
@@ -560,4 +566,51 @@ func (g *deadlineGrafana) HandleAPI(ctx context.Context, _ string, _ *GrafanaReq
 
 func (g *deadlineGrafana) HandlePrometheus(ctx context.Context, _ *GrafanaRequest) any {
 	return g.record(ctx)
+}
+
+// The same relay-signed mutation delivered twice (the broker redelivers what was
+// unacked when a channel dropped) runs once; the second delivery is answered 409,
+// not 401, because the change may have applied.
+func TestDispatch_DuplicateDeliveryOfAMutationIs409(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 7)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	ver, err := relaysig.NewVerifier(base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &auth.Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
+	var runs atomic.Int32
+	d := New(Config{}, v, map[string]Handler{
+		"scale_deployment": SimpleHandler(func(map[string]any) (any, error) { runs.Add(1); return "scaled", nil }),
+	})
+
+	body := json.RawMessage(`{"action_name":"scale_deployment","timestamp":1700000000}`)
+	msg, err := json.Marshal(map[string]any{
+		"body":            body,
+		"request_id":      "req-dup",
+		"relay_signature": base64.StdEncoding.EncodeToString(ed25519.Sign(priv, body)),
+		"relay_signed_at": time.Now().UTC().Format(time.RFC3339),
+		"relay_nonce":     "nonce-dup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := &captureSend{}
+	d.Handle(context.Background(), msg, first.send)
+	if r := first.only(t); r.StatusCode != 200 {
+		t.Fatalf("first delivery: status %d (%v); want 200", r.StatusCode, r.Data)
+	}
+	again := &captureSend{}
+	d.Handle(context.Background(), msg, again.send)
+	if r := again.only(t); r.StatusCode != 409 {
+		t.Fatalf("second delivery: status %d (%v); want 409", r.StatusCode, r.Data)
+	}
+	if got := runs.Load(); got != 1 {
+		t.Fatalf("handler ran %d times; want once", got)
+	}
 }

@@ -7,6 +7,8 @@
 //	NUDGEBEE_ENDPOINT          - backend HTTP base URL (for discovery/alert forward)
 //	ACCOUNT_ID                 - tenant account id (sent in greeting; informational)
 //	CLUSTER_NAME               - cluster name (informational)
+//	TIMESERIES_CLUSTER         - cluster label on ClickHouse's TimeSeries data; filters
+//	                             PromQL sent to ClickHouse (empty = no filter)
 package config
 
 import (
@@ -24,6 +26,10 @@ type Config struct {
 	BackendEndpoint string
 	AccountID       string
 	ClusterName     string
+	// TimeSeriesCluster is the cluster label the collector puts on the
+	// node-agent metrics it writes to ClickHouse's TimeSeries table. Kept
+	// apart from ClusterName, which the runner also reports to the backend.
+	TimeSeriesCluster string
 
 	// Optional datasource URLs. Empty = subsystem disabled.
 	PrometheusURL     string
@@ -147,6 +153,19 @@ type Config struct {
 	KubewatchWorkers       int
 	KubewatchQueueSize     int
 	KubewatchQueueMaxBytes int64
+	// K8sWatchEnabled feeds the trigger matchers from the runner's own
+	// informers (pkg/k8swatch) instead of kubewatch, and makes /api/handle
+	// ignore kubewatch so a change is never matched twice. K8sWatchWorkers
+	// match in parallel; K8sWatchMaxPending bounds the objects with changes
+	// waiting (updates to one object coalesce). Defaults false / 8 / 10000.
+	K8sWatchEnabled    bool
+	K8sWatchWorkers    int
+	K8sWatchMaxPending int
+	// K8sWatchNamespace and K8sWatchKinds carry kubewatch's `namespace` and
+	// `resource` settings over: one namespace (empty: all) and the kinds to
+	// watch, lower-case (nil: every kind a matcher reads).
+	K8sWatchNamespace string
+	K8sWatchKinds     []string
 	// TriggerEventsCache serves the evidence tables on a matched Finding
 	// (recent subject / node / namespace events) from a trimmed Event
 	// informer instead of three API List calls per match. Default true.
@@ -169,6 +188,16 @@ type Config struct {
 	// of discovery so an operator can run primitives-only without paying
 	// for the full informer cache.
 	KubeEnabled bool
+	// GetResourceMaxBytes caps the JSON one get_resource call returns; over it
+	// the call fails and says to scope the request. 0 disables the cap.
+	// GetResourceUnscopedConcurrency bounds how many get_resource lists not
+	// scoped to a namespace, name or selector run at once; 0 removes the bound.
+	// Defaults 64 MiB / 2. A call peaks near 10x its result in heap (the
+	// decoded list, then the evidence, which nests the JSON as a string twice),
+	// so the two together keep get_resource near 1.3 GB at worst, under the
+	// default 2000Mi limit.
+	GetResourceMaxBytes            int
+	GetResourceUnscopedConcurrency int
 
 	// KubectlAllowWrite lifts the read-only verb allowlist on
 	// kubectl_command_executor. Set by the chart from
@@ -195,6 +224,13 @@ type Config struct {
 	// PodExecEnabled (group D): pod_bash_enricher / pod_script_run_enricher.
 	// MUST be paired with RSA partial-keys auth in production.
 	PodExecEnabled bool
+
+	// PodScriptRunRequireSignature stops accepting unsigned
+	// pod_script_run_enricher requests: they then need a relay signature
+	// (RELAY_SIGNING_PUBLIC_KEY), an HMAC signature or partial keys. Off by
+	// default, because a request the relay could not sign (no WebSocket, signing
+	// off, clock skew) is otherwise refused.
+	PodScriptRunRequireSignature bool
 
 	// MutateEnabled (group D): delete_pod / cordon / uncordon / rollout_restart.
 	// MUST be paired with RSA partial-keys auth in production.
@@ -229,6 +265,11 @@ type Config struct {
 	// logs how the ClickHouse map differs). Needs the collector's node-agent
 	// metrics pipeline writing into ClickHouse.
 	ServiceMapSource string
+	// ServiceMapInventory is where service_map gets pods, readiness, replicas,
+	// labels and services: "prometheus" (default, the kube_* queries) or
+	// "kubernetes" (the runner's informer cache; needs discovery or the k8s
+	// watch running).
+	ServiceMapInventory string
 
 	// Where logs are written in that ClickHouse, for the logs health check. The
 	// chart sets these from the bundled collector's exporter config. Unset (the
@@ -258,6 +299,7 @@ func FromEnv() (*Config, error) {
 		BackendEndpoint:       os.Getenv("NUDGEBEE_ENDPOINT"),
 		AccountID:             os.Getenv("ACCOUNT_ID"),
 		ClusterName:           os.Getenv("CLUSTER_NAME"),
+		TimeSeriesCluster:     os.Getenv("TIMESERIES_CLUSTER"),
 		PrometheusURL:         os.Getenv("PROMETHEUS_URL"),
 		PrometheusHeaders:     os.Getenv("PROMETHEUS_HEADERS"), // matches runner.yaml secret
 		LokiURL:               os.Getenv("LOKI_URL"),
@@ -326,21 +368,29 @@ func FromEnv() (*Config, error) {
 		AlertRulesInterval: parseDuration(os.Getenv("ALERT_RULES_INTERVAL"), 30*time.Minute),
 		// Scalability knobs — wire-changing features OFF by default (need
 		// collector support).
-		DiscoverySnapshotBatching: envBool("DISCOVERY_SNAPSHOT_BATCHING", false),
-		DiscoveryBatchSize:        envInt("DISCOVERY_BATCH_SIZE", 1000),
-		IncrementalBatchSize:      envInt("DISCOVERY_INCREMENTAL_BATCH_SIZE", 1),
-		IncrementalBatchWindow:    parseDuration(os.Getenv("DISCOVERY_INCREMENTAL_BATCH_WINDOW"), 0),
-		EmitTombstones:            envBool("DISCOVERY_EMIT_TOMBSTONES", false),
-		ForwardPoolSize:           envInt("FORWARD_POOL_SIZE", 64),
-		KubewatchWorkers:          envInt("KUBEWATCH_WORKERS", 8),
-		KubewatchQueueSize:        envInt("KUBEWATCH_QUEUE_SIZE", 2048),
-		KubewatchQueueMaxBytes:    int64(envInt("KUBEWATCH_QUEUE_MAX_BYTES", 64<<20)),
-		TriggerEventsCache:        envBool("TRIGGER_EVENTS_CACHE", true),
-		RelayHandlerPoolSize:      envInt("RELAY_HANDLER_POOL_SIZE", 32),
-		TriggerRateLimits:         ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
-		KubeEnabled:               envBool("KUBE_ENABLED", true),
-		KubectlAllowWrite:         envBool("KUBECTL_ALLOW_WRITE", false),
-		PodExecEnabled:            envBool("PODEXEC_ENABLED", true),
+		DiscoverySnapshotBatching:      envBool("DISCOVERY_SNAPSHOT_BATCHING", false),
+		DiscoveryBatchSize:             envInt("DISCOVERY_BATCH_SIZE", 1000),
+		IncrementalBatchSize:           envInt("DISCOVERY_INCREMENTAL_BATCH_SIZE", 1),
+		IncrementalBatchWindow:         parseDuration(os.Getenv("DISCOVERY_INCREMENTAL_BATCH_WINDOW"), 0),
+		EmitTombstones:                 envBool("DISCOVERY_EMIT_TOMBSTONES", false),
+		ForwardPoolSize:                envInt("FORWARD_POOL_SIZE", 64),
+		KubewatchWorkers:               envInt("KUBEWATCH_WORKERS", 8),
+		KubewatchQueueSize:             envInt("KUBEWATCH_QUEUE_SIZE", 2048),
+		KubewatchQueueMaxBytes:         int64(envInt("KUBEWATCH_QUEUE_MAX_BYTES", 64<<20)),
+		TriggerEventsCache:             envBool("TRIGGER_EVENTS_CACHE", true),
+		K8sWatchEnabled:                envBool("K8S_WATCH_ENABLED", false),
+		K8sWatchWorkers:                envInt("K8S_WATCH_WORKERS", 8),
+		K8sWatchMaxPending:             envInt("K8S_WATCH_MAX_PENDING", 10000),
+		K8sWatchNamespace:              strings.TrimSpace(os.Getenv("K8S_WATCH_NAMESPACE")),
+		K8sWatchKinds:                  envList("K8S_WATCH_KINDS"),
+		RelayHandlerPoolSize:           envInt("RELAY_HANDLER_POOL_SIZE", 32),
+		TriggerRateLimits:              ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
+		KubeEnabled:                    envBool("KUBE_ENABLED", true),
+		GetResourceMaxBytes:            envInt("GET_RESOURCE_MAX_BYTES", 64<<20),
+		GetResourceUnscopedConcurrency: envInt("GET_RESOURCE_UNSCOPED_CONCURRENCY", 2),
+		KubectlAllowWrite:              envBool("KUBECTL_ALLOW_WRITE", false),
+		PodExecEnabled:                 envBool("PODEXEC_ENABLED", true),
+		PodScriptRunRequireSignature:   envBool("POD_SCRIPT_RUN_REQUIRE_SIGNATURE", false),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
 		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
 		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
@@ -367,6 +417,7 @@ func FromEnv() (*Config, error) {
 		ClickHouseDB:               cmp(os.Getenv("CLICKHOUSE_DB"), "default"),
 		ClickHouseSSL:              envBool("CLICKHOUSE_SSL_ENABLED", false),
 		ServiceMapSource:           cmp(os.Getenv("SERVICE_MAP_SOURCE"), "prometheus"),
+		ServiceMapInventory:        cmp(os.Getenv("SERVICE_MAP_INVENTORY"), "prometheus"),
 		ClickHouseLogsTable:        cmp(os.Getenv("CLICKHOUSE_LOGS_TABLE"), "otel_logs"),
 		ClickHouseLogsCollected:    envBool("CLICKHOUSE_LOGS_COLLECTED", false),
 		ClickHouseReaderUser:       os.Getenv("CLICKHOUSE_READER_USER"),
@@ -419,6 +470,22 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// envList reads a comma-separated, lower-cased list. Unset gives nil; set but
+// empty gives an empty, non-nil list.
+func envList(name string) []string {
+	s, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.ToLower(strings.TrimSpace(part)); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func parseDuration(s string, fallback time.Duration) time.Duration {

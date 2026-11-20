@@ -103,6 +103,11 @@ type Validator struct {
 	// the relay signature is ignored and the request falls through to the
 	// existing modes, so reads keep working on un-keyed agents.
 	RelayVerifier *relaysig.Verifier
+
+	// SignedOnly names actions that never pass on the light-action path, even
+	// when the allowlist (startup or refreshed) lists them: they need a relay
+	// signature, an HMAC signature or partial keys. Set once at startup.
+	SignedOnly map[string]struct{}
 }
 
 // SetLightActions atomically replaces the light-action allowlist. Concurrent
@@ -149,8 +154,19 @@ func (v *Validator) LightActionsSet() map[string]struct{} {
 // rejected.
 func (v *Validator) Validate(r *Request) error {
 	if r.RelaySig.Present() && v.RelayVerifier != nil && v.RelayVerifier.Enabled() {
-		if err := v.RelayVerifier.VerifyBody(r.BodyRaw, r.RelaySig); err == nil {
+		err := v.RelayVerifier.VerifyBody(r.BodyRaw, r.RelaySig)
+		if err == nil {
 			return nil // valid relay signature authorizes any action
+		}
+		// A replay is a request this agent already accepted, delivered again
+		// (the broker redelivers what was unacked when a channel dropped). When
+		// falling through would reject it — a mutation with no other credentials
+		// — it would be reported as unauthorized while the first delivery may
+		// have applied it; say what it is instead. A read, or a request carrying
+		// another signature, falls through as before.
+		if errors.Is(err, relaysig.ErrReplay) && !v.isLightAction(r.ActionName) &&
+			r.Signature == "" && r.PartialAuthA == "" && r.PartialAuthB == "" {
+			return fmt.Errorf("%w: %s", ErrDuplicateDelivery, r.ActionName)
 		}
 		// Verification failed — fall through to the existing modes (reads keep
 		// working via lightActions; mutations get rejected there).
@@ -165,7 +181,25 @@ func (v *Validator) Validate(r *Request) error {
 	}
 }
 
+// ErrDuplicateDelivery is Validate's error for a mutation whose valid relay
+// signature carries a nonce already seen: a second delivery of a request the
+// agent accepted before. Its outcome is the first delivery's, not a denial.
+var ErrDuplicateDelivery = errors.New("auth: duplicate delivery of a request already received")
+
+// isLightAction reports whether action is on the light-action allowlist and
+// not signature-only.
+func (v *Validator) isLightAction(action string) bool {
+	if _, signedOnly := v.SignedOnly[action]; signedOnly {
+		return false
+	}
+	_, ok := v.LightActionsSet()[action]
+	return ok
+}
+
 func (v *Validator) validateLightAction(r *Request) error {
+	if _, signedOnly := v.SignedOnly[r.ActionName]; signedOnly {
+		return fmt.Errorf("auth: action %q requires a signed request", r.ActionName)
+	}
 	set := v.LightActionsSet()
 	if set == nil {
 		return errors.New("auth: light-action mode disabled")
