@@ -432,21 +432,25 @@ func TestBuild_KubernetesInventoryPastWindowWithoutRealPrometheus(t *testing.T) 
 }
 
 // On the ClickHouse fallback the queries select TimeSeriesCluster, the label
-// the collector writes; on a real Prometheus they keep ClusterName.
+// the collector writes, and no cluster when it is empty (never ClusterName);
+// on a real Prometheus they keep ClusterName.
 func TestBuild_TimeSeriesClusterOnClickHouseOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		real        bool
 		wantCluster string // "" means no cluster matcher at all
+		tsCluster   string
 	}{
-		{"clickhouse fallback", false, `cluster="ts-uid"`},
-		{"real prometheus", true, ""},
+		{"clickhouse fallback", false, `cluster="ts-uid"`, "ts-uid"},
+		{"clickhouse without a cluster label", false, "", ""},
+		{"real prometheus", true, `cluster="production-cluster"`, "ts-uid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, fp := newKubeTestService(t, trafficResponses, testCluster()...)
 			isReal := tc.real
 			s.HasPrometheus = func() bool { return isReal }
-			s.TimeSeriesCluster = "ts-uid"
+			s.TimeSeriesCluster = tc.tsCluster
+			s.ClusterName = "production-cluster"
 
 			if _, err := s.Build(context.Background(), FilterParams{Duration: 60}); err != nil {
 				t.Fatal(err)
@@ -459,10 +463,36 @@ func TestBuild_TimeSeriesClusterOnClickHouseOnly(t *testing.T) {
 			for _, q := range fp.queries {
 				switch has := strings.Contains(q, "cluster="); {
 				case tc.wantCluster == "" && has:
-					t.Errorf("query has a cluster matcher on a real Prometheus: %s", q)
+					t.Errorf("query has a cluster matcher: %s", q)
 				case tc.wantCluster != "" && strings.Contains(q, "container_") && !strings.Contains(q, tc.wantCluster):
 					t.Errorf("query lacks %s: %s", tc.wantCluster, q)
 				}
+			}
+		})
+	}
+}
+
+// queryCluster: on ClickHouse only TimeSeriesCluster, even when empty, since
+// the TimeSeries data has no other cluster label; elsewhere ClusterName.
+func TestQueryCluster(t *testing.T) {
+	yes := func() bool { return true }
+	no := func() bool { return false }
+	for _, tc := range []struct {
+		name          string
+		hasPrometheus func() bool
+		tsCluster     string
+		want          string
+	}{
+		{"clickhouse, no TimeSeriesCluster: no fallback to ClusterName", no, "", ""},
+		{"clickhouse, TimeSeriesCluster set", no, "timeseries-cluster", "timeseries-cluster"},
+		{"prometheus keeps ClusterName", yes, "", "production-cluster"},
+		{"prometheus ignores TimeSeriesCluster", yes, "timeseries-cluster", "production-cluster"},
+		{"HasPrometheus unset keeps ClusterName", nil, "timeseries-cluster", "production-cluster"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Service{ClusterName: "production-cluster", TimeSeriesCluster: tc.tsCluster, HasPrometheus: tc.hasPrometheus}
+			if got := s.queryCluster(); got != tc.want {
+				t.Errorf("queryCluster() = %q; want %q", got, tc.want)
 			}
 		})
 	}

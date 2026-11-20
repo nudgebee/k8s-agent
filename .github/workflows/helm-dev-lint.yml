@@ -327,18 +327,21 @@ jobs:
           def find(kind, name):
               return next((d for d in docs if d["kind"] == kind and d["metadata"]["name"] == name), None)
           ch = find("ConfigMap", "nudgebee-agent-clickhouse")
+          users = find("ConfigMap", "nudgebee-agent-clickhouse-users")
           job = find("Job", "nudgebee-agent-ch-timeseries-table")
           role = find("RoleBinding", "nudgebee-agent-collector-timeseries")
           col = find("ConfigMap", "nudgebee-agent-collector-timeseries")
           ts = yaml.safe_load(col["data"]["timeseries.yaml"]) if col else None
           if not want_on:
               assert ch is None or "20_timeseries.xml" not in ch["data"], "handler rendered"
+              assert users is None or not any("enable_time_series_aggregate_functions" in v for v in users["data"].values()), "preview setting rendered"
               assert job is None and role is None, "Job or RoleBinding rendered"
               assert col is None or ts == {}, ts
               sys.exit(0)
           xml = ch["data"]["20_timeseries.xml"]
           for want in ("<url_prefix>/prometheus/api/v1</url_prefix>", "<type>prometheus_api_v1</type>", "<table>node_agent_ts</table>", "<defaults/>"):
               assert want in xml, want
+          assert "<enable_time_series_aggregate_functions>1</enable_time_series_aggregate_functions>" in users["data"]["20_timeseries_profile.xml"]
           assert job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
           script = job["spec"]["template"]["spec"]["containers"][0]["command"][-1]
           for want in ("CREATE TABLE IF NOT EXISTS default.node_agent_ts ENGINE = TimeSeries", "PARTITION BY toDate(timestamp)", "INTERVAL 7 DAY", "ttl_only_drop_parts = 1"):

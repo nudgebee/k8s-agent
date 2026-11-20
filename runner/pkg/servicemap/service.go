@@ -41,7 +41,8 @@ type Service struct {
 	HasPrometheus func() bool
 	// TimeSeriesCluster is the cluster label on ClickHouse's TimeSeries
 	// data. While Prom is ClickHouse's Prometheus query API (HasPrometheus
-	// false) it filters the queries in place of ClusterName.
+	// false) it filters the queries in place of ClusterName; empty, they
+	// select no cluster.
 	TimeSeriesCluster string
 	Logger            *slog.Logger
 	// NodeAgentCount, when set, lets the ClickHouse coverage check confirm
@@ -321,9 +322,11 @@ func (s *Service) promReady() bool {
 }
 
 // queryCluster is the cluster the queries select: TimeSeriesCluster while
-// Prom is ClickHouse's Prometheus query API, else ClusterName.
+// Prom is ClickHouse's Prometheus query API, even when empty (the TimeSeries
+// data carries no other cluster label, so ClusterName would match nothing),
+// else ClusterName.
 func (s *Service) queryCluster() string {
-	if s.TimeSeriesCluster != "" && s.HasPrometheus != nil && !s.HasPrometheus() {
+	if s.HasPrometheus != nil && !s.HasPrometheus() {
 		return s.TimeSeriesCluster
 	}
 	return s.ClusterName
