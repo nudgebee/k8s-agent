@@ -219,6 +219,13 @@ type Config struct {
 	// MUST be paired with RSA partial-keys auth in production.
 	PodExecEnabled bool
 
+	// PodScriptRunRequireSignature stops accepting unsigned
+	// pod_script_run_enricher requests: they then need a relay signature
+	// (RELAY_SIGNING_PUBLIC_KEY), an HMAC signature or partial keys. Off by
+	// default, because a request the relay could not sign (no WebSocket, signing
+	// off, clock skew) is otherwise refused.
+	PodScriptRunRequireSignature bool
+
 	// MutateEnabled (group D): delete_pod / cordon / uncordon / rollout_restart.
 	// MUST be paired with RSA partial-keys auth in production.
 	MutateEnabled   bool
@@ -376,6 +383,7 @@ func FromEnv() (*Config, error) {
 		GetResourceUnscopedConcurrency: envInt("GET_RESOURCE_UNSCOPED_CONCURRENCY", 2),
 		KubectlAllowWrite:              envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:                 envBool("PODEXEC_ENABLED", true),
+		PodScriptRunRequireSignature:   envBool("POD_SCRIPT_RUN_REQUIRE_SIGNATURE", false),
 		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
 		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
 		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),

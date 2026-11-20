@@ -205,3 +205,39 @@ func TestValidate_RelaySig_ForgedReplayIsNotADuplicate(t *testing.T) {
 		t.Fatalf("err = %v; want an ordinary rejection", err)
 	}
 }
+
+// A signature-only action is refused on the light-action path even when the
+// allowlist (startup or refreshed) lists it, and still passes with a valid
+// relay signature.
+func TestValidate_SignedOnly(t *testing.T) {
+	priv, pub := relaysigKey(t)
+	ver, err := relaysig.NewVerifier(pub, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const action = "pod_script_run_enricher"
+	v := &Validator{
+		LightActions:  map[string]struct{}{action: {}, "get_resource": {}},
+		RelayVerifier: ver,
+		SignedOnly:    map[string]struct{}{action: {}},
+	}
+
+	if err := v.Validate(&Request{ActionName: action}); err == nil {
+		t.Fatal("unsigned signature-only action should be refused")
+	}
+	v.SetLightActions(map[string]struct{}{action: {}})
+	if err := v.Validate(&Request{ActionName: action}); err == nil {
+		t.Fatal("a refreshed allowlist must not re-open a signature-only action")
+	}
+	if err := v.Validate(&Request{ActionName: "pod_script_run_enricher_x"}); err == nil {
+		t.Fatal("unlisted action should be refused")
+	}
+
+	body := []byte(`{"account_id":"a","action_name":"pod_script_run_enricher","action_params":{}}`)
+	if err := v.Validate(signedRelayReq(priv, body, action, "s1")); err != nil {
+		t.Fatalf("valid relay sig should authorize a signature-only action: %v", err)
+	}
+	if err := v.Validate(signedRelayReq(priv, body, action, "s1")); !errors.Is(err, ErrDuplicateDelivery) {
+		t.Fatalf("replayed signature-only action: got %v, want ErrDuplicateDelivery", err)
+	}
+}

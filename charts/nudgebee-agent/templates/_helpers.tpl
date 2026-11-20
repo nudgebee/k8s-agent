@@ -307,6 +307,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     # unset and re-enable the subsystem.
     - name: MUTATE_ENABLED
       value: {{ if eq .Values.runner.mutateEnabled false }}"false"{{ else }}"true"{{ end }}
+    {{- if .Values.runner.podScriptRunRequireSignature }}
+    - name: POD_SCRIPT_RUN_REQUIRE_SIGNATURE
+      value: "true"
+    {{- end }}
     # KUBECTL_ALLOW_WRITE lifts the runner's read-only verb allowlist on
     # kubectl_command_executor. Gated by runner.enableWritePermissions — the
     # SAME switch that grants the service account its write RBAC — so the
