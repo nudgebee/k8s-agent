@@ -264,6 +264,13 @@ runner:
   # not here. Set to false for a strictly read-only deployment where every
   # mutate action — light-action or not — is unregistered at startup.
   mutateEnabled: true
+  # Refuse unsigned pod_script_run_enricher requests (runs a pod from a given
+  # image and command, with env from a Secret). With this on, a request needs a
+  # relay signature (runner.nudgebee.relay_signing_public_key) or an HMAC /
+  # partial-keys signature. Off by default: requests the relay cannot sign
+  # (HTTP fallback, signing turned off, clock skew) would be refused, which
+  # breaks database connection tests and scripted runbook steps on this cluster.
+  podScriptRunRequireSignature: false
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
   # Job. An image scan runs the target image as its own container, and the

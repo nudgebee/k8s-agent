@@ -651,11 +651,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// the cluster". Allowlist it here to close the gap without forcing
 		// signing into api-server's relay client. pod_bash_enricher / pod_profiler
 		// stay OUT — they have no unsigned api-server caller.
-		// TODO(security): this trades per-request HMAC/RSA verification for the
-		// relay's shared-secret gate, so a relay/secret compromise yields
-		// arbitrary in-cluster command execution. Remove this entry once
-		// api-server's relay client signs pod_script_run_enricher.
-		lightActions["pod_script_run_enricher"] = struct{}{}
+		// This trades per-request verification for the relay's shared-secret
+		// gate, so a relay/secret compromise yields arbitrary in-cluster command
+		// execution. The relay signs what it forwards over the WebSocket, so
+		// POD_SCRIPT_RUN_REQUIRE_SIGNATURE drops the carve-out (see the
+		// validator's SignedOnly below).
+		if !cfg.PodScriptRunRequireSignature {
+			lightActions["pod_script_run_enricher"] = struct{}{}
+		}
 		logger.Info("pod-runner enabled",
 			"default_namespace", cfg.ScannerNamespace,
 			"service_account", cfg.ScannerServiceAccount,
@@ -767,6 +770,16 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		return fmt.Errorf("init relay signature verifier: %w", err)
 	}
 	validator.RelayVerifier = relayVerifier
+	if cfg.PodScriptRunRequireSignature {
+		validator.SignedOnly = map[string]struct{}{"pod_script_run_enricher": {}}
+		if !relayVerifier.Enabled() {
+			// The backend reaches this action through the relay, so without the
+			// relay's key only HMAC- or partial-key-signed requests get through.
+			logger.Warn("POD_SCRIPT_RUN_REQUIRE_SIGNATURE is on but RELAY_SIGNING_PUBLIC_KEY is not set; pod_script_run_enricher requests without an HMAC or partial-key signature will be refused")
+		} else {
+			logger.Info("pod_script_run_enricher requires a signed request")
+		}
+	}
 
 	// refresh_playbook hot-reloads the allowlist from the backend so we can
 	// add new actions to a running agent without a customer Helm upgrade.
