@@ -382,6 +382,14 @@ runner:
   #               the cache holds the cluster as it is now.
   #   prometheus  the kube_* queries; needs kube-state-metrics.
   serviceMapInventory: kubernetes
+  # With no Prometheus configured or discovered, the runner sends its PromQL
+  # (service map, rightsizing, prometheus_* actions) to ClickHouse's Prometheus
+  # query API at /prometheus/api/v1 as soon as a probe finds node-agent data
+  # there; a Prometheus discovered later takes over. ClickHouse holds that data
+  # with clickhouse.timeseries.enabled (off by default), which sets up the
+  # API, the TimeSeries table and the collector pipeline that fills it. On
+  # ClickHouse the queries and the probe select the TIMESERIES_CLUSTER label
+  # when that is set, and no cluster otherwise; never CLUSTER_NAME.
   prometheus:
     # Managed-provider auth for Prometheus-compatible backends. Leave empty
     # for in-cluster Prometheus / plain-header auth (use globalConfig.

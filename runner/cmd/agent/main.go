@@ -290,6 +290,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			logger.Warn("prometheus Azure auth requested but AZURE_CLIENT_ID/AZURE_TENANT_ID incomplete — ignoring")
 		}
 	}
+	// With no Prometheus, PromQL can fall back to ClickHouse's Prometheus
+	// query API once a probe finds node-agent data there (see the watcher
+	// below); ForURL keeps each backend's auth.
+	chPromQL := clickhousePromQLURL(cfg)
+	if chPromQL != "" {
+		clickhousePromQLAuth(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
+	}
 	ph := prometheus.Handlers(promClient)
 	maps.Copy(handlers, ph)
 	for name := range ph {
@@ -339,8 +346,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// agent — which read prometheus_url from the Robusta global_config ConfigMap
 	// — by bumping only the image tag on the old chart, which never sets the
 	// PROMETHEUS_URL env the Go agent reads.
-	watchForPrometheus := promClient.URL() == ""
-	if watchForPrometheus {
+	watchForPrometheus := cfg.PrometheusURL == ""
+	if promClient.URL() == "" {
 		logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
 			"retry_interval", promDiscoveryInterval)
 	}
@@ -349,6 +356,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// metrics in-cluster). Registered unconditionally; the handlers report
 	// the missing URL themselves until one is found.
 	smSvc := servicemap.New(promClient, cfg.ClusterName)
+	// On the ClickHouse fallback there are no kube_* series: past windows keep
+	// taking their inventory from the cache until a Prometheus is discovered.
+	smSvc.HasPrometheus = func() bool { return promBackend(promClient, chPromQL) == promBackendPrometheus }
+	smSvc.TimeSeriesCluster = cfg.TimeSeriesCluster
 	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
 	maps.Copy(handlers, smHandlers)
 	for name := range smHandlers {
@@ -850,11 +861,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// Prometheus path the collector's `/prometheus-v2/*` route forwards
 		// through (relay-server/pkg/utils/utils.go:77).
 		gp := grafana.New(grafanaURL, grafanaUser, grafanaPass, extraHeaders,
-			promClient.URL(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
+			prometheusProxyURL(promClient, chPromQL)(), config.ParseHeaders(cfg.PrometheusHeaders), nil)
 		// Read the URL per request rather than pinning the one we had at
 		// startup, so the /prometheus-v2/* route works on a Prometheus that
-		// only shows up later.
-		gp.PrometheusURLFn = promClient.URL
+		// only shows up later. Not the ClickHouse fallback: the proxy does not
+		// carry the client's authorizer.
+		gp.PrometheusURLFn = prometheusProxyURL(promClient, chPromQL)
 		disp.SetGrafana(&grafanaAdapter{p: gp})
 		if grafanaURL != "" {
 			logger.Info("grafana proxy enabled", "url", redact.URL(grafanaURL))
@@ -930,8 +942,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		g.Go(func() error {
 			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
 				promClient.SetURL(u)
-				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map are now available", "url", redact.URL(u))
+				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map now use it", "url", redact.URL(u))
 			})
+			return nil
+		})
+	}
+
+	// Probe ClickHouse's Prometheus query API until it holds node-agent data
+	// or a Prometheus is discovered, whichever comes first.
+	if chPromQL != "" {
+		g.Go(func() error {
+			watchClickHousePromQL(gctx, promClient, chPromQL, cfg.TimeSeriesCluster, promDiscoveryInterval, logger)
 			return nil
 		})
 	}
@@ -1231,6 +1252,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
 				return telemetry.Datasources{
 					PrometheusURL:              promClient.URL(),
+					PrometheusBackend:          promBackend(promClient, chPromQL),
 					AlertManagerURL:            cfg.AlertManagerURL,
 					LokiURL:                    cfg.LokiURL,
 					LogsProvider:               logsProvider,
@@ -1240,7 +1262,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					LogProviderConfig:          logCfg,
 					PrometheusConnected:        promConnected,
 					PrometheusConnectedError:   promErr,
-					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, logger),
+					NodeAgentCount:             queryNodeAgentCount(probeCtx, promClient, nodeAgentCountQuery(promBackend(promClient, chPromQL), cfg.TimeSeriesCluster), logger),
 					PrometheusRetentionTime:    telemetry.PrometheusRetention(probeCtx, promClient, logger),
 					PrometheusAdditionalLabels: promExtraLabels,
 					TraceTable:                 traceTable,
@@ -1446,20 +1468,18 @@ func prometheusConnected(ctx context.Context, c *prometheus.Client, logger *slog
 }
 
 // queryNodeAgentCount
-// (lines 246-264). Counts pods that match the upstream nudgebee node-agent
-// job regex; the daemonset reports `up{job=~"...nudgebee(-.*)?-node-agent"}`
-// per-pod, so len(result) is the count. Returns 0 on any error so the UI
+// (lines 246-264). Runs q (nodeAgentCountQuery), which returns one series per
+// node agent, so len(result) is the count. Returns 0 on any error so the UI
 // shows Disconnected rather than panicking the telemetry tick.
 //
 // Note: the legacy query embeds `__CLUSTER__` for multi-cluster Prom setups;
 // __CLUSTER__ is replaced upstream by the relay before queries reach the
 // agent. Our local probe runs against the agent's own cluster so we drop
 // the token entirely.
-func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, logger *slog.Logger) int {
+func queryNodeAgentCount(ctx context.Context, c *prometheus.Client, q string, logger *slog.Logger) int {
 	if c == nil || c.URL() == "" {
 		return 0
 	}
-	const q = `up{job=~"(.+/)?nudgebee(-.*)?-node-agent"}`
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	raw, err := c.Query(cctx, q, "", "")

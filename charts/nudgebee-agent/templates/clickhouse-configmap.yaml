@@ -159,4 +159,19 @@ data:
         </default>
       </profiles>
     </clickhouse>
+  {{- if (dig "timeseries" "enabled" false .Values.clickhouse) }}
+  # With clickhouse.timeseries: the Prometheus query API (20_timeseries.xml in
+  # the server config above) evaluates PromQL with aggregate functions
+  # ClickHouse 26.10 keeps behind this setting, and refuses every query
+  # without it. Profiles are read from users.d, not config.d, hence here. The
+  # runner's PromQL fallback queries as this user.
+  20_timeseries_profile.xml: |
+    <clickhouse>
+      <profiles>
+        <default>
+          <enable_time_series_aggregate_functions>1</enable_time_series_aggregate_functions>
+        </default>
+      </profiles>
+    </clickhouse>
+  {{- end }}
 {{- end }}

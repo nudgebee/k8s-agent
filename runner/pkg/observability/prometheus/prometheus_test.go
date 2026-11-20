@@ -305,3 +305,14 @@ func TestSetURL_IsSafeWhileQueriesRun(t *testing.T) {
 	}
 	<-done
 }
+
+// SetURLIfEmpty never overwrites a URL that is already set.
+func TestSetURLIfEmpty(t *testing.T) {
+	c := New("", nil)
+	if !c.SetURLIfEmpty("http://clickhouse:8123/prometheus/") || c.URL() != "http://clickhouse:8123/prometheus" {
+		t.Fatalf("first SetURLIfEmpty: URL = %q", c.URL())
+	}
+	if c.SetURLIfEmpty("http://other") || c.URL() != "http://clickhouse:8123/prometheus" {
+		t.Errorf("second SetURLIfEmpty overwrote the URL: %q", c.URL())
+	}
+}

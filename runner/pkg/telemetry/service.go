@@ -68,25 +68,30 @@ type ActivityStats struct {
 	// jsonb `||` operator, so an omitted key would strand the last failure
 	// reason in the DB after the datasource recovers — an explicit "" is
 	// required to clear it.
-	PrometheusConnectionError   string            `json:"prometheusConnectionError"`
-	AlertManagerConnectionError string            `json:"alertManagerConnectionError"`
-	LogsConnectionError         string            `json:"logsConnectionError"`
-	OpencostConnectionError     string            `json:"opencostConnectionError"`
-	LogProviderConfig           map[string]any    `json:"log_provider_config,omitempty"`
-	LogProviderURL              string            `json:"logProviderUrl,omitempty"`
-	PrometheusURL               string            `json:"prometheusUrl,omitempty"`
-	PrometheusAdditionalLabels  map[string]string `json:"prometheusAdditionalLabels,omitempty"`
-	AlertManagerURL             string            `json:"alertmanagerUrl,omitempty"`
-	TracesURL                   string            `json:"tracesUrl,omitempty"`
-	AutoScalerVersion           string            `json:"autoScalerVersion,omitempty"`
-	AutoScalerEnabled           bool              `json:"autoScalerEnabled"`
-	AutoScalerNamespace         string            `json:"autoScalerNamespace,omitempty"`
-	AutoScalerType              string            `json:"autoScalerType,omitempty"`
-	AgentURL                    string            `json:"agentUrl,omitempty"`
-	AgentWSEnabled              bool              `json:"agentWSEnabled"`
-	HealthCheckDuration         float64           `json:"healthCheckDuration,omitempty"`
-	TraceProvider               string            `json:"traceProvider,omitempty"`
-	TraceProviderConfig         map[string]any    `json:"traceProviderConfig,omitempty"`
+	PrometheusConnectionError   string         `json:"prometheusConnectionError"`
+	AlertManagerConnectionError string         `json:"alertManagerConnectionError"`
+	LogsConnectionError         string         `json:"logsConnectionError"`
+	OpencostConnectionError     string         `json:"opencostConnectionError"`
+	LogProviderConfig           map[string]any `json:"log_provider_config,omitempty"`
+	LogProviderURL              string         `json:"logProviderUrl,omitempty"`
+	PrometheusURL               string         `json:"prometheusUrl,omitempty"`
+	// PrometheusBackend is where PromQL goes: "prometheus", "clickhouse" (the
+	// Prometheus query API over the node-agent TimeSeries table, which holds
+	// no cAdvisor or kube-state metrics) or "" with neither. Always sent, so
+	// the jsonb merge does not keep a stale value.
+	PrometheusBackend          string            `json:"prometheusBackend"`
+	PrometheusAdditionalLabels map[string]string `json:"prometheusAdditionalLabels,omitempty"`
+	AlertManagerURL            string            `json:"alertmanagerUrl,omitempty"`
+	TracesURL                  string            `json:"tracesUrl,omitempty"`
+	AutoScalerVersion          string            `json:"autoScalerVersion,omitempty"`
+	AutoScalerEnabled          bool              `json:"autoScalerEnabled"`
+	AutoScalerNamespace        string            `json:"autoScalerNamespace,omitempty"`
+	AutoScalerType             string            `json:"autoScalerType,omitempty"`
+	AgentURL                   string            `json:"agentUrl,omitempty"`
+	AgentWSEnabled             bool              `json:"agentWSEnabled"`
+	HealthCheckDuration        float64           `json:"healthCheckDuration,omitempty"`
+	TraceProvider              string            `json:"traceProvider,omitempty"`
+	TraceProviderConfig        map[string]any    `json:"traceProviderConfig,omitempty"`
 	// TracesConnectionError is the reason traces are disconnected, rendered by
 	// the UI's Agent Health card under the Traces pill ("Reason - ...").
 	//
@@ -164,9 +169,11 @@ type ClusterStats struct {
 // or running its own queries.
 type Datasources struct {
 	// URLs the agent has discovered (env or autodiscovery).
-	PrometheusURL   string
-	AlertManagerURL string
-	LokiURL         string // (informational; logs provider URL is LogsProviderURL below)
+	PrometheusURL string
+	// PrometheusBackend: see ActivityStats.PrometheusBackend.
+	PrometheusBackend string
+	AlertManagerURL   string
+	LokiURL           string // (informational; logs provider URL is LogsProviderURL below)
 
 	// Logs provider — caller picks based on env (ELASTICSEARCH_ENABLED →
 	// SIGNOZ_ENABLED → loki) and probes health.
@@ -416,6 +423,7 @@ func (s *Service) postOnce(ctx context.Context) error {
 func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 	out := ActivityStats{
 		PrometheusURL:              ds.PrometheusURL,
+		PrometheusBackend:          ds.PrometheusBackend,
 		PrometheusRetentionTime:    ds.PrometheusRetentionTime,
 		PrometheusAdditionalLabels: ds.PrometheusAdditionalLabels,
 		AlertManagerURL:            ds.AlertManagerURL,

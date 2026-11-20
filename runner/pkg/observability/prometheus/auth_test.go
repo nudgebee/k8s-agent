@@ -154,3 +154,50 @@ func TestAzureExpiry_PrefersExpiresOn(t *testing.T) {
 		t.Errorf("expires_in fallback out of range: %v", d)
 	}
 }
+
+// A client that starts on the ClickHouse endpoint sends it basic auth, and a
+// Prometheus discovered later (SetURL) gets the configured authorizer instead.
+func TestForURL_FollowsSetURL(t *testing.T) {
+	type seen struct{ basic, token string }
+	record := func(out *seen) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, p, _ := r.BasicAuth()
+			if u != "" {
+				out.basic = u + ":" + p
+			}
+			out.token = r.Header.Get("token")
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+		}))
+	}
+	var ch, prom seen
+	chSrv, promSrv := record(&ch), record(&prom)
+	defer chSrv.Close()
+	defer promSrv.Close()
+
+	chURL := chSrv.URL + "/prometheus"
+	c := New(chURL, &http.Client{Timeout: 5 * time.Second})
+	c.Auth = ForURL(chURL, NewBasicAuth("default", "pw"), NewCoralogixAuth("tok"))
+	if _, err := c.Query(context.Background(), "up", "1", ""); err != nil {
+		t.Fatal(err)
+	}
+	c.SetURL(promSrv.URL)
+	if _, err := c.Query(context.Background(), "up", "1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ch.basic != "default:pw" || ch.token != "" {
+		t.Errorf("clickhouse got basic=%q token=%q; want default:pw and no token", ch.basic, ch.token)
+	}
+	if prom.basic != "" || prom.token != "tok" {
+		t.Errorf("prometheus got basic=%q token=%q; want no basic auth and token tok", prom.basic, prom.token)
+	}
+
+	// No next authorizer: the discovered Prometheus gets no credentials.
+	prom = seen{}
+	c.Auth = ForURL(chURL, NewBasicAuth("default", "pw"), nil)
+	if _, err := c.Query(context.Background(), "up", "1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if prom.basic != "" || prom.token != "" {
+		t.Errorf("prometheus got basic=%q token=%q; want none", prom.basic, prom.token)
+	}
+}

@@ -395,3 +395,105 @@ func TestBuild_KubernetesCacheNotSyncedWithoutPrometheus(t *testing.T) {
 		t.Errorf("err = %v; want %q", err, want)
 	}
 }
+
+// On the ClickHouse fallback (no kube-state metrics), a window that ended 2h
+// ago still takes its pods from the cache; a real Prometheus keeps answering
+// the kube_* queries for it.
+func TestBuild_KubernetesInventoryPastWindowWithoutRealPrometheus(t *testing.T) {
+	end := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	for _, tc := range []struct {
+		name      string
+		real      bool
+		wantKubeQ bool
+	}{
+		{"clickhouse fallback", false, false},
+		{"real prometheus", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fp := newKubeTestService(t, trafficResponses, testCluster()...)
+			isReal := tc.real
+			s.HasPrometheus = func() bool { return isReal }
+
+			apps, err := s.Build(context.Background(), FilterParams{Duration: 60, EndTime: end})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fp.kubeQueries() > 0; got != tc.wantKubeQ {
+				t.Errorf("kube_* queries sent = %v; want %v", got, tc.wantKubeQ)
+			}
+			if !tc.wantKubeQ {
+				backend := appNamed(apps, "Deployment", "backend")
+				if backend == nil || len(backend.Instances) != 1 || backend.DesiredInstances != 3 {
+					t.Fatalf("backend = %+v; want its pod and 3 desired replicas from the cache", backend)
+				}
+			}
+		})
+	}
+}
+
+// On the ClickHouse fallback the queries select TimeSeriesCluster, the label
+// the collector writes, and no cluster when it is empty (never ClusterName);
+// on a real Prometheus they keep ClusterName.
+func TestBuild_TimeSeriesClusterOnClickHouseOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		real        bool
+		wantCluster string // "" means no cluster matcher at all
+		tsCluster   string
+	}{
+		{"clickhouse fallback", false, `cluster="ts-uid"`, "ts-uid"},
+		{"clickhouse without a cluster label", false, "", ""},
+		{"real prometheus", true, `cluster="production-cluster"`, "ts-uid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fp := newKubeTestService(t, trafficResponses, testCluster()...)
+			isReal := tc.real
+			s.HasPrometheus = func() bool { return isReal }
+			s.TimeSeriesCluster = tc.tsCluster
+			s.ClusterName = "production-cluster"
+
+			if _, err := s.Build(context.Background(), FilterParams{Duration: 60}); err != nil {
+				t.Fatal(err)
+			}
+			fp.mu.Lock()
+			defer fp.mu.Unlock()
+			if len(fp.queries) == 0 {
+				t.Fatal("no queries sent")
+			}
+			for _, q := range fp.queries {
+				switch has := strings.Contains(q, "cluster="); {
+				case tc.wantCluster == "" && has:
+					t.Errorf("query has a cluster matcher: %s", q)
+				case tc.wantCluster != "" && strings.Contains(q, "container_") && !strings.Contains(q, tc.wantCluster):
+					t.Errorf("query lacks %s: %s", tc.wantCluster, q)
+				}
+			}
+		})
+	}
+}
+
+// queryCluster: on ClickHouse only TimeSeriesCluster, even when empty, since
+// the TimeSeries data has no other cluster label; elsewhere ClusterName.
+func TestQueryCluster(t *testing.T) {
+	yes := func() bool { return true }
+	no := func() bool { return false }
+	for _, tc := range []struct {
+		name          string
+		hasPrometheus func() bool
+		tsCluster     string
+		want          string
+	}{
+		{"clickhouse, no TimeSeriesCluster: no fallback to ClusterName", no, "", ""},
+		{"clickhouse, TimeSeriesCluster set", no, "timeseries-cluster", "timeseries-cluster"},
+		{"prometheus keeps ClusterName", yes, "", "production-cluster"},
+		{"prometheus ignores TimeSeriesCluster", yes, "timeseries-cluster", "production-cluster"},
+		{"HasPrometheus unset keeps ClusterName", nil, "timeseries-cluster", "production-cluster"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Service{ClusterName: "production-cluster", TimeSeriesCluster: tc.tsCluster, HasPrometheus: tc.hasPrometheus}
+			if got := s.queryCluster(); got != tc.want {
+				t.Errorf("queryCluster() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
