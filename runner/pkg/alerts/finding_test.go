@@ -223,6 +223,87 @@ func TestBuilder_Alert_PreservesUpstreamFingerprint(t *testing.T) {
 	}
 }
 
+// alertID builds one alert through FromAlertManager and returns its Finding ID.
+func alertID(t *testing.T, b *Builder, fingerprint, startsAt, status string) string {
+	t.Helper()
+	alert := map[string]any{
+		"status": status,
+		"labels": map[string]string{"alertname": "X", "pod": "p", "namespace": "ns"},
+	}
+	if fingerprint != "" {
+		alert["fingerprint"] = fingerprint
+	}
+	if startsAt != "" {
+		alert["startsAt"] = startsAt
+	}
+	raw, err := json.Marshal(map[string]any{"alerts": []any{alert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := b.FromAlertManager(raw)
+	if err != nil || len(out) != 1 {
+		t.Fatalf("FromAlertManager: %v, %d envelopes", err, len(out))
+	}
+	if out[0].Evidence[0].IssueID != out[0].Finding.ID {
+		t.Errorf("evidence names %q, finding is %q", out[0].Evidence[0].IssueID, out[0].Finding.ID)
+	}
+	return out[0].Finding.ID
+}
+
+func TestBuilder_Alert_ResendKeepsFindingID(t *testing.T) {
+	b := &Builder{AccountID: "acc", Cluster: "c"}
+	first := alertID(t, b, "fp-1", "2026-05-07T10:00:00.123456789Z", "firing")
+
+	// A repeat_interval re-send, the same instant written with an offset, and
+	// the resolve all name the event the first delivery created.
+	for name, got := range map[string]string{
+		"resend":  alertID(t, b, "fp-1", "2026-05-07T10:00:00.123456789Z", "firing"),
+		"offset":  alertID(t, b, "fp-1", "2026-05-07T15:30:00.123+05:30", "firing"),
+		"resolve": alertID(t, b, "fp-1", "2026-05-07T10:00:00.123456789Z", "resolved"),
+	} {
+		if got != first {
+			t.Errorf("%s: id %q, want %q", name, got, first)
+		}
+	}
+
+	// A new firing, another alert, or another account is another event.
+	for name, got := range map[string]string{
+		"new firing":    alertID(t, b, "fp-1", "2026-05-07T11:00:00Z", "firing"),
+		"other alert":   alertID(t, b, "fp-2", "2026-05-07T10:00:00.123456789Z", "firing"),
+		"other account": alertID(t, &Builder{AccountID: "acc-2", Cluster: "c"}, "fp-1", "2026-05-07T10:00:00.123456789Z", "firing"),
+	} {
+		if got == first {
+			t.Errorf("%s: reused id %q", name, got)
+		}
+	}
+}
+
+// The server side derives the same id for runners that predate this one, so
+// the formula is pinned to a literal value. Python computes it as
+// uuid.uuid5(uuid.NAMESPACE_OID, "<account>|prometheus|<fingerprint>|2026-11-22T10:00:00Z").
+func TestBuilder_Alert_FindingIDGoldenValue(t *testing.T) {
+	b := &Builder{AccountID: "00000000-0000-0000-0000-000000000001", Cluster: "c"}
+	got := alertID(t, b, "8a2c1e5f9d3b7a60", "2026-11-22T10:00:00.123456789Z", "firing")
+	if want := "4bab9980-0e05-5e86-a6c0-b7071858b21f"; got != want {
+		t.Errorf("finding id %q, want %q", got, want)
+	}
+}
+
+func TestBuilder_Alert_NoStableInputKeepsRandomID(t *testing.T) {
+	b := &Builder{AccountID: "acc", Cluster: "c"}
+	for name, c := range map[string]struct{ fingerprint, startsAt string }{
+		"no fingerprint": {"", "2026-05-07T10:00:00Z"},
+		"no startsAt":    {"fp-1", ""},
+		"zero startsAt":  {"fp-1", "0001-01-01T00:00:00Z"},
+		"bad startsAt":   {"fp-1", "yesterday"},
+	} {
+		first := alertID(t, b, c.fingerprint, c.startsAt, "firing")
+		if again := alertID(t, b, c.fingerprint, c.startsAt, "firing"); again == first {
+			t.Errorf("%s: id is stable, want a random one", name)
+		}
+	}
+}
+
 func TestBuilder_Kubewatch_HappyPath(t *testing.T) {
 	b := &Builder{AccountID: "acc", Cluster: "c"}
 	raw := []byte(`{
