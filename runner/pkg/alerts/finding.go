@@ -117,7 +117,7 @@ func (b *Builder) alertFindingID(a alertManagerAlert) string {
 	if a.Fingerprint == "" || a.StartsAt == "" {
 		return uuid.NewString()
 	}
-	startsAt, err := time.Parse(time.RFC3339Nano, a.StartsAt)
+	startsAt, err := time.Parse(time.RFC3339, a.StartsAt)
 	if err != nil || startsAt.Year() <= 1 {
 		return uuid.NewString()
 	}
