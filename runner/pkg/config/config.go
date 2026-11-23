@@ -39,6 +39,12 @@ type Config struct {
 	LokiUsername      string // optional Basic-Auth (LOKI_USERNAME)
 	LokiPassword      string // optional Basic-Auth (LOKI_PASSWORD)
 
+	// PrometheusDiscoveryEnabled false stops the runner looking for a
+	// Prometheus Service in the cluster, at startup and afterwards, so only
+	// PROMETHEUS_URL is used. Without one, PromQL can then go to ClickHouse
+	// even in a cluster that runs a Prometheus of its own.
+	PrometheusDiscoveryEnabled bool
+
 	// Prometheus managed-provider auth (mirrors the legacy prometrix configs).
 	// Coralogix uses a `token` header; AWS signs each request with SigV4;
 	// Azure mints a Bearer token via managed identity or client-secret.
@@ -306,6 +312,9 @@ func FromEnv() (*Config, error) {
 		LokiHeaders:           os.Getenv("LOKI_EXTRA_HEADER"), // matches runner.yaml secret
 		LokiUsername:          os.Getenv("LOKI_USERNAME"),
 		LokiPassword:          os.Getenv("LOKI_PASSWORD"),
+
+		PrometheusDiscoveryEnabled: envBool("PROMETHEUS_DISCOVERY_ENABLED", true),
+
 		// Prometheus managed-provider auth. Defaults mirror the legacy
 		// prometrix env handling (utils.py): AWS service defaults to "aps",
 		// Azure resource/endpoints have the same fallbacks.

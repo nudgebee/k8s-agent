@@ -93,6 +93,9 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		ClickHouseDB:        "default",
 		ServiceMapSource:    "prometheus",
 		ServiceMapInventory: "prometheus",
+
+		PrometheusDiscoveryEnabled: true,
+
 		// The logs check falls back to otel_logs in that database.
 		ClickHouseLogsDatabase: "default",
 		ClickHouseLogsTable:    "otel_logs",
@@ -393,5 +396,29 @@ func TestFromEnv_K8sWatchScope(t *testing.T) {
 	t.Setenv("K8S_WATCH_KINDS", "")
 	if c, _ = FromEnv(); c.K8sWatchKinds == nil || len(c.K8sWatchKinds) != 0 {
 		t.Errorf("set but empty = %v; want an empty, non-nil list", c.K8sWatchKinds)
+	}
+}
+
+func TestFromEnv_PrometheusDiscoveryEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		want      bool
+	}{
+		{"unset keeps discovery on", "", true},
+		{"false turns it off", "false", false},
+		{"true keeps it on", "true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WEBSOCKET_RELAY_ADDRESS", "ws://relay")
+			t.Setenv("NUDGEBEE_AUTH_SECRET_KEY", "secret")
+			t.Setenv("PROMETHEUS_DISCOVERY_ENABLED", tc.env)
+			c, err := FromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.PrometheusDiscoveryEnabled != tc.want {
+				t.Errorf("PrometheusDiscoveryEnabled = %v; want %v", c.PrometheusDiscoveryEnabled, tc.want)
+			}
+		})
 	}
 }

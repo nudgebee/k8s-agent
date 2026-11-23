@@ -226,7 +226,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// A 1h cache avoids hammering the API server.
 	disc := svcdiscover.New(typedKube, "")
 	if cfg.PrometheusURL == "" {
-		if u := disc.FindFirst(ctx, svcdiscover.PrometheusSelectors); u != "" {
+		if !cfg.PrometheusDiscoveryEnabled {
+			logger.Info("prometheus discovery disabled (PROMETHEUS_DISCOVERY_ENABLED=false); only PROMETHEUS_URL is used")
+		} else if u := disc.FindFirst(ctx, svcdiscover.PrometheusSelectors); u != "" {
 			cfg.PrometheusURL = u
 			logger.Info("prometheus auto-discovered", "url", redact.URL(u))
 		}
@@ -346,10 +348,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// agent — which read prometheus_url from the Robusta global_config ConfigMap
 	// — by bumping only the image tag on the old chart, which never sets the
 	// PROMETHEUS_URL env the Go agent reads.
-	watchForPrometheus := cfg.PrometheusURL == ""
+	watchForPrometheus := cfg.PrometheusURL == "" && cfg.PrometheusDiscoveryEnabled
 	if promClient.URL() == "" {
-		logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
-			"retry_interval", promDiscoveryInterval)
+		if watchForPrometheus {
+			logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and none was autodiscovered at startup; prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable until one is found",
+				"retry_interval", promDiscoveryInterval)
+		} else {
+			logger.Warn("prometheus not configured: PROMETHEUS_URL is unset and discovery is disabled (PROMETHEUS_DISCOVERY_ENABLED=false); prometheus_* actions, rightsizing, service-map and the Prometheus health badge stay unavailable unless the ClickHouse PromQL fallback takes over")
+		}
 	}
 
 	// Service map needs the same Prometheus client (queries Coroot eBPF
