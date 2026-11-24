@@ -596,9 +596,14 @@ opentelemetry-collector:
   # Inherit name overrides from parent chart
   nameOverride: ""
   fullnameOverride: ""
+  # The memory_limiter starts refusing data at a share of the limit (about 55%
+  # of it), so a low limit drops data before the pod is anywhere near OOM. 1Gi
+  # was too small with clickhouse.timeseries.enabled: on a 28-node cluster the
+  # collector held about 800MiB and refused about a quarter of the scraped
+  # node-agent metrics. The request stays at 512Mi, so scheduling is unchanged.
   resources:
     limits:
-      memory: 1024Mi
+      memory: 2Gi
     requests:
       cpu: 250m
       memory: 512Mi
@@ -850,9 +855,9 @@ clickhouse:
   #   entries when overriding the lists. Turning this on or off on a running
   #   install reaches the collector when its pod restarts.
   # The pipeline scrapes every node agent, so the collector needs more memory:
-  # raise opentelemetry-collector.resources.limits.memory above the 1Gi
-  # default on larger clusters (a 24-node cluster runs at about 1.3GiB with a
-  # 2Gi limit) and watch the collector's memory.
+  # the 2Gi default of opentelemetry-collector.resources.limits.memory covers
+  # about 30 nodes (a 24-node cluster runs at about 1.3GiB); raise it on larger
+  # clusters and watch the collector's memory.
   # Where this was set up by hand, remove in the same change that turns it on:
   # <prometheus><handlers> and <http_handlers> from clickhouse.extraOverrides
   # (the render fails while <http_handlers> is there), and the collector's own
