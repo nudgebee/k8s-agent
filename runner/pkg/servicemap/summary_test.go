@@ -93,19 +93,22 @@ func ddlSent(ch *fakeClickHouse) []string {
 }
 
 func TestStartSummary(t *testing.T) {
-	t.Run("prometheus creates nothing", func(t *testing.T) {
-		ch := &fakeClickHouse{}
-		s, _ := newTestService(t, ch, SourcePrometheus)
-		s.summaryReady.Store(false)
-		s.StartSummary(context.Background())
-		time.Sleep(50 * time.Millisecond)
-		ch.mu.Lock()
-		n := len(ch.sqls)
-		ch.mu.Unlock()
-		if n != 0 || s.summaryReady.Load() {
-			t.Errorf("prometheus source sent %d queries to ClickHouse", n)
-		}
-	})
+	// Neither PromQL source reads the summary tables, so neither creates them.
+	for _, src := range []Source{SourcePrometheus, SourceTimeSeries} {
+		t.Run(string(src)+" creates nothing", func(t *testing.T) {
+			ch := &fakeClickHouse{}
+			s, _ := newTestService(t, ch, src)
+			s.summaryReady.Store(false)
+			s.StartSummary(context.Background())
+			time.Sleep(50 * time.Millisecond)
+			ch.mu.Lock()
+			n := len(ch.sqls)
+			ch.mu.Unlock()
+			if n != 0 || s.summaryReady.Load() {
+				t.Errorf("%s source sent %d queries to ClickHouse", src, n)
+			}
+		})
+	}
 
 	t.Run("waits for the raw tables, then creates", func(t *testing.T) {
 		defer func(r time.Duration) { summaryRetry = r }(summaryRetry)

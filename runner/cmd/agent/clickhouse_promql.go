@@ -14,6 +14,7 @@ import (
 	"github.com/nudgebee/nudgebee-agent/pkg/config"
 	"github.com/nudgebee/nudgebee-agent/pkg/observability/prometheus"
 	"github.com/nudgebee/nudgebee-agent/pkg/redact"
+	"github.com/nudgebee/nudgebee-agent/pkg/servicemap"
 )
 
 // Values of the health report's prometheusBackend.
@@ -49,7 +50,16 @@ func clusterSelector(cluster string) string {
 // PromQL may fall back to, or "" when it cannot: a Prometheus is configured
 // or was discovered at startup, or ClickHouse is not configured.
 func clickhousePromQLURL(cfg *config.Config) string {
-	if cfg.PrometheusURL != "" || !cfg.ClickHouseEnabled {
+	if cfg.PrometheusURL != "" {
+		return ""
+	}
+	return clickhouseTimeSeriesURL(cfg)
+}
+
+// clickhouseTimeSeriesURL is the URL of ClickHouse's Prometheus query API
+// whether or not a Prometheus is configured, or "" when ClickHouse is not.
+func clickhouseTimeSeriesURL(cfg *config.Config) string {
+	if !cfg.ClickHouseEnabled {
 		return ""
 	}
 	c := chclient.New(chclient.Config{Host: cfg.ClickHouseHost, Port: cfg.ClickHousePort, SSLEnabled: cfg.ClickHouseSSL})
@@ -136,6 +146,32 @@ func parsePromDuration(s string) (time.Duration, bool) {
 		return max(time.Nanosecond, time.Duration(f*float64(time.Second))), true
 	}
 	return 0, false
+}
+
+// serviceMapPromQL is the client the service map queries and whether that
+// client is a real Prometheus. With SERVICE_MAP_SOURCE=timeseries the map
+// gets a client of its own on ClickHouse's Prometheus query API, with the
+// ClickHouse user's basic auth and query limits (clickhousePromQLRequests)
+// and none of the Prometheus headers, so it reads the TimeSeries data while
+// every other PromQL caller keeps prom. timeSeries is false when that source
+// was not asked for or ClickHouse is not configured; the map then shares prom
+// (sharedServiceMapPromQL).
+func serviceMapPromQL(cfg *config.Config, prom *prometheus.Client, chPromQL string) (c *prometheus.Client, hasPrometheus func() bool, timeSeries bool) {
+	if src, _ := servicemap.ParseSource(cfg.ServiceMapSource); src == servicemap.SourceTimeSeries {
+		if u := clickhouseTimeSeriesURL(cfg); u != "" {
+			c := prometheus.New(u, prom.HTTP)
+			clickhousePromQLRequests(c, u, cfg.ClickHouseUser, cfg.ClickHousePassword)
+			return c, func() bool { return false }, true
+		}
+	}
+	c, hasPrometheus = sharedServiceMapPromQL(prom, chPromQL)
+	return c, hasPrometheus, false
+}
+
+// sharedServiceMapPromQL is the map on the shared PromQL client: a real
+// Prometheus unless prom is on the ClickHouse fallback at chPromQL.
+func sharedServiceMapPromQL(prom *prometheus.Client, chPromQL string) (*prometheus.Client, func() bool) {
+	return prom, func() bool { return promBackend(prom, chPromQL) == promBackendPrometheus }
 }
 
 // errNoNodeAgentSeries is the probe's reason when the query works but the

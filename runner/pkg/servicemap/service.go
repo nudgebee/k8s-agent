@@ -70,6 +70,11 @@ const (
 	// per window and filter, also builds the ClickHouse map and logs how the
 	// two differ.
 	SourceShadow Source = "shadow"
+	// SourceTimeSeries reads everything with PromQL, like SourcePrometheus,
+	// but main gives Prom a client of its own on ClickHouse's Prometheus
+	// query API, so the map reads the TimeSeries data even when a Prometheus
+	// is configured. It creates no summary tables.
+	SourceTimeSeries Source = "timeseries"
 )
 
 // ParseSource maps the SERVICE_MAP_SOURCE value to a Source; anything it does
@@ -79,7 +84,7 @@ func ParseSource(v string) (Source, bool) {
 	switch s := Source(strings.ToLower(strings.TrimSpace(v))); s {
 	case "", SourcePrometheus:
 		return SourcePrometheus, true
-	case SourceClickHouse, SourceShadow:
+	case SourceClickHouse, SourceShadow, SourceTimeSeries:
 		return s, true
 	}
 	return SourcePrometheus, false

@@ -238,14 +238,14 @@ func dropRetiredSummary(ctx context.Context, c *chclient.Client) error {
 // ends, so tables or MVs that disappear — say ClickHouse restarted on an
 // empty volume — are created again. Reads do not trust the ready flag alone:
 // the coverage check confirms every MV exists and dates the summary from the
-// newest one. It does nothing for the prometheus source, so a default install
-// creates nothing in ClickHouse.
+// newest one. It does nothing for the prometheus and timeseries sources, so a
+// default install creates nothing in ClickHouse.
 //
 // The retired versions are dropped once, after the first successful setup,
 // not on every recheck: during a rolling update or a rollback an older runner
 // re-creates them, and dropping on every pass would make the two fight.
 func (s *Service) StartSummary(ctx context.Context) {
-	if s.CH == nil || s.Source == "" || s.Source == SourcePrometheus {
+	if s.source() == SourcePrometheus {
 		return
 	}
 	logger := s.Logger

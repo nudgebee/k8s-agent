@@ -388,12 +388,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	// Service map needs the same Prometheus client (queries Coroot eBPF
-	// metrics in-cluster). Registered unconditionally; the handlers report
-	// the missing URL themselves until one is found.
-	smSvc := servicemap.New(promClient, cfg.ClusterName)
-	// On the ClickHouse fallback there are no kube_* series: past windows keep
-	// taking their inventory from the cache until a Prometheus is discovered.
-	smSvc.HasPrometheus = func() bool { return promBackend(promClient, chPromQL) == promBackendPrometheus }
+	// metrics in-cluster), or with SERVICE_MAP_SOURCE=timeseries one of its
+	// own on ClickHouse. Registered unconditionally; the handlers report the
+	// missing URL themselves until one is found.
+	smProm, smHasPrometheus, smTimeSeries := serviceMapPromQL(cfg, promClient, chPromQL)
+	if smTimeSeries {
+		logger.Info("service map reads ClickHouse's TimeSeries data; other PromQL callers keep the Prometheus client", "url", redact.URL(smProm.URL()))
+	}
+	smSvc := servicemap.New(smProm, cfg.ClusterName)
+	// On ClickHouse there are no kube_* series: past windows keep taking their
+	// inventory from the cache, and the queries select TIMESERIES_CLUSTER.
+	smSvc.HasPrometheus = smHasPrometheus
 	smSvc.TimeSeriesCluster = cfg.TimeSeriesCluster
 	smHandlers := servicemap.Handlers(smSvc, cfg.AccountID)
 	maps.Copy(handlers, smHandlers)
@@ -571,6 +576,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 	if smSource != servicemap.SourcePrometheus && ch == nil {
 		logger.Warn("SERVICE_MAP_SOURCE needs ClickHouse, which is not configured; using prometheus", "value", cfg.ServiceMapSource)
+	}
+	if smSource == servicemap.SourceTimeSeries && !smTimeSeries {
+		// No ClickHouse, so no client of its own (warned just above): the map
+		// shares the Prometheus client.
+		smSource = servicemap.SourcePrometheus
 	}
 	if typedKube != nil {
 		smSvc.NodeAgentCount = nodeAgentCounter(rd.Typed, installNamespace(cfg))

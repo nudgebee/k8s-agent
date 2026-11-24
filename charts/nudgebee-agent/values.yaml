@@ -431,6 +431,12 @@ runner:
   #   clickhouse  edges and container health from ClickHouse, pods/services
   #               as set by serviceMapInventory; falls back to Prometheus
   #               whenever ClickHouse does not cover the requested window.
+  #   timeseries  PromQL against ClickHouse's TimeSeries data
+  #               (clickhouse.timeseries.enabled), even when a Prometheus is
+  #               configured or discovered: only the service map moves, the
+  #               other PromQL users (rightsizing, prometheus_* actions,
+  #               enrichers) keep that Prometheus. Creates no tables. With
+  #               ClickHouse disabled it falls back to prometheus.
   # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
   # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
   # holds this cluster's metrics only (the bundled one does). They create

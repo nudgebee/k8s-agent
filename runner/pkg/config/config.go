@@ -295,8 +295,10 @@ type Config struct {
 
 	// ServiceMapSource is where service_map reads the eBPF edge and container
 	// metrics: "prometheus" (default), "clickhouse" (falls back to Prometheus
-	// when ClickHouse cannot serve the window) or "shadow" (serves Prometheus,
-	// logs how the ClickHouse map differs). Needs the collector's node-agent
+	// when ClickHouse cannot serve the window), "shadow" (serves Prometheus,
+	// logs how the ClickHouse map differs) or "timeseries" (PromQL against
+	// ClickHouse's TimeSeries data, even with a Prometheus configured, which
+	// every other PromQL caller keeps using). Needs the collector's node-agent
 	// metrics pipeline writing into ClickHouse.
 	ServiceMapSource string
 	// ServiceMapInventory is where service_map gets pods, readiness, replicas,
