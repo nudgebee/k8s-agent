@@ -52,6 +52,15 @@ func failure(err error) map[string]any {
 // parseSettings resolves the wire settings (with backend defaults) into a
 // Settings. Notably: default_min_memory arrives in MiB and is converted to
 // bytes; a percentile of 0 ("NB Algo") falls back to the default percentile.
+// IsRecommendOnly reports whether a continuous_rightsizing request's
+// action_params make it a recommend_only run (patches nothing), read the same
+// way the handler reads them. The auth layer uses it so only runs that patch
+// need a relay signature.
+func IsRecommendOnly(params map[string]any) bool {
+	s, err := parseSettings(params["settings"])
+	return err == nil && s.RecommendOnly
+}
+
 func parseSettings(raw any) (Settings, error) {
 	m, _ := raw.(map[string]any)
 	if m == nil {

@@ -69,7 +69,7 @@ curl http://localhost:5000/metrics   # Prometheus exposition
 
 4. Decide auth class:
    - Read-only / safe → add to `lightActions` map in main; allowlist syncs via `refresh_playbook`
-   - Mutating / pod-exec / scanner → leave OUT of `lightActions`; the validator enforces HMAC or RSA partial-keys
+   - Mutating / pod-exec → leave OUT of `lightActions`; the validator requires a valid relay signature. A light action that changes anything must also go in `writeLightActions` (with a rule when only some requests write)
 
 5. Tests:
    - **Unit**: `httptest.Server` for HTTP-backed actions; `k8s.io/client-go/kubernetes/fake` for K8s-backed actions
@@ -102,8 +102,7 @@ curl http://localhost:5000/metrics   # Prometheus exposition
 |---|---|
 | `cmd/agent/main.go` | Wiring + signal handling; everything plugs in here |
 | `pkg/relay/` | WS client (dial, greeting, reconnect, concurrent-safe writes) |
-| `pkg/auth/` | HMAC + RSA-OAEP partial-keys + atomic light-action allowlist |
-| `pkg/canonjson/` | Byte-deterministic JSON for HMAC parity with Python |
+| `pkg/auth/` | Relay-signature check + atomic light-action allowlist |
 | `pkg/dispatch/` | Action registry, normal+high-priority pools, deadline |
 | `pkg/discovery/` | Informers, workqueue, sink, per-resource converters, Helm release detection |
 | `pkg/observability/<vendor>/` | One package per upstream (Prometheus, Loki, ES, Signoz, Jaeger, Chronosphere, GCP, http proxy) |

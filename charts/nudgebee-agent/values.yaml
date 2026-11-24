@@ -264,12 +264,20 @@ runner:
   # not here. Set to false for a strictly read-only deployment where every
   # mutate action — light-action or not — is unregistered at startup.
   mutateEnabled: true
-  # Refuse unsigned pod_script_run_enricher requests (runs a pod from a given
-  # image and command, with env from a Secret). With this on, a request needs a
-  # relay signature (runner.nudgebee.relay_signing_public_key) or an HMAC /
-  # partial-keys signature. Off by default: requests the relay cannot sign
-  # (HTTP fallback, signing turned off, clock skew) would be refused, which
-  # breaks database connection tests and scripted runbook steps on this cluster.
+  # When runner.nudgebee.relay_signing_public_key is set, actions that change
+  # the cluster without being full mutations — scan Jobs (schedule/delete),
+  # alert-rule create/delete, continuous rightsizing that patches, script pods
+  # (pod_script_run_enricher), kubectl write commands (with
+  # enableWritePermissions) and non-GET HTTP proxy calls — need a valid relay
+  # signature, like every other mutation. Read actions never do. Has no effect
+  # without the key (the agent cannot verify a signature). Set to false only as
+  # an escape hatch when this cluster's writes fail signature checks (clock
+  # skew over 5 minutes, a stale key after a relay key rotation).
+  writeActionsRequireSignature: true
+  # Refuse unsigned pod_script_run_enricher requests even when
+  # runner.nudgebee.relay_signing_public_key is NOT set — then every request is
+  # refused, since none can be verified. With the key set,
+  # writeActionsRequireSignature already covers this action.
   podScriptRunRequireSignature: false
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
@@ -578,7 +586,6 @@ nodeAgent:
   env:
     - name: SENSITIVE_HEADERS
       value: "Authorization,Proxy-Authorization,Cookie,Set-Cookie,X-Auth-Token,X-CSRF-Token,X-Session-ID,X-JWT-Token,X-Api-Key,X-Api-Token,X-Access-Token,X-Secret-Token,X-Refresh-Token,X-User-Token,X-Firebase-Auth,X-Google-Auth,X-Authorization,X-Wsse,X-WebService-Token,Authentication,Proxy-Authentication,X-Authentication-Token,X-Device-ID,X-Device-Token,X-Device-Key"
-rsa: ~
 # custom parameters for OpenShift clusters
 openshift:
   enabled: false

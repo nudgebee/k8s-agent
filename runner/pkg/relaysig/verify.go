@@ -1,17 +1,15 @@
 // Package relaysig verifies Ed25519 signatures that the relay-server stamps on
 // requests forwarded to native ("k8s") agents.
 //
-// Unlike the agent's per-account HMAC/RSA auth (pkg/auth), this proves a request
-// transited the trusted relay: the relay signs the raw bytes of the request's
+// It proves a request transited the trusted relay: the relay signs the raw bytes of the request's
 // `body` field with its global Ed25519 key, and the agent verifies that exact
 // byte string with the relay's public key. A valid relay signature authorizes
 // any action (the relay already enforced the api-server's per-action permission
 // check + X-SECRET-KEY gate); see pkg/auth.Validator.
 //
 // The signature is carried in NEW envelope fields (`relay_signature`,
-// `relay_signed_at`, `relay_nonce`, `relay_key_id`) — deliberately NOT the
-// `signature` field, which the HMAC path owns. Old agents ignore the new fields,
-// so this is purely additive.
+// `relay_signed_at`, `relay_nonce`, `relay_key_id`) — not `signature`, which
+// the relay uses for its own scheme on proxy agents.
 //
 // Binding the raw `body` bytes (rather than an extracted/canonicalised subset)
 // means the signature covers account_id + action_name + action_params +

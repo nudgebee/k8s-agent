@@ -5,15 +5,12 @@ package relay
 
 // ExternalActionRequest is the inbound envelope from the relay.
 type ExternalActionRequest struct {
-	Body         ActionRequestBody `json:"body"`
-	Signature    string            `json:"signature,omitempty"`
-	PartialAuthA string            `json:"partial_auth_a,omitempty"`
-	PartialAuthB string            `json:"partial_auth_b,omitempty"`
-	RequestID    string            `json:"request_id,omitempty"`
-	NoSinks      bool              `json:"no_sinks,omitempty"`
+	Body      ActionRequestBody `json:"body"`
+	RequestID string            `json:"request_id,omitempty"`
+	NoSinks   bool              `json:"no_sinks,omitempty"`
 }
 
-// ActionRequestBody is the inner payload that gets HMAC-signed.
+// ActionRequestBody is the inner payload; the relay signs its raw bytes.
 type ActionRequestBody struct {
 	AccountID    string         `json:"account_id,omitempty"`
 	ClusterName  string         `json:"cluster_name,omitempty"`

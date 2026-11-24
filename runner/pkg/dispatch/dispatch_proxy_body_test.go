@@ -85,9 +85,9 @@ func TestDispatch_ActionEnvelopeStillRoutesToAction(t *testing.T) {
 // caller blocks until the relay's timeout with no diagnostic.
 func TestDispatch_MalformedEnvelopeRepliesInsteadOfHanging(t *testing.T) {
 	d := New(Config{}, nil, map[string]Handler{})
-	// `body` is an object (so it takes the action path) but `signature` is the
-	// wrong type, which fails the envelope unmarshal.
-	msg := []byte(`{"request_id":"bad-1","body":{"action_name":"x"},"signature":{"not":"a string"}}`)
+	// `body` is an object (so it takes the action path) but `relay_signature`
+	// is the wrong type, which fails the envelope unmarshal.
+	msg := []byte(`{"request_id":"bad-1","body":{"action_name":"x"},"relay_signature":{"not":"a string"}}`)
 
 	cap := &captureSend{}
 	d.Handle(context.Background(), msg, cap.send)

@@ -6,9 +6,11 @@ The agent exposes a set of actions over the relay WS. Each action takes a JSON `
 
 | Symbol | Meaning |
 |---|---|
-| 🔓 light | Light-action allowlist; no signature required (relay is the perimeter) |
-| ✍️ HMAC | Requires HMAC signature OR RSA partial-keys |
-| 🔐 RSA | Mutating action; RSA partial-keys strongly recommended |
+| 🔓 light | Light-action allowlist; no signature required |
+| ✍️ write light | Light action that changes the cluster; needs a valid relay signature when the agent has `RELAY_SIGNING_PUBLIC_KEY` (and `WRITE_ACTIONS_REQUIRE_SIGNATURE` is on) |
+| 🔐 signed | Needs a valid relay signature |
+
+Write light actions: `schedule_k8s_job`, `delete_k8s_job`, `create_or_replace_alert_rule`, `delete_alert_rule`, `continuous_rightsizing` (unless `recommend_only: true`), `pod_script_run_enricher`, `kubectl_command_executor` commands the read-only allowlist would refuse (only with `KUBECTL_ALLOW_WRITE`), and `http_proxy_request` with a method other than GET/HEAD.
 
 ## Group A — Observability proxies
 
@@ -114,7 +116,7 @@ Use `target: "*"` only if the operator opts into wildcard mode (ON only when `*=
 
 The read family also accepts the legacy/UI shape `kind` ("Deployment") in place of `group`/`version`/`resource_type` — it's resolved to the canonical GVR for common built-in kinds and the workload CRDs (see `pkg/kube/kind_resolver.go`). An explicit `resource_type` always wins over `kind`; arbitrary/CRD kinds not in the table must pass an explicit GVR.
 
-`kubectl_command_executor` enforces a **read-only verb allowlist**: `get`, `describe`, `logs`, `top`, `explain`, `api-resources`, `api-versions`, `version`, `cluster-info`, `config`, `auth`. Mutating verbs (`apply`, `delete`, `patch`, etc.) are rejected — they go through Group D actions instead, which require RSA partial-keys.
+`kubectl_command_executor` enforces a **read-only verb allowlist**: `get`, `describe`, `logs`, `top`, `explain`, `api-resources`, `api-versions`, `version`, `cluster-info`, `config`, `auth`. Mutating verbs (`apply`, `delete`, `patch`, etc.) are rejected — they go through Group D actions instead, which need a valid relay signature. With `KUBECTL_ALLOW_WRITE` they run, and need a valid relay signature when the agent has the relay key.
 
 ## Group C — Pod-exec  🔐
 
@@ -127,7 +129,7 @@ Both run via SPDY exec (no kubectl binary required). Security: arbitrary shell i
 
 ## Group D — Mutations  🔐
 
-K8s + AlertManager + alert-rule mutations. ALL of these MUST be served behind RSA partial-keys auth in production.
+K8s + AlertManager + alert-rule mutations. All need a valid relay signature, except the alert-rule write light actions on an agent without the relay key.
 
 ### K8s mutations
 

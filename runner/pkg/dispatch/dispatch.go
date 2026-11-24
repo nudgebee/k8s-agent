@@ -130,7 +130,7 @@ func (d *Dispatcher) SetMetrics(m Metrics) { d.metrics = m }
 
 // HandleTrusted invokes a registered handler without auth validation. Used by
 // the task poller (pkg/tasks): tasks are pulled over an authenticated GET
-// /v1/k8s/tasks call so the payload itself is implicitly trusted — no HMAC
+// /v1/k8s/tasks call so the payload itself is implicitly trusted — no relay
 // signature on the wire to verify. Same pool / timeout / metrics path as
 // Handle, just no auth check and no relay response envelope.
 //
@@ -270,9 +270,6 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 	// auth validator (which needs the raw map for canonical-JSON re-encoding).
 	var raw struct {
 		Body           map[string]any `json:"body"`
-		Signature      string         `json:"signature,omitempty"`
-		PartialAuthA   string         `json:"partial_auth_a,omitempty"`
-		PartialAuthB   string         `json:"partial_auth_b,omitempty"`
 		RequestID      string         `json:"request_id,omitempty"`
 		RelaySignature string         `json:"relay_signature,omitempty"`
 		RelaySignedAt  string         `json:"relay_signed_at,omitempty"`
@@ -301,12 +298,9 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 
 	if d.auth != nil {
 		authReq := &auth.Request{
-			Body:         raw.Body,
-			ActionName:   actionName,
-			Signature:    raw.Signature,
-			PartialAuthA: raw.PartialAuthA,
-			PartialAuthB: raw.PartialAuthB,
-			BodyRaw:      bodyEnvelope.Body,
+			Body:       raw.Body,
+			ActionName: actionName,
+			BodyRaw:    bodyEnvelope.Body,
 			RelaySig: relaysig.Envelope{
 				Signature: raw.RelaySignature,
 				SignedAt:  raw.RelaySignedAt,

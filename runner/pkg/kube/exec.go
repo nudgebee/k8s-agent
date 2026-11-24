@@ -234,6 +234,21 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 // writes it and returns it in "stdout_gzip_b64", so output of any size is
 // neither held nor sent raw.
 func (k *KubectlExecutor) RunEncoded(ctx context.Context, command, outputEncoding string) (map[string]any, error) {
+	segments, err := k.parse(command)
+	if err != nil {
+		return nil, err
+	}
+
+	bin := k.BinaryPath
+	if bin == "" {
+		bin = "kubectl"
+	}
+	return k.runSegments(ctx, bin, segments, cmdout.New(outputEncoding))
+}
+
+// parse splits command into its chained segments and validates every one
+// against this executor's mode, before any of them runs.
+func (k *KubectlExecutor) parse(command string) ([]cmdSegment, error) {
 	if command == "" {
 		return nil, errors.New("kubectl: command is required")
 	}
@@ -264,11 +279,16 @@ func (k *KubectlExecutor) RunEncoded(ctx context.Context, command, outputEncodin
 		}
 	}
 
-	bin := k.BinaryPath
-	if bin == "" {
-		bin = "kubectl"
-	}
-	return k.runSegments(ctx, bin, segments, cmdout.New(outputEncoding))
+	return segments, nil
+}
+
+// IsReadOnlyCommand reports whether command passes the read-only executor's
+// checks, i.e. would run with runner.enableWritePermissions off. The auth
+// layer uses it so a kubectl write needs a relay signature while reads do not.
+// Unparseable commands are not read-only.
+func IsReadOnlyCommand(command string) bool {
+	_, err := (&KubectlExecutor{}).parse(command)
+	return err == nil
 }
 
 // splitSegments partitions shlex tokens into command segments on the sequential

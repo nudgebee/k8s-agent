@@ -7,7 +7,7 @@ The agent reads its config from environment variables at startup. Variable names
 | Variable | Description |
 |---|---|
 | `WEBSOCKET_RELAY_ADDRESS` | Relay `/register` URL (e.g. `wss://relay.nudgebee.com/register`) |
-| `NUDGEBEE_AUTH_SECRET_KEY` | Tenant auth secret. Sent as Basic-Auth on the WS handshake AND used as the HMAC signing key. |
+| `NUDGEBEE_AUTH_SECRET_KEY` | Tenant auth secret. Sent as Basic-Auth on the WS handshake and to the backend. |
 
 ## Identification
 
@@ -33,8 +33,8 @@ The subsystems that need extra config (mutate, scanners, GCP) **default off**:
 |---|---|---|---|
 | Discovery | **on** | `DISCOVERY_ENABLED=false` to disable; `DISCOVERY_RESYNC=30m` | client-go informers; needs RBAC to list/watch core + apps + batch resources |
 | Kube reads | **on** | `KUBE_ENABLED=false` to disable | `get_resource` etc. — needs broad cluster read RBAC |
-| Pod-exec | **on** | `PODEXEC_ENABLED=false` to disable | RSA partial-keys auth strongly recommended for production |
-| Mutations | off | `MUTATE_ENABLED=true` | RSA required; configures `dynamic` client for PrometheusRule CRUD |
+| Pod-exec | **on** | `PODEXEC_ENABLED=false` to disable | Needs a valid relay signature (`RELAY_SIGNING_PUBLIC_KEY`) |
+| Mutations | off | `MUTATE_ENABLED=true` | Needs a valid relay signature; configures `dynamic` client for PrometheusRule CRUD |
 | Scanners | off | `SCANNERS_ENABLED=true`, `SCANNER_NAMESPACE`, `SCANNER_SERVICE_ACCOUNT` | Needs RBAC to create Jobs in the namespace |
 | GCP | off | `GCP_ENABLED=true`, `GCP_PROJECT_ID` | Workload Identity in-cluster |
 
@@ -116,7 +116,9 @@ working. Prefer `;`: it is the only separator that lets a value contain a comma,
 
 | Variable | Required | Description |
 |---|---|---|
-| `RSA_PRIVATE_KEY_PATH` | for mutations | PEM file path (PKCS#1 or PKCS#8). Without this, partial-keys auth is disabled and mutations are unreachable. |
+| `RELAY_SIGNING_PUBLIC_KEY` | for mutations | The relay's Ed25519 public key(s), comma/whitespace-separated for rotation. Without it the agent cannot verify relay signatures: mutations are unreachable and write light actions run unsigned. |
+| `WRITE_ACTIONS_REQUIRE_SIGNATURE` | no (default `true`) | With the relay key set, write light actions (see [actions.md](actions.md#auth-class)) need a valid relay signature. `false` is an escape hatch for clock skew or a stale key. |
+| `POD_SCRIPT_RUN_REQUIRE_SIGNATURE` | no (default `false`) | Refuse unsigned `pod_script_run_enricher` even without the relay key. |
 
 ## RBAC
 
@@ -173,6 +175,6 @@ Scanners that need cluster-wide reads (`popeye_scan`, `krr_scan`, `trivy_cis_sca
 
 The agent ships in the `nudgebee/k8s-agent` Helm chart as the `runner` Deployment image (`ghcr.io/nudgebee/nudgebee-agent`). The chart's existing Secret provides every env var the agent needs (NUDGEBEE_ENDPOINT, NUDGEBEE_AUTH_SECRET_KEY, PROMETHEUS_URL, LOKI_URL, ELASTICSEARCH_URL, SIGNOZ_URL, etc.), and discovery / kube reads / pod-exec are default-on, so the agent serves its full surface with zero env additions. The Service name, port, and AlertManager webhook URL stay the same — no AlertManager config change needed.
 
-For mutating actions (drain/cordon/delete + alert-rule CRUD), set `MUTATE_ENABLED=true` and mount an RSA private key at `RSA_PRIVATE_KEY_PATH`. For scanners, set `SCANNERS_ENABLED=true` plus `SCANNER_SERVICE_ACCOUNT`. These are conscious opt-ins because they expand the agent's blast radius.
+For mutating actions (drain/cordon/delete + alert-rule CRUD), set `MUTATE_ENABLED=true` and `RELAY_SIGNING_PUBLIC_KEY`. For scanners, set `SCANNERS_ENABLED=true` plus `SCANNER_SERVICE_ACCOUNT`. These are conscious opt-ins because they expand the agent's blast radius.
 
 See [docs/development.md](development.md) for local dev setup.

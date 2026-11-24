@@ -89,9 +89,10 @@ Inbound action requests (relay → agent):
     "account_id": "...",
     "cluster_name": "..."
   },
-  "signature": "v0=<hex hmac>",          // OR
-  "partial_auth_a": "<base64 RSA>",      // partial-keys mode
-  "partial_auth_b": "<base64 RSA>",
+  "relay_signature": "<base64 Ed25519 over the raw body bytes>",
+  "relay_signed_at": "<RFC 3339>",
+  "relay_nonce": "<uuid>",
+  "relay_key_id": "<key id>",
   "request_id": "<uuid for sync response>"
 }
 ```
@@ -112,35 +113,14 @@ Outbound responses (agent → relay):
 
 ## Authentication
 
-Three modes; the dispatcher picks the first present per-request:
+Two checks:
 
-### 1. HMAC signature
-Used for most authenticated read paths. Relay HMACs the request body (after [byte-deterministic JSON canonicalisation](#canonical-json)) with the tenant's signing key:
+- **Relay signature** — the relay signs the raw `body` bytes of every request it forwards (Ed25519, `relay_*` envelope fields). The agent verifies it with `RELAY_SIGNING_PUBLIC_KEY`; a valid signature authorizes any action.
+- **Light-action allowlist** — read actions (Prometheus query, get_resource, etc.) run without a valid signature, so reads keep working on an agent without the key or under clock skew.
 
-```
-v0=<hex(HMAC-SHA256(signing_key, "v0:" + canonical_json(body)))>
-```
+Some light actions change the cluster: `schedule_k8s_job`, `delete_k8s_job`, `create_or_replace_alert_rule`, `delete_alert_rule`, `continuous_rightsizing` (unless `recommend_only`), `pod_script_run_enricher`, `kubectl_command_executor` write commands (with `KUBECTL_ALLOW_WRITE`) and `http_proxy_request` calls other than GET/HEAD. When the agent has the relay key, these need a valid relay signature (`WRITE_ACTIONS_REQUIRE_SIGNATURE`, on by default). Without the key they run unsigned and the agent logs a warning at startup.
 
-The agent recomputes and constant-time-compares. Any drift = reject.
-
-### 2. RSA partial-keys
-Used for mutating actions (Group D — drain/cordon/delete_*) and pod-exec. Two halves of the signing key are RSA-OAEP-MGF1-SHA256 encrypted (one by the relay, one by another trusted party); the agent decrypts both with its private key, XORs them, and the result must equal the signing key UUID's int form. Each half also carries `v0=sha256(canonical_json(body))` to prevent body tampering.
-
-The agent loads its private key at startup from `RSA_PRIVATE_KEY_PATH` (PEM, PKCS#1 or PKCS#8).
-
-### 3. Light-action allowlist
-Read-only actions (Prometheus query, get_resource, etc.) skip signature checks; the relay is the perimeter. The allowlist is hot-swappable via `refresh_playbook` — see [refresh_playbook](#refresh_playbook).
-
-### Canonical JSON
-
-HMAC parity with the relay (a Python service) is brittle. The relay uses `body.json(exclude_none=True, sort_keys=True, separators=(",",":"))` (and a separate variant with default separators for the signature path). [pkg/canonjson](../pkg/canonjson/canonjson.go) reproduces both byte-for-byte:
-- Sorted object keys (Unicode code-point order)
-- Drop nil entries (`exclude_none`)
-- ASCII-escape non-ASCII as `\uXXXX` (Python's `ensure_ascii=True` default; Go's encoder does NOT do this)
-- HTML chars (`<`, `>`, `&`) NOT escaped (Python doesn't; Go's encoder DOES by default — explicitly disabled here)
-- Whole-number floats keep `.0` suffix (`1.0` → `"1.0"`, not `"1"`)
-
-The package has 31 fixture tests for cross-language parity. Any drift = every authenticated request rejected, so this is critical.
+The allowlist is hot-swappable via `refresh_playbook` so new read-only actions can roll out without a customer Helm upgrade; a refreshed list cannot drop the signature requirement.
 
 ## Discovery
 

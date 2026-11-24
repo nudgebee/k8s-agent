@@ -9,8 +9,9 @@ import "github.com/nudgebee/nudgebee-agent/pkg/dispatch"
 // them through schedule_k8s_job → wait_for_k8s_job → get_k8s_job_logs →
 // delete_k8s_job. Adding a new scanner is a pure api-server change.
 //
-// All actions require HMAC sig (or RSA partial-keys for callers that pre-sign
-// mutations). Not light-action — these create, read, and delete Jobs.
+// Registered as light actions; schedule_k8s_job and delete_k8s_job create and
+// delete Jobs, so they need a valid relay signature when the agent has the
+// relay key (see writeLightActions in cmd/agent).
 func Handlers(r *Runner) map[string]dispatch.Handler {
 	return map[string]dispatch.Handler{
 		"schedule_k8s_job": r.handleScheduleJob,

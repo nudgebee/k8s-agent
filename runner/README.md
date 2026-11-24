@@ -69,7 +69,7 @@ The agent connects to the relay, reads its kubeconfig (or in-cluster credentials
 │                           │                                   │
 └───────────────────────────┼───────────────────────────────────┘
                             │ WSS + Basic-Auth
-                            │ HMAC-signed action requests
+                            │ relay-signed action requests
                             ▼
                   ┌──────────────────┐
                   │  Nudgebee relay  │
@@ -107,21 +107,21 @@ Plus background subsystems: AlertManager forwarder, task poller, Prometheus `/me
 
 ## Authentication
 
-Three modes:
+Two checks:
 
-- **HMAC signature** — relay HMACs the action body with the tenant's signing key
-- **RSA partial-keys** — required for mutations and pod-exec; agent loads its private key from `RSA_PRIVATE_KEY_PATH`
-- **Light-action allowlist** — read-only actions (Prometheus query, get_resource, etc.) skip signature checks; relay is the perimeter
+- **Relay signature** — the relay signs the raw `body` bytes of every request it forwards (Ed25519, `relay_*` envelope fields). The agent verifies it with `RELAY_SIGNING_PUBLIC_KEY`; a valid signature authorizes any action.
+- **Light-action allowlist** — read actions (Prometheus query, get_resource, etc.) run without a valid signature, so reads keep working on an agent without the key or under clock skew.
 
-The allowlist is hot-swappable via `refresh_playbook` so new read-only actions can roll out without a customer Helm upgrade.
+Some light actions change the cluster: `schedule_k8s_job`, `delete_k8s_job`, `create_or_replace_alert_rule`, `delete_alert_rule`, `continuous_rightsizing` (unless `recommend_only`), `pod_script_run_enricher`, `kubectl_command_executor` write commands (with `KUBECTL_ALLOW_WRITE`) and `http_proxy_request` calls other than GET/HEAD. When the agent has the relay key, these need a valid relay signature (`WRITE_ACTIONS_REQUIRE_SIGNATURE`, on by default). Without the key they run unsigned and the agent logs a warning at startup.
+
+The allowlist is hot-swappable via `refresh_playbook` so new read-only actions can roll out without a customer Helm upgrade; a refreshed list cannot drop the signature requirement.
 
 ## Repo layout
 
 ```
 cmd/agent/          — main entry point + wiring
 pkg/relay/          — WS client (dial, greeting, reconnect)
-pkg/auth/           — HMAC + RSA-OAEP partial-keys + light-action allowlist
-pkg/canonjson/      — byte-deterministic JSON for HMAC parity with Python
+pkg/auth/           — relay-signature check + light-action allowlist
 pkg/dispatch/       — action registry + worker pools + 180s deadline
 pkg/discovery/      — client-go informers + sink + converters
 pkg/observability/  — Prometheus / Loki / ES / Signoz / Jaeger / Chronosphere / GCP / http proxy

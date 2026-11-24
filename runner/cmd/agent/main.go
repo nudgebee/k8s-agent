@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -160,6 +161,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		"echo":   {},
 		"health": {},
 	}
+	// writeLightActions are the light actions that change the cluster. When the
+	// agent can verify relay signatures they need a valid one (the validator's
+	// SignedOnly); without the key they stay unsigned so the agent keeps
+	// working. Add an action here where it is registered as a light action.
+	// A rule narrows that to some requests; nil = every request.
+	writeLightActions := map[string]auth.SignedRule{}
 
 	// registerProxy wires a read-only proxy datasource so the backend never
 	// gets a 401 "not in light-action allowlist" or 404 "action not
@@ -176,7 +183,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// disabled (the constructors are cheap and make no network calls), so the
 	// action NAMES always come straight from the package and can't drift.
 	// Only read-only proxies go through here; mutations / pod-exec stay out of
-	// lightActions and require HMAC or RSA partial-keys.
+	// lightActions and require a valid relay signature. http_proxy_request is
+	// the exception: it forwards any method, so non-GET calls are marked as
+	// writes below.
 	registerProxy := func(datasource string, enabled bool, real map[string]dispatch.Handler) {
 		for action, h := range real {
 			lightActions[action] = struct{}{}
@@ -456,6 +465,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 	targets := config.ParseTargets(cfg.HTTPProxyTargets)
 	registerProxy("http_proxy", len(targets) > 0, httpproxy.Handlers(httpproxy.New(targets, nil)))
+	writeLightActions["http_proxy_request"] = isWriteHTTPMethod
 	if len(targets) > 0 {
 		logger.Info("http proxy enabled", "targets", len(targets))
 	}
@@ -575,6 +585,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			// The operator enabling write RBAC explicitly opts into that.
 			lightActions[name] = struct{}{}
 		}
+		if cfg.KubectlAllowWrite {
+			// Only commands the read-only executor would refuse are writes, so
+			// reads through it keep the light-action path.
+			writeLightActions["kubectl_command_executor"] = isWriteKubectlCommand
+		}
 		logger.Info("kube primitives enabled", "actions", len(kh), "kubectl_allow_write", cfg.KubectlAllowWrite)
 
 		// list_helm_releases decodes Helm release Secrets here and returns chart
@@ -603,17 +618,15 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		runner.AutoCopyPullSecrets = cfg.ScannerAutoCopyPullSecrets
 		sh := scanners.Handlers(runner)
 		maps.Copy(handlers, sh)
-		// schedule_k8s_job / wait_for_k8s_job / get_k8s_job_logs are light-actions.
-		// Trust chain: api-server holds RELAY_SERVER_SECRET_KEY → relay gates inbound
-		// requests on it → relay forwards to the agent's outbound WS. Adding HMAC at
-		// the agent doesn't strengthen that — anyone reaching the relay's /request
-		// already has the same secret api-server uses. Protection is the agent's
-		// hygiene clamps (namespace, BackoffLimit=0, concurrency cap=5, TTL=600s,
-		// 5 MiB log cap), which apply regardless of caller. Same posture as
-		// kubectl_command_executor (also a light-action under this trust model).
+		// The scanner actions are light actions; schedule_k8s_job and
+		// delete_k8s_job create and delete Jobs, so they are writes. The
+		// agent's hygiene clamps (namespace, BackoffLimit=0, concurrency cap=5,
+		// TTL=600s, 5 MiB log cap) apply regardless of caller.
 		for name := range sh {
 			lightActions[name] = struct{}{}
 		}
+		writeLightActions["schedule_k8s_job"] = nil
+		writeLightActions["delete_k8s_job"] = nil
 		// Background cleanup of finished Jobs/pods, independent of the cluster's
 		// TTLAfterFinished controller (which may be disabled in customer envs).
 		runner.StartReaper(ctx, logger)
@@ -642,8 +655,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		ph := podexec.HandlersWithProfiler(execer, profiler)
 		maps.Copy(handlers, ph)
 		// pod_bash_enricher / pod_profiler run arbitrary commands or spawn
-		// privileged pods. NOT light-action — require HMAC sig or RSA
-		// partial-keys.
+		// privileged pods. NOT light-action — they need a valid relay
+		// signature.
 		logger.Info("pod-exec enabled", "actions", len(ph))
 
 		// pod_script_run_enricher is gated on the same PodExecEnabled flag
@@ -657,24 +670,15 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		rh := podrunner.Handlers(runner)
 		maps.Copy(handlers, rh)
 		// By trust posture pod_script_run_enricher belongs with pod_bash_enricher
-		// (arbitrary command execution → HMAC/RSA only). But api-server's
-		// relay.CommandExecutor dispatches it UNSIGNED behind the relay's
-		// shared-secret gate — the k8s-mode DB integration connection tests
-		// (postgresql/mysql/clickhouse/mssql/oracle), runbook-server, and
-		// llm-server all reach it this way and none of them sign. Same situation
-		// as the PrometheusRule actions carved in below. Without this the
-		// dispatcher rejects every such request with "not in light-action
-		// allowlist", surfacing in the UI as a misleading "failed to connect to
-		// the cluster". Allowlist it here to close the gap without forcing
-		// signing into api-server's relay client. pod_bash_enricher / pod_profiler
-		// stay OUT — they have no unsigned api-server caller.
-		// This trades per-request verification for the relay's shared-secret
-		// gate, so a relay/secret compromise yields arbitrary in-cluster command
-		// execution. The relay signs what it forwards over the WebSocket, so
-		// POD_SCRIPT_RUN_REQUIRE_SIGNATURE drops the carve-out (see the
-		// validator's SignedOnly below).
+		// (arbitrary command execution). It is a light action so agents without
+		// the relay's public key keep running database connection tests and
+		// scripted runbook steps; it is also a write light action, so an agent
+		// with the key requires a valid relay signature for it.
+		// POD_SCRIPT_RUN_REQUIRE_SIGNATURE requires one even without the key
+		// (see the validator's SignedOnly below).
 		if !cfg.PodScriptRunRequireSignature {
 			lightActions["pod_script_run_enricher"] = struct{}{}
+			writeLightActions["pod_script_run_enricher"] = nil
 		}
 		logger.Info("pod-runner enabled",
 			"default_namespace", cfg.ScannerNamespace,
@@ -715,14 +719,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		mh := mutate.Handlers(mut)
 		maps.Copy(handlers, mh)
-		// Most Group-D mutations REQUIRE RSA partial-keys in production and
-		// stay out of lightActions. The two PrometheusRule legacy actions are
-		// the exception: api-server → relay → agent today sends them unsigned
-		// behind the relay's shared-secret gate, same posture as the read
-		// primitives. Carving them in here closes the gap without forcing
-		// signing into api-server's relay client.
+		// Group-D mutations need a valid relay signature and stay out of
+		// lightActions. The two PrometheusRule legacy actions are light actions
+		// so agents without the relay's public key can still manage alert
+		// rules; with the key they need a signature like any write.
 		lightActions["create_or_replace_alert_rule"] = struct{}{}
 		lightActions["delete_alert_rule"] = struct{}{}
+		writeLightActions["create_or_replace_alert_rule"] = nil
+		writeLightActions["delete_alert_rule"] = nil
 		logger.Info("mutate enabled",
 			"alertmanager_url", cfg.AlertManagerURL,
 			"loki_rules_url", cfg.LokiRulesURL,
@@ -734,9 +738,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// resource requests/limits (recommend_only skips the patch). Needs both
 	// Prometheus (usage) and the dynamic client (read + Update across
 	// Deployment/StatefulSet/DaemonSet/ReplicaSet/Rollout). Driven by
-	// runbook-server's optimizer over the relay's shared-secret /request path —
-	// unsigned, same trust posture as the alert-rule mutations carved in above —
-	// so it goes in lightActions. Skipped when either client is unavailable
+	// runbook-server's optimizer over the relay's /request path; a light action
+	// like the alert-rule mutations above, and a write when it patches.
+	// Skipped when either client is unavailable
 	// rather than registered as a fail-auth stub.
 	if dynamicKube != nil {
 		// typedKube (may be nil) enables zero-downtime in-place pod resize; the
@@ -745,6 +749,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		rs := rightsize.New(promClient, dynamicKube, typedKube)
 		maps.Copy(handlers, rightsize.Handlers(rs))
 		lightActions["continuous_rightsizing"] = struct{}{}
+		// recommend_only runs read usage and patch nothing.
+		writeLightActions["continuous_rightsizing"] = isRightsizingApply
 		logger.Info("continuous_rightsizing enabled")
 	} else {
 		logger.Warn("continuous_rightsizing disabled — needs a dynamic K8s client")
@@ -764,20 +770,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Warn("rightsizing_resource disabled — needs a dynamic K8s client")
 	}
 
-	// Read primitives are light-action (no signature). Mutations and pod-exec
-	// actions are NOT in lightActions, so the dispatcher rejects them unless
-	// the request carries a valid HMAC signature OR RSA partial-keys.
+	// Read primitives are light actions (no signature needed). Every other
+	// action needs a valid relay signature, and so do the write light actions
+	// when this agent has the relay's public key.
 	validator := &auth.Validator{
-		SigningKey:   cfg.AuthSecretKey,
 		LightActions: lightActions,
-	}
-	if cfg.RSAPrivateKeyPath != "" {
-		priv, err := auth.LoadPrivateKey(cfg.RSAPrivateKeyPath)
-		if err != nil {
-			return fmt.Errorf("load RSA private key: %w", err)
-		}
-		validator.PrivateKey = priv
-		logger.Info("RSA partial-keys auth enabled", "key_path", cfg.RSAPrivateKeyPath)
 	}
 	// Relay-signature verification: when the relay's public key is provisioned,
 	// a valid relay signature authorizes any action (this is how UI mutations
@@ -787,16 +784,28 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		return fmt.Errorf("init relay signature verifier: %w", err)
 	}
 	validator.RelayVerifier = relayVerifier
+	signedOnly := map[string]auth.SignedRule{}
+	writesNeedSignature := relayVerifier.Enabled() && cfg.WriteActionsRequireSignature
+	switch {
+	case writesNeedSignature:
+		maps.Copy(signedOnly, writeLightActions)
+		logger.Info("write actions require a relay signature", "actions", sortedNames(writeLightActions))
+	case relayVerifier.Enabled():
+		logger.Warn("WRITE_ACTIONS_REQUIRE_SIGNATURE is off: these actions run without a relay signature", "actions", sortedNames(writeLightActions))
+	default:
+		logger.Warn("RELAY_SIGNING_PUBLIC_KEY is not set: these actions run without a relay signature; set runner.nudgebee.relay_signing_public_key to require one", "actions", sortedNames(writeLightActions))
+	}
 	if cfg.PodScriptRunRequireSignature {
-		validator.SignedOnly = map[string]struct{}{"pod_script_run_enricher": {}}
+		signedOnly["pod_script_run_enricher"] = nil
 		if !relayVerifier.Enabled() {
 			// The backend reaches this action through the relay, so without the
-			// relay's key only HMAC- or partial-key-signed requests get through.
-			logger.Warn("POD_SCRIPT_RUN_REQUIRE_SIGNATURE is on but RELAY_SIGNING_PUBLIC_KEY is not set; pod_script_run_enricher requests without an HMAC or partial-key signature will be refused")
+			// relay's key no request gets through.
+			logger.Warn("POD_SCRIPT_RUN_REQUIRE_SIGNATURE is on but RELAY_SIGNING_PUBLIC_KEY is not set; every pod_script_run_enricher request will be refused")
 		} else {
 			logger.Info("pod_script_run_enricher requires a signed request")
 		}
 	}
+	validator.SignedOnly = signedOnly
 
 	// refresh_playbook hot-reloads the allowlist from the backend so we can
 	// add new actions to a running agent without a customer Helm upgrade.
@@ -1293,6 +1302,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					AutoScalerNamespace:        as.Namespace,
 					AlertRuleLocatorWrites:     alertRuleLocatorWrites,
 					PrometheusRuleClusterWrite: promRuleClusterWrite,
+
+					RelaySignatureVerification:   relayVerifier.Enabled(),
+					WriteActionsRequireSignature: writesNeedSignature,
 				}
 			},
 			LightActions: func() []string {
@@ -1879,4 +1891,39 @@ func kindSet(kinds []string) map[string]bool {
 		m[k] = true
 	}
 	return m
+}
+
+// isWriteHTTPMethod marks http_proxy_request calls other than GET/HEAD as
+// writes. An absent method is GET (httpproxy's default). Exact match: the
+// proxy sends the method as given, so "get" is not treated as GET.
+func isWriteHTTPMethod(params map[string]any) bool {
+	method, _ := params["method"].(string)
+	switch method {
+	case "", http.MethodGet, http.MethodHead:
+		return false
+	}
+	return true
+}
+
+// isWriteKubectlCommand marks a kubectl_command_executor command as a write
+// when the read-only executor would refuse it.
+func isWriteKubectlCommand(params map[string]any) bool {
+	command, _ := params["command"].(string)
+	return !kube.IsReadOnlyCommand(command)
+}
+
+// isRightsizingApply marks a continuous_rightsizing run as a write unless its
+// settings make it recommend_only.
+func isRightsizingApply(params map[string]any) bool {
+	return !rightsize.IsRecommendOnly(params)
+}
+
+// sortedNames lists the keys of m in order, for a stable log line.
+func sortedNames[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
