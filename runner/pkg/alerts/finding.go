@@ -100,6 +100,31 @@ func (b *Builder) findingIDFor(m MatchedTrigger) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(b.AccountID+"|"+m.AggregationKey+"|"+m.OccurrenceKey)).String()
 }
 
+// alertFindingID returns the Finding ID for one Alertmanager alert.
+//
+// Alertmanager re-sends a firing alert every repeat_interval, and each
+// re-send carries the same fingerprint and startsAt. A random ID per
+// delivery made the server store every re-send as a new event. The ID is
+// therefore a UUIDv5 of (account, fingerprint, startsAt), so each re-send
+// and the final resolve name the event the first delivery created. A new
+// firing of the same alert has a new startsAt and so gets a new event.
+//
+// startsAt is truncated to the second and written in UTC, so the same
+// firing hashes the same whatever precision or offset it arrives with.
+// Without a fingerprint or a real startsAt there is nothing stable to hash,
+// and the ID stays random as before.
+func (b *Builder) alertFindingID(a alertManagerAlert) string {
+	if a.Fingerprint == "" || a.StartsAt == "" {
+		return uuid.NewString()
+	}
+	startsAt, err := time.Parse(time.RFC3339, a.StartsAt)
+	if err != nil || startsAt.Year() <= 1 {
+		return uuid.NewString()
+	}
+	start := startsAt.UTC().Truncate(time.Second).Format(time.RFC3339)
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(b.AccountID+"|prometheus|"+a.Fingerprint+"|"+start)).String()
+}
+
 // FromMatchedTrigger wraps a kubewatch K8s-event payload into a Finding
 // envelope when a trigger matcher fired. Differs from FromKubewatchEvent
 // in two important ways:
@@ -454,7 +479,7 @@ func (b *Builder) alertToFinding(a alertManagerAlert) (FindingEnvelope, error) {
 		startsAt = utcDBStr(time.Now().UTC())
 	}
 	serviceKey := subjectNamespace + "/" + subjectName
-	id := uuid.NewString()
+	id := b.alertFindingID(a)
 
 	rawJSON, err := json.Marshal(a)
 	if err != nil {
