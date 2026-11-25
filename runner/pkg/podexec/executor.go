@@ -10,7 +10,7 @@
 // channel kubectl exec uses). No kubectl binary required in the image.
 //
 // SECURITY: these handlers execute arbitrary shell in customer pods. They
-// MUST be served behind RSA partial-keys auth in production, and logged
+// need a valid relay signature (not light actions), and are logged
 // per-call (request_id + account + pod + command bytes).
 package podexec
 

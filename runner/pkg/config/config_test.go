@@ -80,6 +80,7 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		GetResourceMaxBytes:            64 << 20,
 		GetResourceUnscopedConcurrency: 2,
 		PodExecEnabled:                 true,
+		WriteActionsRequireSignature:   true,
 		ScannerNamespace:               "nudgebee-agent", // applied as default even when SCANNER_NAMESPACE unset
 		// Pull-secret copy is on unless SCANNER_AUTO_COPY_PULL_SECRETS says
 		// otherwise: without it, a private image whose node-local copy is gone
@@ -146,7 +147,7 @@ func TestFromEnv_DefaultsWhenOptionalMissing(t *testing.T) {
 		t.Error("ScannersEnabled default should be false (needs SCANNER_SERVICE_ACCOUNT)")
 	}
 	if c.MutateEnabled {
-		t.Error("MutateEnabled default should be false (needs RSA_PRIVATE_KEY_PATH)")
+		t.Error("MutateEnabled default should be false")
 	}
 	if c.GCPEnabled {
 		t.Error("GCPEnabled default should be false (needs GCP_PROJECT_ID + ADC)")

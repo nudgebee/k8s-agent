@@ -170,24 +170,6 @@ func TestValidate_RelaySig_ReplayedReadStillRuns(t *testing.T) {
 	}
 }
 
-// A replay of a request that also carries another credential falls through to
-// that check as before; only the path that would have rejected it changes.
-func TestValidate_RelaySig_ReplayWithOtherCredentialsFallsThrough(t *testing.T) {
-	priv, pub := relaysigKey(t)
-	ver, _ := relaysig.NewVerifier(pub, discardLogger())
-	v := &Validator{LightActions: map[string]struct{}{"get_resource": {}}, RelayVerifier: ver}
-
-	body := []byte(`{"account_id":"a","action_name":"delete_workload","action_params":{}}`)
-	if err := v.Validate(signedRelayReq(priv, body, "delete_workload", "dup-3")); err != nil {
-		t.Fatalf("first delivery: %v", err)
-	}
-	again := signedRelayReq(priv, body, "delete_workload", "dup-3")
-	again.Signature = "v0=not-a-valid-hmac"
-	if err := v.Validate(again); err == nil || errors.Is(err, ErrDuplicateDelivery) {
-		t.Fatalf("err = %v; want the HMAC check's own error", err)
-	}
-}
-
 // A forged signature that reuses a seen nonce is not a duplicate: the nonce is
 // only checked once the signature verifies.
 func TestValidate_RelaySig_ForgedReplayIsNotADuplicate(t *testing.T) {
@@ -219,7 +201,7 @@ func TestValidate_SignedOnly(t *testing.T) {
 	v := &Validator{
 		LightActions:  map[string]struct{}{action: {}, "get_resource": {}},
 		RelayVerifier: ver,
-		SignedOnly:    map[string]struct{}{action: {}},
+		SignedOnly:    map[string]SignedRule{action: nil},
 	}
 
 	if err := v.Validate(&Request{ActionName: action}); err == nil {
@@ -239,5 +221,32 @@ func TestValidate_SignedOnly(t *testing.T) {
 	}
 	if err := v.Validate(signedRelayReq(priv, body, action, "s1")); !errors.Is(err, ErrDuplicateDelivery) {
 		t.Fatalf("replayed signature-only action: got %v, want ErrDuplicateDelivery", err)
+	}
+}
+
+// With a key, a write light action without a valid signature is refused and
+// the error names the verification failure; a valid signature runs it.
+func TestValidate_SignedOnly_InvalidSignatureNamesTheFailure(t *testing.T) {
+	priv, pub := relaysigKey(t)
+	ver, _ := relaysig.NewVerifier(pub, discardLogger())
+	const action = "delete_alert_rule"
+	v := &Validator{
+		LightActions:  map[string]struct{}{action: {}},
+		RelayVerifier: ver,
+		SignedOnly:    map[string]SignedRule{action: nil},
+	}
+
+	if err := v.Validate(&Request{ActionName: action}); !errors.Is(err, errNoRelaySignature) {
+		t.Fatalf("unsigned: err = %v; want errNoRelaySignature", err)
+	}
+	body := []byte(`{"action_name":"delete_alert_rule","action_params":{"name":"r"}}`)
+	bad := signedRelayReq(priv, body, action, "w1")
+	bad.BodyRaw = []byte(`{"action_name":"delete_alert_rule","action_params":{"name":"other"}}`)
+	err := v.Validate(bad)
+	if err == nil || errors.Is(err, errNoRelaySignature) || errors.Is(err, ErrDuplicateDelivery) {
+		t.Fatalf("tampered: err = %v; want the verification failure", err)
+	}
+	if err := v.Validate(signedRelayReq(priv, body, action, "w2")); err != nil {
+		t.Fatalf("valid signature: %v", err)
 	}
 }

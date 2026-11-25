@@ -1,7 +1,8 @@
 // Package mutate implements the mutating Group-D actions: delete_pod,
 // delete_job, cordon, uncordon, rollout_restart, and AlertManager silence
-// CRUD. Each one mutates customer cluster state; all of them MUST be served
-// behind RSA partial-keys auth in production (NOT light-action).
+// CRUD. Each one mutates customer cluster state; all of them need a valid
+// relay signature (NOT light-action), except the two alert-rule light actions
+// on an agent without the relay key.
 //
 // Remediation/apply actions delivered via the agent_task poller (trusted, not
 // lightActions): replica_rightsizing (scale), rightsize_pvc (expand;

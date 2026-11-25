@@ -294,12 +294,11 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     # cordon, rollout_restart, PrometheusRule CRUD, AlertManager silences,
     # Loki rules, ...). The auth boundary lives inside the runner — only
     # the explicitly-allowlisted light actions accept unsigned requests;
-    # every other mutate action falls through to the validator's
-    # HMAC/RSA-partial-keys path and is rejected without a signed request.
-    # So enabling the subsystem here does NOT loosen the security posture
-    # on installations that omit `.Values.rsa`; it only makes the
-    # light-action carve-outs (currently create_or_replace_alert_rule /
-    # delete_alert_rule) reachable end-to-end.
+    # every other mutate action needs a valid relay signature. So enabling
+    # the subsystem here does NOT loosen the security posture; it only makes
+    # the light-action carve-outs (currently create_or_replace_alert_rule /
+    # delete_alert_rule, which also need a signature when the relay key is
+    # set) reachable end-to-end.
     #
     # Operators who want a strictly read-only deployment can set
     # `runner.mutateEnabled: false`. The `eq ... false` pattern is
@@ -311,25 +310,26 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: POD_SCRIPT_RUN_REQUIRE_SIGNATURE
       value: "true"
     {{- end }}
+    # Writes through light actions need a valid relay signature when the relay
+    # key below is set. `eq ... false` so an explicit false is honoured.
+    - name: WRITE_ACTIONS_REQUIRE_SIGNATURE
+      value: {{ if eq .Values.runner.writeActionsRequireSignature false }}"false"{{ else }}"true"{{ end }}
     # KUBECTL_ALLOW_WRITE lifts the runner's read-only verb allowlist on
     # kubectl_command_executor. Gated by runner.enableWritePermissions — the
     # SAME switch that grants the service account its write RBAC — so the
     # runner allowlist and the cluster RBAC move together. Default (false)
     # keeps kubectl strictly read-only; mutating verbs (scale/patch/delete/...)
     # are rejected and routed to the signed pkg/mutate actions instead. When
-    # true, mutating kubectl runs over the unsigned, relay-secret-gated light
-    # action path — the operator granting write RBAC opts into that posture.
+    # true, mutating kubectl commands need a valid relay signature if the
+    # relay key below is set (read commands never do); without the key they
+    # run unsigned — the operator granting write RBAC opts into that posture.
     - name: KUBECTL_ALLOW_WRITE
       value: {{ if .Values.runner.enableWritePermissions }}"true"{{ else }}"false"{{ end }}
-    {{- if .Values.rsa }}
-    - name: RSA_PRIVATE_KEY_PATH
-      value: /etc/nudgebee/auth/prv
-    {{- end }}
     {{- if .Values.runner.nudgebee.relay_signing_public_key }}
     # Relay Ed25519 public key — the agent verifies relay-signed requests with
-    # it and authorizes UI-triggered workload mutations. A valid relay signature
-    # is required for mutations; reads always fall back to the light-action path,
-    # so this is purely additive.
+    # it. With it set, mutations and the write light actions need a valid relay
+    # signature (runner.writeActionsRequireSignature); reads always fall back
+    # to the light-action path.
     - name: RELAY_SIGNING_PUBLIC_KEY
       value: {{ .Values.runner.nudgebee.relay_signing_public_key | quote }}
     {{- end }}
@@ -435,12 +435,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
   {{- if .Values.runner.additional_env_froms }}
   {{ toYaml .Values.runner.additional_env_froms | nindent 2 }}
   {{- end }}
+  {{- with .Values.runner.extraVolumeMounts }}
   volumeMounts:
-    - name: auth-config-secret
-      mountPath: /etc/nudgebee/auth
-    {{- with .Values.runner.extraVolumeMounts }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
   lifecycle:
     preStop:
       exec:
@@ -478,14 +476,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
 Runner volumes template. Invoked with root context.
 */}}
 {{- define "nudgebee.runner.volumes" -}}
+{{- with .Values.runner.extraVolumes }}
 volumes:
-  - name: auth-config-secret
-    secret:
-      secretName: {{ include "nudgebee-agent.fullname" . }}-auth-config-secret
-      optional: true
-  {{- with .Values.runner.extraVolumes }}
   {{- toYaml . | nindent 2 }}
-  {{- end }}
+{{- end }}
 {{- end }}
 
 {{/*

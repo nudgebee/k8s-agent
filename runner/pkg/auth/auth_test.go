@@ -1,47 +1,10 @@
 package auth
 
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"math/big"
+	"errors"
+	"strings"
 	"testing"
-
-	"github.com/google/uuid"
-
-	"github.com/nudgebee/nudgebee-agent/pkg/canonjson"
 )
-
-func TestValidate_HMAC_Roundtrip(t *testing.T) {
-	v := &Validator{SigningKey: "test-signing-key"}
-	body := map[string]any{
-		"action_name":   "prometheus_queries_enricher",
-		"timestamp":     int64(1700000000),
-		"action_params": map[string]any{"q": "up"},
-	}
-	sig, err := signHMAC(v.SigningKey, body)
-	if err != nil {
-		t.Fatalf("signHMAC: %v", err)
-	}
-	if err := v.Validate(&Request{Body: body, Signature: sig}); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-}
-
-func TestValidate_HMAC_RejectsTamperedBody(t *testing.T) {
-	v := &Validator{SigningKey: "test-signing-key"}
-	body := map[string]any{"action_name": "x"}
-	sig, _ := signHMAC(v.SigningKey, body)
-
-	tampered := map[string]any{"action_name": "y"}
-	if err := v.Validate(&Request{Body: tampered, Signature: sig}); err == nil {
-		t.Fatal("Validate: expected error for tampered body")
-	}
-}
 
 func TestValidate_LightAction(t *testing.T) {
 	v := &Validator{LightActions: map[string]struct{}{"query_data": {}}}
@@ -54,133 +17,6 @@ func TestValidate_LightAction(t *testing.T) {
 	}
 }
 
-func TestValidate_PartialKeys_Roundtrip(t *testing.T) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
-
-	signingUUID := uuid.MustParse("12345678-1234-1234-1234-1234567890ab")
-	v := &Validator{
-		SigningKey: signingUUID.String(),
-		PrivateKey: priv,
-	}
-
-	body := map[string]any{
-		"action_name":   "delete_pod",
-		"timestamp":     int64(1700000000),
-		"action_params": map[string]any{"pod": "foo"},
-	}
-
-	// Pick keyA, derive keyB so that keyA XOR keyB == signingUUID.
-	keyA := uuid.MustParse("aaaaaaaa-1111-2222-3333-bbbbbbbbcccc")
-	keyB := xorUUIDs(keyA, signingUUID)
-
-	hash := bodyHash(t, body)
-	authA := encryptPartial(t, &priv.PublicKey, hash, keyA)
-	authB := encryptPartial(t, &priv.PublicKey, hash, keyB)
-
-	if err := v.Validate(&Request{Body: body, PartialAuthA: authA, PartialAuthB: authB}); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-}
-
-func TestValidate_PartialKeys_RejectsBadXor(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	signingUUID := uuid.MustParse("12345678-1234-1234-1234-1234567890ab")
-	v := &Validator{SigningKey: signingUUID.String(), PrivateKey: priv}
-
-	body := map[string]any{"action_name": "delete_pod"}
-	keyA := uuid.MustParse("aaaaaaaa-1111-2222-3333-bbbbbbbbcccc")
-	keyB := uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff") // wrong — XOR != signingUUID
-
-	hash := bodyHash(t, body)
-	authA := encryptPartial(t, &priv.PublicKey, hash, keyA)
-	authB := encryptPartial(t, &priv.PublicKey, hash, keyB)
-
-	if err := v.Validate(&Request{Body: body, PartialAuthA: authA, PartialAuthB: authB}); err == nil {
-		t.Fatal("Validate: expected error for bad XOR")
-	}
-}
-
-// Cover the early-return guards that the happy-path tests skip past.
-
-func TestValidate_HMAC_NoSigningKey(t *testing.T) {
-	v := &Validator{} // SigningKey empty
-	if err := v.Validate(&Request{Body: map[string]any{"a": 1}, Signature: "v0=deadbeef"}); err == nil {
-		t.Error("expected error when signing key not configured")
-	}
-}
-
-func TestValidate_PartialKeys_NoPrivateKey(t *testing.T) {
-	v := &Validator{SigningKey: "x"} // PrivateKey nil
-	if err := v.Validate(&Request{Body: map[string]any{}, PartialAuthA: "a", PartialAuthB: "b"}); err == nil {
-		t.Error("expected error when private key not configured")
-	}
-}
-
-func TestValidate_PartialKeys_NoSigningKey(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	v := &Validator{PrivateKey: priv} // SigningKey empty
-	if err := v.Validate(&Request{Body: map[string]any{}, PartialAuthA: "a", PartialAuthB: "b"}); err == nil {
-		t.Error("expected error when signing key not configured")
-	}
-}
-
-func TestValidate_PartialKeys_OneSideMissing(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	v := &Validator{SigningKey: uuid.NewString(), PrivateKey: priv}
-	// Only auth A present; auth B empty.
-	if err := v.Validate(&Request{Body: map[string]any{}, PartialAuthA: "x", PartialAuthB: ""}); err == nil {
-		t.Error("expected error when one partial-auth side is missing (validatePartialKeys path)")
-	}
-}
-
-func TestValidate_PartialKeys_BadBase64(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	v := &Validator{SigningKey: uuid.NewString(), PrivateKey: priv}
-	err := v.Validate(&Request{
-		Body:         map[string]any{},
-		PartialAuthA: "!!!not-base64!!!",
-		PartialAuthB: "!!!not-base64!!!",
-	})
-	if err == nil {
-		t.Error("expected error for non-base64 ciphertext")
-	}
-}
-
-func TestValidate_PartialKeys_GarbledCiphertext(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	v := &Validator{SigningKey: uuid.NewString(), PrivateKey: priv}
-	// Valid base64 but not a valid OAEP ciphertext.
-	err := v.Validate(&Request{
-		Body:         map[string]any{},
-		PartialAuthA: "AAAA",
-		PartialAuthB: "AAAA",
-	})
-	if err == nil {
-		t.Error("expected error for garbled ciphertext")
-	}
-}
-
-func TestValidate_PartialKeys_BadSigningKeyUUID(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	v := &Validator{SigningKey: "not-a-uuid", PrivateKey: priv}
-
-	// Construct VALID partials (so we hit the signing-key parse error
-	// path rather than getting rejected earlier).
-	body := map[string]any{"action_name": "x"}
-	hash := bodyHash(t, body)
-	keyA := uuid.MustParse("aaaaaaaa-1111-2222-3333-bbbbbbbbcccc")
-	keyB := uuid.MustParse("aaaaaaaa-1111-2222-3333-bbbbbbbbcccc") // any UUID; we want to fail before XOR check
-	authA := encryptPartial(t, &priv.PublicKey, hash, keyA)
-	authB := encryptPartial(t, &priv.PublicKey, hash, keyB)
-
-	if err := v.Validate(&Request{Body: body, PartialAuthA: authA, PartialAuthB: authB}); err == nil {
-		t.Error("expected error for non-UUID signing key")
-	}
-}
-
 func TestValidate_LightAction_DisabledWhenAllowlistNil(t *testing.T) {
 	v := &Validator{}
 	if err := v.Validate(&Request{ActionName: "anything"}); err == nil {
@@ -188,71 +24,55 @@ func TestValidate_LightAction_DisabledWhenAllowlistNil(t *testing.T) {
 	}
 }
 
-func TestValidate_PartialKeys_RejectsBadHash(t *testing.T) {
-	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
-	signingUUID := uuid.MustParse("12345678-1234-1234-1234-1234567890ab")
-	v := &Validator{SigningKey: signingUUID.String(), PrivateKey: priv}
-
-	body := map[string]any{"action_name": "delete_pod"}
-	keyA := uuid.MustParse("aaaaaaaa-1111-2222-3333-bbbbbbbbcccc")
-	keyB := xorUUIDs(keyA, signingUUID)
-
-	wrongHash := "v0=deadbeef"
-	authA := encryptPartial(t, &priv.PublicKey, wrongHash, keyA)
-	authB := encryptPartial(t, &priv.PublicKey, wrongHash, keyB)
-
-	if err := v.Validate(&Request{Body: body, PartialAuthA: authA, PartialAuthB: authB}); err == nil {
-		t.Fatal("Validate: expected error for bad hash")
+// The removed HMAC and partial-key fields are ignored: a request that carries
+// only them is judged on the light-action allowlist alone.
+func TestValidate_LegacySignatureFieldsGrantNothing(t *testing.T) {
+	v := &Validator{LightActions: map[string]struct{}{"get_resource": {}}}
+	r := &Request{
+		ActionName: "delete_workload",
+		Body: map[string]any{
+			"action_name": "delete_workload",
+			"signature":   "v0=deadbeef",
+		},
+	}
+	if err := v.Validate(r); err == nil {
+		t.Fatal("a mutation with only a legacy signature field must be refused")
 	}
 }
 
-// signHMAC mirrors sign_action_request: build
-// "v0:" + canonjson.EncodeForSignature(body), HMAC-SHA256, prefix "v0=".
-func signHMAC(signingKey string, body any) (string, error) {
-	encoded, err := canonjson.EncodeForSignature(body)
-	if err != nil {
-		return "", err
+// A rule narrows SignedOnly to some requests: the rest stay light actions.
+func TestValidate_SignedRuleNarrowsToWrites(t *testing.T) {
+	isWrite := func(p map[string]any) bool { return p["mode"] == "write" }
+	v := &Validator{
+		LightActions: map[string]struct{}{"run": {}},
+		SignedOnly:   map[string]SignedRule{"run": isWrite},
 	}
-	mac := hmac.New(sha256.New, []byte(signingKey))
-	mac.Write([]byte("v0:"))
-	mac.Write(encoded)
-	return "v0=" + hex.EncodeToString(mac.Sum(nil)), nil
+	read := &Request{ActionName: "run", Body: map[string]any{"action_params": map[string]any{"mode": "read"}}}
+	if err := v.Validate(read); err != nil {
+		t.Fatalf("read through a rule-gated action should stay a light action: %v", err)
+	}
+	write := &Request{ActionName: "run", Body: map[string]any{"action_params": map[string]any{"mode": "write"}}}
+	if err := v.Validate(write); err == nil {
+		t.Fatal("write through a rule-gated action needs a signature")
+	}
+	// No action_params: the rule sees nil and decides.
+	if err := v.Validate(&Request{ActionName: "run"}); err != nil {
+		t.Fatalf("rule returned false for nil params, request should pass: %v", err)
+	}
 }
 
-func bodyHash(t *testing.T, body any) string {
-	t.Helper()
-	encoded, err := canonjson.Encode(body)
-	if err != nil {
-		t.Fatalf("canonjson.Encode: %v", err)
+// The refusal says why the relay signature did not count, so a keyed agent
+// whose writes fail points at the cause (no key, no signature, bad signature).
+func TestValidate_SignedOnlyRefusalNamesTheReason(t *testing.T) {
+	v := &Validator{
+		LightActions: map[string]struct{}{"schedule_k8s_job": {}},
+		SignedOnly:   map[string]SignedRule{"schedule_k8s_job": nil},
 	}
-	sum := sha256.Sum256(encoded)
-	return "v0=" + hex.EncodeToString(sum[:])
-}
-
-func encryptPartial(t *testing.T, pub *rsa.PublicKey, hash string, key uuid.UUID) string {
-	t.Helper()
-	payload, err := json.Marshal(map[string]any{
-		"hash": hash,
-		"key":  key.String(),
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
+	err := v.Validate(&Request{ActionName: "schedule_k8s_job"})
+	if !errors.Is(err, errRelayKeyNotConfigured) {
+		t.Fatalf("err = %v; want it to wrap errRelayKeyNotConfigured", err)
 	}
-	ct, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, payload, nil)
-	if err != nil {
-		t.Fatalf("rsa.EncryptOAEP: %v", err)
+	if !strings.Contains(err.Error(), "requires a valid relay signature") {
+		t.Fatalf("err = %v; want it to say a relay signature is required", err)
 	}
-	return base64.StdEncoding.EncodeToString(ct)
-}
-
-func xorUUIDs(a, b uuid.UUID) uuid.UUID {
-	aInt := new(big.Int).SetBytes(a[:])
-	bInt := new(big.Int).SetBytes(b[:])
-	xored := new(big.Int).Xor(aInt, bInt)
-
-	var out uuid.UUID
-	xb := xored.Bytes()
-	// Left-pad to 16 bytes.
-	copy(out[16-len(xb):], xb)
-	return out
 }

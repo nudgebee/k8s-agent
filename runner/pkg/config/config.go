@@ -2,7 +2,7 @@
 //
 // Env vars (chart-compatibility names):
 //
-//	NUDGEBEE_AUTH_SECRET_KEY   - shared secret for relay Basic-Auth and HMAC
+//	NUDGEBEE_AUTH_SECRET_KEY   - shared secret for relay and backend Basic-Auth
 //	WEBSOCKET_RELAY_ADDRESS    - relay /register URL (ws:// or wss://)
 //	NUDGEBEE_ENDPOINT          - backend HTTP base URL (for discovery/alert forward)
 //	ACCOUNT_ID                 - tenant account id (sent in greeting; informational)
@@ -228,25 +228,27 @@ type Config struct {
 	ScannerAutoCopyPullSecrets bool
 
 	// PodExecEnabled (group D): pod_bash_enricher / pod_script_run_enricher.
-	// MUST be paired with RSA partial-keys auth in production.
 	PodExecEnabled bool
 
 	// PodScriptRunRequireSignature stops accepting unsigned
-	// pod_script_run_enricher requests: they then need a relay signature
-	// (RELAY_SIGNING_PUBLIC_KEY), an HMAC signature or partial keys. Off by
-	// default, because a request the relay could not sign (no WebSocket, signing
-	// off, clock skew) is otherwise refused.
+	// pod_script_run_enricher requests even when RELAY_SIGNING_PUBLIC_KEY is
+	// not set (in which case none get through). With the key set,
+	// WriteActionsRequireSignature already covers it.
 	PodScriptRunRequireSignature bool
 
+	// WriteActionsRequireSignature makes the light actions that change the
+	// cluster (scan Jobs, alert rules, continuous rightsizing, script pods,
+	// kubectl writes, non-GET HTTP proxy calls) need a valid relay signature.
+	// Takes effect only when RELAY_SIGNING_PUBLIC_KEY is set: without the key
+	// the agent cannot verify any signature, so those actions stay unsigned.
+	// On by default; false is the escape hatch for a keyed agent whose writes
+	// fail verification (clock skew, a stale key after rotation).
+	WriteActionsRequireSignature bool
+
 	// MutateEnabled (group D): delete_pod / cordon / uncordon / rollout_restart.
-	// MUST be paired with RSA partial-keys auth in production.
+	// These need a valid relay signature (except the alert-rule light actions).
 	MutateEnabled   bool
 	AlertManagerURL string
-
-	// RSA private key for the partial-keys auth path. PEM-encoded file path.
-	// When unset, partial-keys auth is disabled — mutate/podexec actions
-	// fall back to HMAC signature only.
-	RSAPrivateKeyPath string
 
 	// RelaySigningPublicKey is the relay-server's global Ed25519 PUBLIC key(s)
 	// (comma/whitespace-separated for rotation). When set, the agent verifies
@@ -400,7 +402,8 @@ func FromEnv() (*Config, error) {
 		KubectlAllowWrite:              envBool("KUBECTL_ALLOW_WRITE", false),
 		PodExecEnabled:                 envBool("PODEXEC_ENABLED", true),
 		PodScriptRunRequireSignature:   envBool("POD_SCRIPT_RUN_REQUIRE_SIGNATURE", false),
-		// Off by default — these need extra config (RSA key, scanner SA, GCP ADC):
+		WriteActionsRequireSignature:   envBool("WRITE_ACTIONS_REQUIRE_SIGNATURE", true),
+		// Off by default — these need extra config (scanner SA, GCP ADC):
 		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
 		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
 		ScannerServiceAccount: os.Getenv("SCANNER_SERVICE_ACCOUNT"),
@@ -415,7 +418,6 @@ func FromEnv() (*Config, error) {
 		ScannerAutoCopyPullSecrets: envBool("SCANNER_AUTO_COPY_PULL_SECRETS", true),
 		MutateEnabled:              envBool("MUTATE_ENABLED", false),
 		AlertManagerURL:            os.Getenv("ALERTMANAGER_URL"),
-		RSAPrivateKeyPath:          os.Getenv("RSA_PRIVATE_KEY_PATH"),
 		GCPEnabled:                 envBool("GCP_ENABLED", false),
 		GCPProjectID:               os.Getenv("GCP_PROJECT_ID"),
 		ClickHouseEnabled:          envBool("CLICKHOUSE_ENABLED", true),

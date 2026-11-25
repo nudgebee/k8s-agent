@@ -1,79 +1,39 @@
-// Package auth implements three authentication paths:
+// Package auth decides whether the agent may run an incoming action request.
 //
-//  1. HMAC signature        — validate_action_request_signature
-//  2. RSA-OAEP partial keys — validate_with_private_key
-//  3. Light-action allowlist — validate_light_action
+// Two checks, in order:
 //
-// The dispatcher picks the first present mode in the request and skips the others.
+//  1. Relay signature — an Ed25519 signature the relay puts on the raw `body`
+//     bytes of every request it forwards. Valid = any action may run.
+//  2. Light-action allowlist — read actions that may run without a valid relay
+//     signature, so reads keep working on an agent without the relay's public
+//     key or under clock skew. Actions in SignedOnly never pass here.
 package auth
 
 import (
-	"crypto/hmac"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
-	"os"
 	"sync/atomic"
 
-	"github.com/google/uuid"
-
-	"github.com/nudgebee/nudgebee-agent/pkg/canonjson"
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
-// LoadPrivateKey reads a PEM-encoded RSA private key from disk. Supports
-// both PKCS#1 ("BEGIN RSA PRIVATE KEY") and PKCS#8 ("BEGIN PRIVATE KEY")
-// formats — the auth-config.yaml ConfigMap uses PKCS#8.
-func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("auth: read RSA key from %s: %w", path, err)
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("auth: %s does not contain a PEM block", path)
-	}
-	switch block.Type {
-	case "RSA PRIVATE KEY":
-		return x509.ParsePKCS1PrivateKey(block.Bytes)
-	case "PRIVATE KEY":
-		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, err
-		}
-		rsaKey, ok := k.(*rsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("auth: %s contains a non-RSA private key", path)
-		}
-		return rsaKey, nil
-	default:
-		return nil, fmt.Errorf("auth: unexpected PEM block type %q in %s", block.Type, path)
-	}
-}
-
-// Request is the in-memory shape of an incoming ExternalActionRequest after
-// JSON unmarshal. Body is the same map the wire JSON `body` field decoded to;
-// canonjson encodes it before signing/hashing.
+// Request is the in-memory shape of an incoming action request after JSON
+// unmarshal. Body is the decoded `body` field; BodyRaw is its exact wire bytes
+// (a json.RawMessage, never a re-marshaled map) so it matches the bytes the
+// relay signed.
 type Request struct {
-	Body         map[string]any
-	ActionName   string
-	Signature    string // HMAC mode
-	PartialAuthA string // RSA partial keys mode (encrypted, base64)
-	PartialAuthB string // RSA partial keys mode (encrypted, base64)
-
-	// RelaySig + BodyRaw drive the relay-signature path. BodyRaw is the exact
-	// bytes of the wire `body` field (a json.RawMessage) — NOT a re-marshaled
-	// Body map — so it matches the bytes the relay signed.
-	RelaySig relaysig.Envelope
-	BodyRaw  []byte
+	Body       map[string]any
+	ActionName string
+	RelaySig   relaysig.Envelope
+	BodyRaw    []byte
 }
+
+// SignedRule reports whether one request for an action needs a valid relay
+// signature, given its action_params (nil when absent). A nil SignedRule means
+// every request for that action does. Rules let an action that both reads and
+// writes (kubectl_command_executor, http_proxy_request) keep its reads on the
+// light-action path.
+type SignedRule func(params map[string]any) bool
 
 // Validator holds the agent's auth state.
 //
@@ -81,14 +41,6 @@ type Request struct {
 // allowlist without dropping the WS connection or interleaving with concurrent
 // Validate calls. Use SetLightActions for runtime updates.
 type Validator struct {
-	// SigningKey is the shared HMAC secret AND the UUID that key_a XOR key_b
-	// must reconstruct in the partial-keys path. Empty disables both modes.
-	SigningKey string
-
-	// PrivateKey is the agent-side RSA private key for the partial-keys path.
-	// Nil disables partial-keys auth.
-	PrivateKey *rsa.PrivateKey
-
 	// LightActions can be set directly at startup; SetLightActions /
 	// LightActionsSet hot-swap it under load.
 	LightActions map[string]struct{}
@@ -99,15 +51,15 @@ type Validator struct {
 
 	// RelayVerifier validates an Ed25519 relay signature over the raw body.
 	// When set and Enabled(), a present+valid relay signature authorizes ANY
-	// action (bypassing the HMAC/partial/lightAction modes). Nil or disabled =
-	// the relay signature is ignored and the request falls through to the
-	// existing modes, so reads keep working on un-keyed agents.
+	// action. Nil or disabled = the relay signature is ignored and only the
+	// light-action allowlist applies.
 	RelayVerifier *relaysig.Verifier
 
 	// SignedOnly names actions that never pass on the light-action path, even
-	// when the allowlist (startup or refreshed) lists them: they need a relay
-	// signature, an HMAC signature or partial keys. Set once at startup.
-	SignedOnly map[string]struct{}
+	// when the allowlist (startup or refreshed) lists them: they need a valid
+	// relay signature. The rule, when not nil, narrows that to the requests it
+	// returns true for. Set once at startup; refresh_playbook cannot change it.
+	SignedOnly map[string]SignedRule
 }
 
 // SetLightActions atomically replaces the light-action allowlist. Concurrent
@@ -136,69 +88,74 @@ func (v *Validator) LightActionsSet() map[string]struct{} {
 	return v.LightActions
 }
 
-// Validate returns nil if the request is authentic per any of the supported
-// modes. Mirrors the backend's dispatch logic.
+// Validate returns nil if the request may run.
 //
-// Relay-signature handling is a non-fatal pre-check: a VALID relay signature
-// (verifier configured + enabled) authorizes any action; anything else — no
-// signature, no key, or a signature that fails verification (bad sig, clock
-// skew, replay) — FALLS THROUGH to the existing modes rather than hard-failing.
-//
-// Falling through is deliberate and load-bearing: the relay signs every k8s
-// request (reads included), so a hard 401 on a failed signature would break
-// reads that work today via lightActions — e.g. on an upgraded-but-unkeyed
-// agent, or under clock skew. With fall-through, reads always survive via
-// lightActions and only mutations (which aren't light actions) effectively
-// require a valid relay signature. Falling through never grants extra access:
-// a forged/invalid mutation signature still hits the lightAction check and is
-// rejected.
+// A failed relay signature (bad signature, clock skew, replay, no key) is not
+// a hard failure: the request falls through to the light-action allowlist, so
+// reads keep working. Falling through never grants extra access: a write in
+// SignedOnly or off the allowlist is refused there.
 func (v *Validator) Validate(r *Request) error {
-	if r.RelaySig.Present() && v.RelayVerifier != nil && v.RelayVerifier.Enabled() {
+	var relayErr error
+	switch {
+	case v.RelayVerifier == nil || !v.RelayVerifier.Enabled():
+		relayErr = errRelayKeyNotConfigured
+	case !r.RelaySig.Present():
+		relayErr = errNoRelaySignature
+	default:
 		err := v.RelayVerifier.VerifyBody(r.BodyRaw, r.RelaySig)
 		if err == nil {
 			return nil // valid relay signature authorizes any action
 		}
 		// A replay is a request this agent already accepted, delivered again
 		// (the broker redelivers what was unacked when a channel dropped). When
-		// falling through would reject it — a mutation with no other credentials
-		// — it would be reported as unauthorized while the first delivery may
-		// have applied it; say what it is instead. A read, or a request carrying
-		// another signature, falls through as before.
-		if errors.Is(err, relaysig.ErrReplay) && !v.isLightAction(r.ActionName) &&
-			r.Signature == "" && r.PartialAuthA == "" && r.PartialAuthB == "" {
+		// falling through would reject it, it would be reported as
+		// unauthorized while the first delivery may have applied it; say what
+		// it is instead. A read falls through and runs as before.
+		if errors.Is(err, relaysig.ErrReplay) && !v.isLightRequest(r) {
 			return fmt.Errorf("%w: %s", ErrDuplicateDelivery, r.ActionName)
 		}
-		// Verification failed — fall through to the existing modes (reads keep
-		// working via lightActions; mutations get rejected there).
+		relayErr = err
 	}
-	switch {
-	case r.Signature != "":
-		return v.validateHMAC(r)
-	case r.PartialAuthA != "" || r.PartialAuthB != "":
-		return v.validatePartialKeys(r)
-	default:
-		return v.validateLightAction(r)
-	}
+	return v.validateLightAction(r, relayErr)
 }
+
+var (
+	errRelayKeyNotConfigured = errors.New("relay signing key not configured on this agent")
+	errNoRelaySignature      = errors.New("no relay signature on the request")
+)
 
 // ErrDuplicateDelivery is Validate's error for a mutation whose valid relay
 // signature carries a nonce already seen: a second delivery of a request the
 // agent accepted before. Its outcome is the first delivery's, not a denial.
 var ErrDuplicateDelivery = errors.New("auth: duplicate delivery of a request already received")
 
-// isLightAction reports whether action is on the light-action allowlist and
-// not signature-only.
-func (v *Validator) isLightAction(action string) bool {
-	if _, signedOnly := v.SignedOnly[action]; signedOnly {
+// needsSignature reports whether this request may only run with a valid relay
+// signature.
+func (v *Validator) needsSignature(r *Request) bool {
+	rule, ok := v.SignedOnly[r.ActionName]
+	if !ok {
 		return false
 	}
-	_, ok := v.LightActionsSet()[action]
+	if rule == nil {
+		return true
+	}
+	params, _ := r.Body["action_params"].(map[string]any)
+	return rule(params)
+}
+
+// isLightRequest reports whether the request would pass the light-action
+// check: on the allowlist and not needing a signature.
+func (v *Validator) isLightRequest(r *Request) bool {
+	if v.needsSignature(r) {
+		return false
+	}
+	_, ok := v.LightActionsSet()[r.ActionName]
 	return ok
 }
 
-func (v *Validator) validateLightAction(r *Request) error {
-	if _, signedOnly := v.SignedOnly[r.ActionName]; signedOnly {
-		return fmt.Errorf("auth: action %q requires a signed request", r.ActionName)
+func (v *Validator) validateLightAction(r *Request, relayErr error) error {
+	if v.needsSignature(r) {
+		return fmt.Errorf("auth: action %q requires a valid relay signature: %w", r.ActionName, relayErr)
 	}
 	set := v.LightActionsSet()
 	if set == nil {
@@ -208,109 +165,4 @@ func (v *Validator) validateLightAction(r *Request) error {
 		return fmt.Errorf("auth: action %q not in light-action allowlist", r.ActionName)
 	}
 	return nil
-}
-
-// validateHMAC mirrors sign_action_request:
-//
-//	format_req = "v0:" + body.json(exclude_none=True, sort_keys=True)
-//	mac = hmac.new(signing_key, format_req, sha256).hexdigest()
-//	signature = "v0=" + mac
-//
-// Note the WITH-SPACES canonical form (default Python json.dumps separators),
-// not the no-space form used in the partial-keys hash path.
-func (v *Validator) validateHMAC(r *Request) error {
-	if v.SigningKey == "" {
-		return errors.New("auth: signing key not configured")
-	}
-	body, err := canonjson.EncodeForSignature(r.Body)
-	if err != nil {
-		return fmt.Errorf("auth: encode body for sig: %w", err)
-	}
-	mac := hmac.New(sha256.New, []byte(v.SigningKey))
-	mac.Write([]byte("v0:"))
-	mac.Write(body)
-	expected := "v0=" + hex.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(expected), []byte(r.Signature)) {
-		return errors.New("auth: signature mismatch")
-	}
-	return nil
-}
-
-// validatePartialKeys decrypts both partial payloads with the agent RSA key
-// (OAEP-MGF1-SHA256), parses {key, hash}, verifies both hashes match
-// v0=sha256(canonical_json(body)), and verifies
-// key_a XOR key_b == signing_key UUID as a 128-bit int.
-func (v *Validator) validatePartialKeys(r *Request) error {
-	if v.PrivateKey == nil {
-		return errors.New("auth: private key not configured")
-	}
-	if v.SigningKey == "" {
-		return errors.New("auth: signing key not configured")
-	}
-	if r.PartialAuthA == "" || r.PartialAuthB == "" {
-		return errors.New("auth: missing partial auth")
-	}
-
-	body, err := canonjson.Encode(r.Body) // no-space form for partial-keys hash path
-	if err != nil {
-		return fmt.Errorf("auth: encode body for partial-key hash: %w", err)
-	}
-	sum := sha256.Sum256(body)
-	expectedHash := "v0=" + hex.EncodeToString(sum[:])
-
-	keyA, err := v.extractPartialKey(r.PartialAuthA, expectedHash)
-	if err != nil {
-		return fmt.Errorf("auth: partial_auth_a: %w", err)
-	}
-	keyB, err := v.extractPartialKey(r.PartialAuthB, expectedHash)
-	if err != nil {
-		return fmt.Errorf("auth: partial_auth_b: %w", err)
-	}
-
-	signingUUID, err := uuid.Parse(v.SigningKey)
-	if err != nil {
-		return fmt.Errorf("auth: signing key not a UUID: %w", err)
-	}
-
-	// XOR of two 128-bit UUIDs as bytes; compare with signing_key UUID bytes.
-	want := uuidToBigInt(signingUUID)
-	got := new(big.Int).Xor(uuidToBigInt(keyA), uuidToBigInt(keyB))
-	if want.Cmp(got) != 0 {
-		return errors.New("auth: key_a XOR key_b does not match signing key")
-	}
-	return nil
-}
-
-// extractPartialKey decrypts one base64-encoded RSA-OAEP-MGF1-SHA256 ciphertext,
-// parses {hash, key} JSON inside, verifies the hash matches the request body,
-// and returns the embedded UUID.
-func (v *Validator) extractPartialKey(encoded, expectedHash string) (uuid.UUID, error) {
-	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("base64: %w", err)
-	}
-	plain, err := rsa.DecryptOAEP(sha256.New(), nil, v.PrivateKey, ciphertext, nil)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("rsa-oaep: %w", err)
-	}
-	var auth struct {
-		Hash string `json:"hash"`
-		Key  string `json:"key"`
-	}
-	if err := json.Unmarshal(plain, &auth); err != nil {
-		return uuid.Nil, fmt.Errorf("json: %w", err)
-	}
-	if !hmac.Equal([]byte(auth.Hash), []byte(expectedHash)) {
-		return uuid.Nil, errors.New("hash mismatch")
-	}
-	parsed, err := uuid.Parse(auth.Key)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("key not a UUID: %w", err)
-	}
-	return parsed, nil
-}
-
-func uuidToBigInt(u uuid.UUID) *big.Int {
-	var n big.Int
-	return n.SetBytes(u[:])
 }

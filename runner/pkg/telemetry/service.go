@@ -129,6 +129,15 @@ type ActivityStats struct {
 	// PrometheusRules in every namespace (false for a runner.readOnly install,
 	// which can write only in its own namespace).
 	PrometheusRuleClusterWrite bool `json:"prometheusRuleClusterWrite"`
+
+	// Request signing, so the backend can see which agents verify the relay's
+	// signature. No omitempty, same jsonb-merge reason as above.
+	//
+	// RelaySignatureVerification: RELAY_SIGNING_PUBLIC_KEY is set and parsed.
+	RelaySignatureVerification bool `json:"relaySignatureVerification"`
+	// WriteActionsRequireSignature: actions that change the cluster need a
+	// valid relay signature (verification on and not switched off).
+	WriteActionsRequireSignature bool `json:"writeActionsRequireSignature"`
 }
 
 // ClusterStatus is the wire payload posted to /v1/k8s/telemetry.
@@ -265,6 +274,10 @@ type Datasources struct {
 	// Alert-rule write capabilities; see ActivityStats.
 	AlertRuleLocatorWrites     bool
 	PrometheusRuleClusterWrite bool
+
+	// Request signing; see ActivityStats.
+	RelaySignatureVerification   bool
+	WriteActionsRequireSignature bool
 }
 
 // Service is the periodic poster.
@@ -442,6 +455,9 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 		AgentURL:                   ds.AgentURL,
 		AlertRuleLocatorWrites:     ds.AlertRuleLocatorWrites,
 		PrometheusRuleClusterWrite: ds.PrometheusRuleClusterWrite,
+
+		RelaySignatureVerification:   ds.RelaySignatureVerification,
+		WriteActionsRequireSignature: ds.WriteActionsRequireSignature,
 	}
 
 	// Prometheus: connectivity is computed by the caller via an authenticated
