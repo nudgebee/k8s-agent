@@ -114,6 +114,10 @@ Two checks:
 
 Some light actions change the cluster: `schedule_k8s_job`, `delete_k8s_job`, `create_or_replace_alert_rule`, `delete_alert_rule`, `continuous_rightsizing` (unless `recommend_only`), `pod_script_run_enricher`, `kubectl_command_executor` write commands (with `KUBECTL_ALLOW_WRITE`) and `http_proxy_request` calls other than GET/HEAD. When the agent has the relay key, these need a valid relay signature (`WRITE_ACTIONS_REQUIRE_SIGNATURE`, on by default). Without the key they run unsigned and the agent logs a warning at startup.
 
+Pod-shell and Grafana / API-proxy / Prometheus messages carry no `body`; the relay puts the exact request it signed in `relay_signed_payload` and the agent runs that. With the key, pod-shell `start`/`exec` and HTTP calls other than GET/HEAD or a query POST (Prometheus query endpoints, Grafana `/api/ds/query`) need a valid signature; `read`/`close` and reads never do.
+
+`relay_signature_v2` signs `nb-relay-sig-v2\n<kind>\n<relay_signed_at>\n<relay_nonce>\n<payload>` (kind `body`, `terminal` or `http`), so a captured message cannot be replayed under a fresh timestamp and nonce. When present it is the one checked. `relay_signature` (body only) is still accepted on action requests from servers that predate v2, so there a captured request with its v2 field stripped can still be replayed until v1 is no longer accepted; pod-shell and HTTP-proxy messages are v2-only.
+
 The allowlist is hot-swappable via `refresh_playbook` so new read-only actions can roll out without a customer Helm upgrade; a refreshed list cannot drop the signature requirement.
 
 ## Repo layout

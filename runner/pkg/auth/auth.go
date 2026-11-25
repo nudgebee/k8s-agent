@@ -60,6 +60,11 @@ type Validator struct {
 	// relay signature. The rule, when not nil, narrows that to the requests it
 	// returns true for. Set once at startup; refresh_playbook cannot change it.
 	SignedOnly map[string]SignedRule
+
+	// SignedMessageWrites makes pod-shell and HTTP-proxy (Grafana, API proxy,
+	// Prometheus) messages that change something need a valid relay v2
+	// signature. Reads pass either way. Set once at startup.
+	SignedMessageWrites bool
 }
 
 // SetLightActions atomically replaces the light-action allowlist. Concurrent
@@ -165,4 +170,32 @@ func (v *Validator) validateLightAction(r *Request, relayErr error) error {
 		return fmt.Errorf("auth: action %q not in light-action allowlist", r.ActionName)
 	}
 	return nil
+}
+
+// VerifyMessage checks the v2 relay signature of a pod-shell or HTTP-proxy
+// message over signedPayload (its relay_signed_payload). nil means the
+// signature is valid and the caller must run the request decoded from
+// signedPayload; otherwise the error says why the signature does not count.
+func (v *Validator) VerifyMessage(kind string, signedPayload []byte, env relaysig.Envelope) error {
+	switch {
+	case v.RelayVerifier == nil || !v.RelayVerifier.Enabled():
+		return errRelayKeyNotConfigured
+	case env.SignatureV2 == "" || len(signedPayload) == 0:
+		return errNoRelaySignature
+	}
+	return v.RelayVerifier.VerifyV2(kind, signedPayload, env)
+}
+
+// AllowUnsignedMessage decides whether a pod-shell or HTTP-proxy message whose
+// signature did not verify (relayErr, from VerifyMessage) may still run. Reads
+// may; writes may only when SignedMessageWrites is off. A replayed write is
+// reported as ErrDuplicateDelivery, as for action requests.
+func (v *Validator) AllowUnsignedMessage(kind string, write bool, relayErr error) error {
+	if !write || !v.SignedMessageWrites {
+		return nil
+	}
+	if errors.Is(relayErr, relaysig.ErrReplay) {
+		return fmt.Errorf("%w: %s", ErrDuplicateDelivery, kind)
+	}
+	return fmt.Errorf("auth: %s write requires a valid relay signature: %w", kind, relayErr)
 }
