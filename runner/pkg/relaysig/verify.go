@@ -43,14 +43,33 @@ const (
 // Envelope is the relay signature metadata, parsed by the caller from the
 // `relay_*` top-level fields of the request.
 type Envelope struct {
-	Signature string // base64 Ed25519 signature over the raw `body` bytes
-	SignedAt  string // RFC3339 timestamp
-	Nonce     string // unique id for replay prevention
-	KeyID     string // optional key id (rotation/logging)
+	Signature string // v1: base64 Ed25519 signature over the raw `body` bytes
+	// SignatureV2 (relay_signature_v2) also covers SignedAt and Nonce; see
+	// V2Message. When present it is the one checked.
+	SignatureV2 string
+	SignedAt    string // RFC3339 timestamp
+	Nonce       string // unique id for replay prevention
+	KeyID       string // optional key id (rotation/logging)
 }
 
 // Present reports whether a relay signature is attached.
-func (e Envelope) Present() bool { return e.Signature != "" }
+func (e Envelope) Present() bool { return e.Signature != "" || e.SignatureV2 != "" }
+
+// V2 signature kinds: what the signed payload is. The kind is part of the
+// signed bytes, so a signature over one kind of message never verifies as
+// another. Must match the relay's signing package.
+const (
+	KindBody     = "body"     // the raw `body` field of an action request
+	KindTerminal = "terminal" // a pod-shell request (relay_signed_payload)
+	KindHTTP     = "http"     // a Grafana / API-proxy / Prometheus request (relay_signed_payload)
+)
+
+// V2Message is the byte string relay_signature_v2 signs. Unlike v1 (body bytes
+// only) it binds relay_signed_at and relay_nonce, so a captured message cannot
+// be replayed under a fresh timestamp and nonce.
+func V2Message(kind, signedAt, nonce string, payload []byte) []byte {
+	return append([]byte("nb-relay-sig-v2\n"+kind+"\n"+signedAt+"\n"+nonce+"\n"), payload...)
+}
 
 // Verifier validates relay Ed25519 signatures over request bodies. It holds one
 // or more public keys so the relay's signing key can be rotated without a
@@ -89,18 +108,37 @@ func NewVerifier(publicKeysStr string, logger *slog.Logger) (*Verifier, error) {
 // Enabled reports whether at least one public key is loaded.
 func (v *Verifier) Enabled() bool { return len(v.publicKeys) > 0 }
 
-// VerifyBody checks the relay signature over bodyRaw — the exact bytes of the
-// request's `body` field as received. Returns nil only when the signature is
-// valid under some configured key, the timestamp is within skew, and the nonce
-// has not been seen. Callers MUST pass the raw `body` bytes (e.g. a
-// json.RawMessage), never a re-marshaled map, so the bytes match what the relay
-// signed.
+// VerifyBody checks the relay signature on an action request over bodyRaw —
+// the exact bytes of the request's `body` field as received. With a v2
+// signature present it checks that (and only that); otherwise the v1 signature
+// over the body alone. Returns nil only when the signature is valid under some
+// configured key, the timestamp is within skew, and the nonce has not been
+// seen. Callers MUST pass the raw `body` bytes (e.g. a json.RawMessage), never
+// a re-marshaled map, so the bytes match what the relay signed.
 func (v *Verifier) VerifyBody(bodyRaw []byte, env Envelope) error {
-	if !v.Enabled() {
-		return fmt.Errorf("relay signature verification not configured")
+	if env.SignatureV2 != "" {
+		return v.VerifyV2(KindBody, bodyRaw, env)
 	}
 	if env.Signature == "" {
 		return fmt.Errorf("relay signature: missing relay_signature")
+	}
+	return v.verify(bodyRaw, bodyRaw, env.Signature, env)
+}
+
+// VerifyV2 checks relay_signature_v2 over V2Message(kind, signed_at, nonce,
+// payload), with the same key, skew and nonce rules as VerifyBody.
+func (v *Verifier) VerifyV2(kind string, payload []byte, env Envelope) error {
+	if env.SignatureV2 == "" {
+		return fmt.Errorf("relay signature: missing relay_signature_v2")
+	}
+	return v.verify(payload, V2Message(kind, env.SignedAt, env.Nonce, payload), env.SignatureV2, env)
+}
+
+// verify checks sigB64 over signed; payload is what the signature is about
+// (must be non-empty).
+func (v *Verifier) verify(payload, signed []byte, sigB64 string, env Envelope) error {
+	if !v.Enabled() {
+		return fmt.Errorf("relay signature verification not configured")
 	}
 	if env.SignedAt == "" {
 		return fmt.Errorf("relay signature: missing relay_signed_at")
@@ -108,7 +146,7 @@ func (v *Verifier) VerifyBody(bodyRaw []byte, env Envelope) error {
 	if env.Nonce == "" {
 		return fmt.Errorf("relay signature: missing relay_nonce")
 	}
-	if len(bodyRaw) == 0 {
+	if len(payload) == 0 {
 		return fmt.Errorf("relay signature: empty body")
 	}
 
@@ -116,18 +154,21 @@ func (v *Verifier) VerifyBody(bodyRaw []byte, env Envelope) error {
 	if err != nil {
 		return fmt.Errorf("relay signature: invalid relay_signed_at: %w", err)
 	}
-	if absDuration(time.Since(signedAt)) > maxTimestampSkew {
+	// Compare against bounds rather than |now - signedAt|: for a timestamp
+	// centuries away time.Since saturates at math.MinInt64, whose negation
+	// overflows back to a negative Duration and would pass a "> skew" check.
+	if now := time.Now(); signedAt.Before(now.Add(-maxTimestampSkew)) || signedAt.After(now.Add(maxTimestampSkew)) {
 		return fmt.Errorf("relay signature: relay_signed_at %s outside ±%s window", env.SignedAt, maxTimestampSkew)
 	}
 
-	sig, err := base64.StdEncoding.DecodeString(env.Signature)
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		return fmt.Errorf("relay signature: invalid signature encoding: %w", err)
 	}
 
 	verified := false
 	for _, pk := range v.publicKeys {
-		if ed25519.Verify(pk, bodyRaw, sig) {
+		if ed25519.Verify(pk, signed, sig) {
 			verified = true
 			break
 		}
@@ -244,11 +285,4 @@ func (v *Verifier) checkAndRecordNonce(nonce string) error {
 		}
 	}
 	return nil
-}
-
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
-	}
-	return d
 }

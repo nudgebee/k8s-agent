@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/auth"
+	"github.com/nudgebee/nudgebee-agent/pkg/grafana"
 	"github.com/nudgebee/nudgebee-agent/pkg/relay"
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
@@ -272,6 +273,7 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 		Body           map[string]any `json:"body"`
 		RequestID      string         `json:"request_id,omitempty"`
 		RelaySignature string         `json:"relay_signature,omitempty"`
+		RelaySigV2     string         `json:"relay_signature_v2,omitempty"`
 		RelaySignedAt  string         `json:"relay_signed_at,omitempty"`
 		RelayNonce     string         `json:"relay_nonce,omitempty"`
 		RelayKeyID     string         `json:"relay_key_id,omitempty"`
@@ -302,10 +304,11 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 			ActionName: actionName,
 			BodyRaw:    bodyEnvelope.Body,
 			RelaySig: relaysig.Envelope{
-				Signature: raw.RelaySignature,
-				SignedAt:  raw.RelaySignedAt,
-				Nonce:     raw.RelayNonce,
-				KeyID:     raw.RelayKeyID,
+				Signature:   raw.RelaySignature,
+				SignatureV2: raw.RelaySigV2,
+				SignedAt:    raw.RelaySignedAt,
+				Nonce:       raw.RelayNonce,
+				KeyID:       raw.RelayKeyID,
 			},
 		}
 		if err := d.auth.Validate(authReq); err != nil {
@@ -420,6 +423,29 @@ func (d *Dispatcher) handleTerminal(ctx context.Context, msg []byte, send relay.
 		return
 	}
 	logger := d.cfg.Logger.With("kind", "terminal", "action", req.Action, "session_id", req.SessionID, "request_id", req.RequestID)
+	// start opens a shell in a pod and exec types into it; read and close only
+	// touch a session already opened.
+	isWrite := func(r *TerminalRequest) bool { return r.Action == "start" || r.Action == "exec" }
+	decode := func(b []byte) error {
+		var r TerminalRequest
+		if err := json.Unmarshal(b, &r); err != nil {
+			return err
+		}
+		req = r
+		return nil
+	}
+	outerID := req.RequestID
+	if status, err := d.authorizeMessage(msg, relaysig.KindTerminal, decode, func() bool { return isWrite(&req) }); err != nil {
+		logger.Warn("dispatch: terminal auth rejected", "err", err)
+		d.respondString(send, req.RequestID, status, map[string]any{"error": err.Error()}, "Terminal")
+		return
+	}
+	// A verified message runs the signed request. The request id only routes
+	// the reply, so the outer one stands in if the signed request has none.
+	if req.RequestID == "" {
+		req.RequestID = outerID
+	}
+	logger = d.cfg.Logger.With("kind", "terminal", "action", req.Action, "session_id", req.SessionID, "request_id", req.RequestID)
 	if d.terminal == nil {
 		logger.Warn("dispatch: terminal handler not configured")
 		d.respondString(send, req.RequestID, 501, map[string]any{"error": "pod_shell not enabled on this agent"}, "Terminal")
@@ -444,10 +470,39 @@ func (d *Dispatcher) handleGrafana(ctx context.Context, msg []byte, send relay.S
 		return
 	}
 	requestID := firstHeader(req.Header, "X-Nb-Request-Id")
-	requestType := firstHeader(req.Header, "X-NB-Request-Type")
-	if requestType == "" {
-		requestType = "Grafana"
+	// The request type and API base URL decide both whether the request is a
+	// write and where it goes; with two spellings of one header, firstHeader
+	// could pick a different one each time.
+	if h := ambiguousHeader(req.Header, routingHeaders...); h != "" {
+		d.cfg.Logger.Warn("dispatch: grafana request refused, ambiguous header", "header", h, "request_id", requestID)
+		d.respondString(send, requestID, 400, map[string]any{"error": "header " + h + " is set more than once"}, "Grafana")
+		return
 	}
+	decode := func(b []byte) error {
+		var r GrafanaRequest
+		if err := json.Unmarshal(b, &r); err != nil {
+			return err
+		}
+		if h := ambiguousHeader(r.Header, routingHeaders...); h != "" {
+			return fmt.Errorf("header %s is set more than once", h)
+		}
+		req = r
+		return nil
+	}
+	if status, err := d.authorizeMessage(msg, relaysig.KindHTTP, decode, func() bool {
+		return !grafana.IsReadRequest(grafanaRequestType(&req), req.Method, req.URL)
+	}); err != nil {
+		d.cfg.Logger.Warn("dispatch: grafana auth rejected", "err", err, "request_id", requestID, "method", req.Method, "url", req.URL)
+		d.respondString(send, requestID, status, map[string]any{"error": err.Error()}, "Grafana")
+		return
+	}
+	// Re-read after auth: a verified message runs the signed request. The
+	// request id only routes the reply, so the outer one stands in if the
+	// signed request has none.
+	if id := firstHeader(req.Header, "X-Nb-Request-Id"); id != "" {
+		requestID = id
+	}
+	requestType := grafanaRequestType(&req)
 	logger := d.cfg.Logger.With("kind", "grafana", "request_type", requestType, "request_id", requestID, "url", req.URL)
 
 	if d.grafana == nil {
@@ -539,6 +594,27 @@ func (d *Dispatcher) sendErr(send relay.SendFunc, requestID string, status int, 
 
 // firstHeader returns the first value of a header (case-insensitive),
 // matching incoming_event.header.get(name)[0].
+// routingHeaders are the Grafana-request headers that choose where a request
+// goes and how it is classified.
+var routingHeaders = []string{"X-NB-Request-Type", "X-API-Base-URL"}
+
+// ambiguousHeader returns the first of keys that appears under more than one
+// spelling in h (header names are case-insensitive), or "".
+func ambiguousHeader(h map[string][]string, keys ...string) string {
+	for _, key := range keys {
+		n := 0
+		for k := range h {
+			if strings.EqualFold(k, key) {
+				n++
+			}
+		}
+		if n > 1 {
+			return key
+		}
+	}
+	return ""
+}
+
 func firstHeader(h map[string][]string, key string) string {
 	for k, v := range h {
 		if strings.EqualFold(k, key) && len(v) > 0 {
@@ -563,4 +639,61 @@ func MustEncodeJSON(v any) []byte {
 		panic(fmt.Sprintf("MustEncodeJSON: %v", err))
 	}
 	return b
+}
+
+// grafanaRequestType is the X-NB-Request-Type of a proxied HTTP request;
+// absent means Grafana.
+func grafanaRequestType(r *GrafanaRequest) string {
+	if t := firstHeader(r.Header, "X-NB-Request-Type"); t != "" {
+		return t
+	}
+	return "Grafana"
+}
+
+// messageEnvelope is the relay signature on a pod-shell or HTTP-proxy message:
+// relay_signed_payload is the exact request the relay signed.
+type messageEnvelope struct {
+	SignedPayload string `json:"relay_signed_payload,omitempty"`
+	SignatureV2   string `json:"relay_signature_v2,omitempty"`
+	SignedAt      string `json:"relay_signed_at,omitempty"`
+	Nonce         string `json:"relay_nonce,omitempty"`
+	KeyID         string `json:"relay_key_id,omitempty"`
+}
+
+// authorizeMessage checks a pod-shell or HTTP-proxy message whose request the
+// caller already decoded from msg. With a valid v2 signature, decode replaces
+// that request with the one decoded from relay_signed_payload (into a fresh
+// value, so no unsigned field survives), and what runs is what was signed.
+// Otherwise the unsigned request may run unless isWrite reports it changes
+// something and the validator requires signed writes. Returns the status to
+// answer with when refused (401, or 409 for a replayed write).
+func (d *Dispatcher) authorizeMessage(msg []byte, kind string, decode func([]byte) error, isWrite func() bool) (int, error) {
+	if d.auth == nil {
+		return 0, nil
+	}
+	var env messageEnvelope
+	_ = json.Unmarshal(msg, &env)
+	signed := []byte(env.SignedPayload)
+	relayErr := d.auth.VerifyMessage(kind, signed, relaysig.Envelope{
+		SignatureV2: env.SignatureV2,
+		SignedAt:    env.SignedAt,
+		Nonce:       env.Nonce,
+		KeyID:       env.KeyID,
+	})
+	if relayErr == nil {
+		err := decode(signed)
+		if err == nil {
+			return 0, nil
+		}
+		// A valid signature over something that is not this request type
+		// counts as no signature; the caller's request stays the outer one.
+		relayErr = fmt.Errorf("relay signature: signed payload is not a %s request: %w", kind, err)
+	}
+	if err := d.auth.AllowUnsignedMessage(kind, isWrite(), relayErr); err != nil {
+		if errors.Is(err, auth.ErrDuplicateDelivery) {
+			return 409, err
+		}
+		return 401, err
+	}
+	return 0, nil
 }

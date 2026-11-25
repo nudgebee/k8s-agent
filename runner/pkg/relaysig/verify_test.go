@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,5 +199,80 @@ func TestParsePublicKey_Formats(t *testing.T) {
 	}
 	if _, err := parsePublicKey("not-a-key"); err == nil {
 		t.Fatal("garbage key parsed; want error")
+	}
+}
+
+// Shared cross-repo v2 vector — MUST stay byte-identical to the relay-server's
+// signer_k8s_test.go v2 vector.
+const (
+	vectorV2SignedAt = "2026-01-01T00:00:00Z"
+	vectorV2Nonce    = "vector-nonce-1"
+	vectorV2SigB64   = "AQCN5dPIBN7o+/jEbCwZpeZU1Yv+5eyFjIUdCtyx+A1yquIOjCzr0uG1NRssH1ds9/29hItprHN0a/Ykdm9aAQ=="
+)
+
+func TestV2Message_VectorStability(t *testing.T) {
+	priv := mustSeedKey(t, vectorSeedB64)
+	got := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, V2Message(KindBody, vectorV2SignedAt, vectorV2Nonce, []byte(vectorBody))))
+	if got != vectorV2SigB64 {
+		t.Fatalf("v2 signature drift:\n got %s\nwant %s", got, vectorV2SigB64)
+	}
+}
+
+func v2Env(priv ed25519.PrivateKey, kind string, payload []byte, nonce string) Envelope {
+	at := time.Now().UTC().Format(time.RFC3339)
+	return Envelope{
+		SignatureV2: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, V2Message(kind, at, nonce, payload))),
+		SignedAt:    at,
+		Nonce:       nonce,
+	}
+}
+
+// v2 binds the timestamp and nonce: a captured signature does not verify under
+// a fresh nonce, which v1 (body only) did.
+func TestVerifyV2_BindsNonceAndKind(t *testing.T) {
+	priv := mustSeedKey(t, vectorSeedB64)
+	v, err := NewVerifier(vectorPubB64, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(vectorBody)
+
+	env := v2Env(priv, KindBody, body, "v2-a")
+	if err := v.VerifyBody(body, env); err != nil {
+		t.Fatalf("valid v2: %v", err)
+	}
+	replayed := env
+	replayed.Nonce = "v2-fresh-nonce"
+	if err := v.VerifyBody(body, replayed); err == nil {
+		t.Fatal("a v2 signature must not verify under a different nonce")
+	}
+	if err := v.VerifyV2(KindTerminal, body, v2Env(priv, KindBody, body, "v2-b")); err == nil {
+		t.Fatal("a body signature must not verify as a terminal message")
+	}
+	// v2 present takes precedence: a valid v1 alongside a bad v2 does not pass.
+	both := v2Env(priv, KindBody, []byte(`{"other":1}`), "v2-c")
+	both.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, body))
+	if err := v.VerifyBody(body, both); err == nil {
+		t.Fatal("with relay_signature_v2 present, a bad v2 must fail even if v1 is valid")
+	}
+}
+
+// A timestamp centuries away must fail the skew check, not overflow past it.
+func TestVerify_FarTimestampsOutsideWindow(t *testing.T) {
+	priv := mustSeedKey(t, vectorSeedB64)
+	v, err := NewVerifier(vectorPubB64, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(vectorBody)
+	for i, at := range []string{"9999-12-31T23:59:59Z", "0001-01-01T00:00:00Z"} {
+		env := Envelope{
+			Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(priv, body)),
+			SignedAt:  at,
+			Nonce:     "far-" + strconv.Itoa(i),
+		}
+		if err := v.VerifyBody(body, env); err == nil || !strings.Contains(err.Error(), "outside") {
+			t.Errorf("signed_at %s: err = %v; want outside the window", at, err)
+		}
 	}
 }

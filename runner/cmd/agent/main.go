@@ -789,7 +789,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	switch {
 	case writesNeedSignature:
 		maps.Copy(signedOnly, writeLightActions)
-		logger.Info("write actions require a relay signature", "actions", sortedNames(writeLightActions))
+		logger.Info("write actions require a relay signature", "actions", sortedNames(writeLightActions), "pod_shell_and_http_proxy_writes", true)
 	case relayVerifier.Enabled():
 		logger.Warn("WRITE_ACTIONS_REQUIRE_SIGNATURE is off: these actions run without a relay signature", "actions", sortedNames(writeLightActions))
 	default:
@@ -806,6 +806,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 	}
 	validator.SignedOnly = signedOnly
+	// Pod-shell start/exec and HTTP-proxy writes (Grafana, API proxy,
+	// Prometheus admin) follow the same switch.
+	validator.SignedMessageWrites = writesNeedSignature
 
 	// refresh_playbook hot-reloads the allowlist from the backend so we can
 	// add new actions to a running agent without a customer Helm upgrade.
