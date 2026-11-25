@@ -56,7 +56,7 @@ kubewatch:
   enabled: true
   image:
     repository: ghcr.io/nudgebee/kubewatch
-    tag: 2.14.1-nb.4
+    tag: 2.14.1-nb.5
   imagePullPolicy: IfNotPresent
   # UID the forwarder container runs as. Not set on OpenShift (detected, or
   # openshift.enabled=true): there the namespace's UID range / the SCC assigns
