@@ -4,6 +4,9 @@ description: NudgeBee Kubernetes agent — connects your cluster to the NudgeBee
 type: application
 icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
 home: https://github.com/nudgebee/k8s-agent
+# Matches the "Kubernetes 1.24+" prerequisite. The -0 lets pre-release builds such
+# as v1.27.3-eks-... and OpenShift's own version strings satisfy the range.
+kubeVersion: '>=1.24.0-0'
 sources:
   - https://github.com/nudgebee/k8s-agent
 maintainers:
@@ -19,6 +22,9 @@ keywords:
   - kubewatch
   - sre
 annotations:
+  # Name and provider shown in the OpenShift developer catalog; Red Hat's chart check requires the name.
+  charts.openshift.io/name: NudgeBee Agent
+  charts.openshift.io/provider: NudgeBee
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Documentation
