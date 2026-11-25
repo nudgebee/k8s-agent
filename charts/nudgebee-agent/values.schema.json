@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NudgeBee agent chart values",
+  "description": "Covers the settings an installer is expected to change. A value this file does not mention is passed through unchecked and never rejected.",
+  "type": "object",
+  "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "storageClass": { "type": ["string", "null"], "description": "StorageClass for the volumes this chart creates. \"\" uses the cluster default." },
+        "imagePullSecrets": { "type": ["array", "null"], "description": "Pull secrets added to every pod." }
+      }
+    },
+    "enablePrometheusStack": { "type": "boolean" },
+    "enableServiceMonitors": { "type": "boolean" },
+    "globalConfig": {
+      "type": "object",
+      "properties": {
+        "prometheus_url": { "type": ["string", "null"], "description": "Prometheus the agent queries. Empty means auto-discover." },
+        "alertmanager_url": { "type": ["string", "null"], "description": "Alertmanager for silences. Empty means auto-discover." }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "properties": {
+        "relay_address": { "type": "string" },
+        "enableWritePermissions": { "type": "boolean", "description": "Let the agent change workloads (remediation actions)." },
+        "readOnly": { "type": "boolean", "description": "Install a strictly read-only role." },
+        "nudgebee": {
+          "type": "object",
+          "properties": {
+            "endpoint": { "type": "string" },
+            "auth_secret_key": { "type": ["string", "null"], "description": "Agent auth key from NudgeBee." }
+          }
+        }
+      }
+    },
+    "kubewatch": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+    "nodeAgent": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+    "opentelemetry-collector": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+    "openshift": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "createScc": { "type": "boolean" },
+        "createPrivilegedScc": { "type": "boolean" }
+      }
+    },
+    "tests": { "type": "object", "properties": { "image": { "type": "string" } } }
+  }
+}

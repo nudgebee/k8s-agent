@@ -1,0 +1,45 @@
+{{- /* `helm test`: the runner answers on its Service. */ -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-test-runner" (include "nudgebee-agent.fullname" . | trunc 51 | trimSuffix "-") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    # Not the chart's selector labels: the node-agent DaemonSet selects on exactly
+    # those two, so it would adopt this pod and delete it as soon as it started.
+    app.kubernetes.io/name: {{ include "nudgebee-agent.name" . | trunc 58 | trimSuffix "-" }}-test
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ include "nudgebee-agent.chart" . }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  {{- with include "nudgebee-agent.imagePullSecrets" (dict "root" . "secrets" .Values.runner.imagePullSecrets) }}
+  {{- . | nindent 2 }}
+  {{- end }}
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: curl
+      # --reuse-values from a chart without `tests` leaves it nil.
+      image: {{ (default (dict) .Values.tests).image | default "registry.access.redhat.com/ubi9/ubi-minimal:9.8-1794186349" }}
+      command: ["curl", "-fsS", "--max-time", "10", "--retry", "5", "--retry-connrefused", "http://{{ include "nudgebee-agent.fullname" . }}-runner:80/healthz"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        {{- if not (include "nudgebee-agent.isOpenShift" .) }}
+        # OpenShift assigns the uid itself and rejects a fixed one.
+        runAsUser: 1000
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          memory: 64Mi
