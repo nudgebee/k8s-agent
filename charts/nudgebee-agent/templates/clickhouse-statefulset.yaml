@@ -1,5 +1,6 @@
 {{- /*
-The bundled ClickHouse, on the official clickhouse/clickhouse-server image.
+The bundled ClickHouse, on the official ClickHouse binaries rebuilt on Red Hat
+UBI 9, with the official image's entrypoint.
 
 It is the same StatefulSet the Bitnami subchart rendered, so an upgrade updates
 it in place and the new pod mounts the existing volume

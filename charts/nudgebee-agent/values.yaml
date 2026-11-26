@@ -605,7 +605,7 @@ opentelemetry-collector:
   enabled: true
   image:
     repository: ghcr.io/nudgebee/opentelemetry-collector-contrib
-    tag: 0.164.0
+    tag: 0.164.0-nb1
   # Inherit name overrides from parent chart
   nameOverride: ""
   fullnameOverride: ""
@@ -777,8 +777,8 @@ opentelemetry-collector:
           receivers: [otlp]
 clickhouse:
   enabled: true
-  # The official clickhouse/clickhouse-server image, mirrored with OS patches
-  # (nudgebee/nudgebee: deploy/kubernetes/nudgebee-mirrors/clickhouse-official-26).
+  # The official ClickHouse binaries on Red Hat UBI 9
+  # (nudgebee/nudgebee: deploy/kubernetes/nudgebee-mirrors/clickhouse-ubi).
   # 26.10 reads a data volume that 24.12 (earlier charts) wrote, but 24.12
   # cannot read one that 26.10 has written. Snapshot the volume before
   # upgrading, and roll back by restoring the snapshot, not by setting an
@@ -786,7 +786,7 @@ clickhouse:
   image:
     registry: ghcr.io
     repository: nudgebee/clickhouse
-    tag: 26.10.4-nb-1
+    tag: 26.10.4-ubi9-nb-1
     # Secrets for pulling the image from a private registry, as secret names
     # or {name: ...} entries. Used by the ClickHouse pod and the schema job.
     pullSecrets: []
