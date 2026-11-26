@@ -911,6 +911,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		OnConnect:       func() { mreg.OnRelayConnected(true) },
 		OnDisconnect:    func() { mreg.OnRelayConnected(false) },
 		OnReconnect:     mreg.OnRelayReconnect,
+		MaxReplyBytes:   cfg.RelayReplyMaxBytes,
+		OnReplyTooLarge: func(action string) { mreg.RelayRepliesTooLarge.WithLabelValues(action).Inc() },
 	}, disp.Handle)
 
 	logger.Info("starting relay client",
@@ -1351,6 +1353,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discoverySink.Metrics = mreg
+		discoverySink.MaxBodyBytes = cfg.DiscoveryMaxBodyBytes
 		discSvc := discovery.NewServiceWithFactory(typedKube, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,

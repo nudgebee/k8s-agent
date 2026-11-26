@@ -149,6 +149,12 @@ func (c *AlertRulesCollector) Collect(ctx context.Context) error {
 		TotalBatches: 1,
 	}
 	if err := c.Sink.Post(ctx, envelope); err != nil {
+		// Post leaves an over-limit body to its caller to count; this one
+		// cannot be split, so it is a failed delivery.
+		var tooLarge *BodyTooLargeError
+		if errors.As(err, &tooLarge) && c.Sink.Metrics != nil {
+			c.Sink.Metrics.OnDiscoveryError(string(TypeAlertRules))
+		}
 		return fmt.Errorf("post alert_rules: %w", err)
 	}
 	logger.Info("alert_rules: pushed",

@@ -217,6 +217,8 @@ runner:
     emitTombstones: true # emit deleted:true on delete (needs collector incremental-delete support)
     # forwardPoolSize: 64          # bound concurrent event-forward goroutines
     # relayHandlerPoolSize: 32     # bound concurrent inbound WS handler goroutines
+    # relayReplyMaxBytes: 16777216 # reply size cap; over it the agent answers 413 (unset = no cap)
+    # discoveryMaxBodyBytes: 15728640  # split inventory uploads above this many bytes (default 15 MiB; 0 = no split)
     # kubewatchWorkers: 8          # workers matching kubewatch events off the request path
     # kubewatchQueueSize: 2048     # kubewatch events allowed to wait; beyond it they are shed and counted
     # kubewatchQueueMaxBytes: 67108864  # bytes of waiting kubewatch events (64 MiB); beyond it they are shed

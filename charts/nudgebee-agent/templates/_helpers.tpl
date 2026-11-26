@@ -240,6 +240,14 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: RELAY_HANDLER_POOL_SIZE
       value: {{ .relayHandlerPoolSize | quote }}
     {{- end }}
+    {{- if hasKey . "relayReplyMaxBytes" }}
+    - name: RELAY_REPLY_MAX_BYTES
+      value: {{ .relayReplyMaxBytes | quote }}
+    {{- end }}
+    {{- if hasKey . "discoveryMaxBodyBytes" }}
+    - name: DISCOVERY_MAX_BODY_BYTES
+      value: {{ .discoveryMaxBodyBytes | quote }}
+    {{- end }}
     {{- if .kubewatchWorkers }}
     - name: KUBEWATCH_WORKERS
       value: {{ .kubewatchWorkers | quote }}

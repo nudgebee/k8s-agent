@@ -131,6 +131,13 @@ func TestHandle_HappyPath_BuildsExpectedPodAndConfigMap(t *testing.T) {
 	if dict["pod_name"] != "ch-test-pod" {
 		t.Errorf("pod_name not echoed: got %v", dict["pod_name"])
 	}
+	// Request params are not echoed back: env_variables can be megabytes (a
+	// caller passing a whole listing to a script), which doubled the reply.
+	for _, k := range []string{"env_from_secret_keys", "env_variables", "wait_threshold"} {
+		if _, echoed := dict[k]; echoed {
+			t.Errorf("%s echoed in the reply", k)
+		}
+	}
 	if dict["secret"] != "ch-creds" {
 		t.Errorf("secret not echoed: got %v", dict["secret"])
 	}

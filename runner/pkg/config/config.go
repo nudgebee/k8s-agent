@@ -179,6 +179,14 @@ type Config struct {
 	// RelayHandlerPoolSize bounds concurrent inbound WS handler goroutines in
 	// pkg/relay as a soft outer guard against goroutine pile-up. Default 32.
 	RelayHandlerPoolSize int
+	// RelayReplyMaxBytes caps one reply sent to the relay; over it the agent
+	// answers 413 naming the action and the size. 0 (the default) disables the
+	// cap.
+	RelayReplyMaxBytes int
+	// DiscoveryMaxBodyBytes caps one discovery POST body (JSON, before gzip).
+	// A snapshot batch over it is split in two until each part fits; the
+	// backend refuses bodies over 16 MiB. 0 disables splitting.
+	DiscoveryMaxBodyBytes int
 
 	// TriggerRateLimits overrides the per-matcher suppression window of the
 	// trigger engine, keyed by MatcherSpec.Name ("pod_crash_loop",
@@ -395,6 +403,8 @@ func FromEnv() (*Config, error) {
 		K8sWatchNamespace:              strings.TrimSpace(os.Getenv("K8S_WATCH_NAMESPACE")),
 		K8sWatchKinds:                  envList("K8S_WATCH_KINDS"),
 		RelayHandlerPoolSize:           envInt("RELAY_HANDLER_POOL_SIZE", 32),
+		RelayReplyMaxBytes:             envInt("RELAY_REPLY_MAX_BYTES", 0),
+		DiscoveryMaxBodyBytes:          envInt("DISCOVERY_MAX_BODY_BYTES", 15<<20),
 		TriggerRateLimits:              ParseTriggerRateLimits(os.Getenv("TRIGGER_RATE_LIMITS")),
 		KubeEnabled:                    envBool("KUBE_ENABLED", true),
 		GetResourceMaxBytes:            envInt("GET_RESOURCE_MAX_BYTES", 64<<20),

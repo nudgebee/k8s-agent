@@ -595,6 +595,7 @@ func (s *Service) emitSingle(ctx context.Context) error {
 	batchID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	var firstErr error
 	for typ, items := range byType {
+		seq := 1
 		env := &Envelope{
 			Type:          typ,
 			Data:          items,
@@ -605,7 +606,7 @@ func (s *Service) emitSingle(ctx context.Context) error {
 			IsFirstBatch:  true,
 			IsLastBatch:   true,
 		}
-		if err := s.sink.Post(ctx, env); err != nil && firstErr == nil {
+		if err := s.postSplitting(ctx, env, &seq); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -692,7 +693,7 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 		if env.TotalBatches == 0 {
 			env.TotalBatches = 1 // empty type still sends one authoritative envelope
 		}
-		if err := s.sink.Post(ctx, env); err != nil && firstErr == nil {
+		if err := s.postSplitting(ctx, env, &seq); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		chunk = chunk[:0]
@@ -723,6 +724,42 @@ func (s *Service) emitTypeBatched(ctx context.Context, typ Type, hs []*resourceH
 	// Final (or only / empty) chunk carries is_last_batch=true.
 	flush(true)
 	return firstErr
+}
+
+// postSplitting posts env, halving its items while the sink refuses the body as
+// too large. The parts of a snapshot (seq non-nil) take consecutive batch
+// sequence numbers starting at env's own, which *seq holds and is advanced
+// past; only the first part keeps is_first_batch and only the last keeps
+// is_last_batch, so the collector still sees one snapshot with no gaps. An
+// incremental envelope (seq nil) is split the same way without batch fields.
+// One object too large on its own fails the post: it cannot be sent.
+func (s *Service) postSplitting(ctx context.Context, env *Envelope, seq *int) error {
+	err := s.sink.Post(ctx, env)
+	var tooLarge *BodyTooLargeError
+	if !errors.As(err, &tooLarge) {
+		return err
+	}
+	items, _ := env.Data.([]any)
+	if len(items) < 2 {
+		s.logger.Error("discovery object over the body limit; it cannot be sent",
+			"type", env.Type, "bytes", tooLarge.Bytes, "limit_bytes", tooLarge.Limit)
+		if s.sink.Metrics != nil {
+			s.sink.Metrics.OnDiscoveryError(string(env.Type))
+		}
+		return err
+	}
+	half := len(items) / 2
+	first, second := *env, *env
+	first.Data, first.IsLastBatch = items[:half:half], false
+	if err := s.postSplitting(ctx, &first, seq); err != nil {
+		return err
+	}
+	second.Data, second.IsFirstBatch = items[half:], false
+	if seq != nil {
+		*seq++
+		second.BatchSequence = *seq
+	}
+	return s.postSplitting(ctx, &second, seq)
 }
 
 func maxInt(a, b int) int {
@@ -825,7 +862,7 @@ func (s *Service) processBatch(ctx context.Context, h *resourceHandler, keys []s
 		return
 	}
 	env := &Envelope{Type: h.typ, Data: items}
-	if err := s.sink.Post(ctx, env); err != nil {
+	if err := s.postSplitting(ctx, env, nil); err != nil {
 		// Put the keys back, a bounded number of times: if this was the
 		// object's last change (a pod's final CrashLoopBackOff or Succeeded,
 		// or its deletion), nothing else would re-send it until the next full

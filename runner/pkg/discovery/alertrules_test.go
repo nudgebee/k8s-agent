@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -207,5 +208,28 @@ func TestCrdCount(t *testing.T) {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// Alert rules over the body limit cannot be split: nothing is sent and the
+// failure is counted as a discovery error.
+func TestAlertRulesCollector_OverBodyLimitCountsError(t *testing.T) {
+	cs := newCaptureSink(t)
+	m := &recordingMetrics{}
+	cs.Metrics = m
+	cs.MaxBodyBytes = 10
+	prom := prometheus.New(promRulesServer(t, promRulesOK).URL, nil)
+
+	c := &AlertRulesCollector{Prom: prom, Sink: cs.Sink}
+	err := c.Collect(context.Background())
+	var tooLarge *BodyTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("err = %v; want *BodyTooLargeError", err)
+	}
+	if len(cs.posts) != 0 {
+		t.Errorf("posted %d envelopes; want none", len(cs.posts))
+	}
+	if _, errs := m.snapshot(); len(errs) != 1 || errs[0] != string(TypeAlertRules) {
+		t.Errorf("errors recorded = %v; want [alert_rules]", errs)
 	}
 }
