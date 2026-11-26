@@ -115,15 +115,21 @@ helm upgrade nudgebee-agent nudgebee-agent/nudgebee-agent -n nudgebee-agent \
 
 To turn it off, upgrade without this file and without `--reuse-values`.
 
-### Upgrading from 0.1.31 or earlier
+### Upgrading from 0.1.32 or earlier
 
-Charts up to 0.1.31 ran ClickHouse from the Bitnami subchart. Later charts run
-the official ClickHouse image, same version (24.12.4), on the same StatefulSet
-and the same volume: an upgrade restarts the ClickHouse pod once and keeps its
-data, its Services and its password.
+Charts up to 0.1.32 ran ClickHouse 24.12 from the Bitnami subchart. Later charts
+run ClickHouse 26.10 on Red Hat UBI 9, on the same StatefulSet and the same
+volume: an upgrade restarts the ClickHouse pod once and keeps its data, its
+Services and its password.
+
+**The ClickHouse upgrade is one-way.** Once 26.10 has written to the volume,
+24.12 cannot start on it, so `helm rollback` or an older image tag does not
+bring it back. Snapshot the ClickHouse volume before upgrading, and roll back by
+restoring the snapshot.
 
 `--reuse-values` keeps the earlier release's values, including its Bitnami-based
-ClickHouse image, and the chart refuses to render with it. Upgrade with
+ClickHouse image, and the upgrade fails while rendering. The error can name an
+unrelated missing value, such as `k8sWatch.enabled`. Upgrade with
 `--reset-then-reuse-values` (Helm 3.14+), which applies the new chart's defaults
 under your own overrides:
 
@@ -139,14 +145,19 @@ before anything is applied, so it puts no data at risk.
 Before you upgrade:
 
 - **Mirrored images.** The ClickHouse StatefulSet and the pre-upgrade schema
-  job both use `ghcr.io/nudgebee/clickhouse:24.12.4-nb-1`. If you pull from a
-  private mirror, mirror that image first and point `clickhouse.image` at it,
-  or the upgrade stops at the pre-upgrade hook. The chart recognises a Bitnami
+  job both use `ghcr.io/nudgebee/clickhouse:26.10.4-ubi9-nb-1`. If you pull from
+  a private mirror, mirror that image first and point `clickhouse.image` at it,
+  or the upgrade stops at the pre-upgrade hook. Mirror the collector image,
+  `ghcr.io/nudgebee/opentelemetry-collector-contrib:0.164.0-nb1`, as well and
+  point `opentelemetry-collector.image` at it. The chart recognises a Bitnami
   image only by `bitnami` in the repository or `-debian-` in the tag, so a
   mirrored Bitnami image under another name is not caught when rendering.
 - **One restart.** The upgrade restarts the ClickHouse pod once. The startup
   probe gives it up to 5 minutes to load the volume. Later chart releases do
   not restart it unless its image or configuration changes.
+- **Telemetry gap.** ClickHouse and the collector restart during the upgrade.
+  Some telemetry sent in that window can be lost, including data the collector
+  had already accepted.
 - **Password changes.** `clickhouse.auth.password` is used only when the
   `<release>-clickhouse` Secret is first created; changing it later does not
   change the password (the Bitnami image used to re-apply it on every start).
