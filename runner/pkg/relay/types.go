@@ -28,6 +28,9 @@ type Response struct {
 	StatusCode int    `json:"status_code"`
 	Data       any    `json:"data"`
 	OutputType string `json:"output_type,omitempty"` // "actions" | "Grafana" | "Terminal"
+	// ActionName names the request this answers, for the reply size limit's
+	// error and metric. Not sent.
+	ActionName string `json:"-"`
 }
 
 // Greeting is sent on WS open. Carries agent version metadata the relay

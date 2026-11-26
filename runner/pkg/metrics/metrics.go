@@ -27,6 +27,9 @@ type Registry struct {
 	ForwardShed     *prometheus.CounterVec // labels: source (kubewatch|alertmanager|relay)
 	RelayReconnects prometheus.Counter
 	RelayConnected  prometheus.Gauge
+	// RelayRepliesTooLarge counts replies replaced by a 413 for being over
+	// RELAY_REPLY_MAX_BYTES. labels: action
+	RelayRepliesTooLarge *prometheus.CounterVec
 
 	KubewatchEvents    *prometheus.CounterVec   // labels: kind, outcome
 	KubewatchHandle    prometheus.Histogram     // /api/handle time held from the sender
@@ -81,6 +84,11 @@ func New() *Registry {
 		Name:      "forward_shed_total",
 		Help:      "Inbound events/handlers dropped because the bounded worker pool was saturated.",
 	}, []string{"source"})
+	reg.RelayRepliesTooLarge = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "relay_replies_too_large_total",
+		Help:      "Replies not sent because they were over the reply size limit; a 413 went instead.",
+	}, []string{"action"})
 	reg.RelayReconnects = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "nudgebee_agent",
 		Name:      "relay_reconnects_total",
@@ -137,6 +145,7 @@ func New() *Registry {
 		reg.ForwardShed,
 		reg.RelayReconnects,
 		reg.RelayConnected,
+		reg.RelayRepliesTooLarge,
 		reg.KubewatchEvents,
 		reg.KubewatchHandle,
 		reg.KubewatchQueueWait,

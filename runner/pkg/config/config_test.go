@@ -75,6 +75,7 @@ func TestFromEnv_ReadsAllFields(t *testing.T) {
 		K8sWatchWorkers:                8,
 		K8sWatchMaxPending:             10000,
 		RelayHandlerPoolSize:           32,
+		DiscoveryMaxBodyBytes:          15 << 20,
 		TriggerRateLimits:              map[string]time.Duration{},
 		KubeEnabled:                    true,
 		GetResourceMaxBytes:            64 << 20,

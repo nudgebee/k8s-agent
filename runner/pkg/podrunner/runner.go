@@ -153,24 +153,24 @@ func (r *Runner) Handle(ctx context.Context, params map[string]any) (any, error)
 
 	cmName := fmt.Sprintf("nb-script-%s", shortUUID())
 	if err := r.createConfigMap(ctx, namespace, cmName, encodedForCM); err != nil {
-		return r.failure(params, namespace, podName, image, command, secret,
+		return r.failure(namespace, podName, image, command, secret,
 			fmt.Sprintf("create configmap: %v", err)), nil
 	}
 	defer r.deleteConfigMap(namespace, cmName)
 
 	if err := r.createPod(ctx, namespace, podName, image, cmName, secret, envVars); err != nil {
-		return r.failure(params, namespace, podName, image, command, secret,
+		return r.failure(namespace, podName, image, command, secret,
 			fmt.Sprintf("create pod: %v", err)), nil
 	}
 	defer r.deletePod(namespace, podName)
 
 	logs, waitErr := r.waitAndReadLogs(ctx, namespace, podName, time.Duration(waitMinutes)*time.Minute)
 	if waitErr != nil {
-		return r.failure(params, namespace, podName, image, command, secret,
+		return r.failure(namespace, podName, image, command, secret,
 			waitErr.Error()), nil
 	}
 
-	return r.success(params, namespace, podName, image, command, secret, logs), nil
+	return r.success(namespace, podName, image, command, secret, logs), nil
 }
 
 func (r *Runner) createConfigMap(ctx context.Context, ns, name, b64Script string) error {
@@ -328,18 +328,18 @@ func detectUnrecoverable(pod *corev1.Pod) string {
 	return ""
 }
 
-func (r *Runner) success(params map[string]any, ns, pod, image, command, secret, logs string) map[string]any {
-	return r.respond(params, ns, pod, image, command, secret, logs, "")
+func (r *Runner) success(ns, pod, image, command, secret, logs string) map[string]any {
+	return r.respond(ns, pod, image, command, secret, logs, "")
 }
 
-func (r *Runner) failure(params map[string]any, ns, pod, image, command, secret, errMsg string) map[string]any {
-	return r.respond(params, ns, pod, image, command, secret, "", errMsg)
+func (r *Runner) failure(ns, pod, image, command, secret, errMsg string) map[string]any {
+	return r.respond(ns, pod, image, command, secret, "", errMsg)
 }
 
 // respond builds the Finding-shaped response wrapping a single JsonBlock
 // whose data is the JSON-encoded responseDict. api-server's
 // relay.CommandExecutor parses out response_dict["response"] as the stdout.
-func (r *Runner) respond(params map[string]any, ns, pod, image, command, secret, logs, errMsg string) map[string]any {
+func (r *Runner) respond(ns, pod, image, command, secret, logs, errMsg string) map[string]any {
 	responseDict := map[string]any{
 		"type":      "pod_script_run_enricher",
 		"namespace": ns,
@@ -348,16 +348,6 @@ func (r *Runner) respond(params map[string]any, ns, pod, image, command, secret,
 		"command":   command,
 		"secret":    secret,
 		"response":  logs,
-	}
-	// Pass through fields api-server callers also expect to see echoed.
-	if v, ok := params["env_from_secret_keys"]; ok {
-		responseDict["env_from_secret_keys"] = v
-	}
-	if v, ok := params["env_variables"]; ok {
-		responseDict["env_variables"] = v
-	}
-	if v, ok := params["wait_threshold"]; ok {
-		responseDict["wait_threshold"] = v
 	}
 	if errMsg != "" {
 		// Surface error text in the `response` field on failure — callers

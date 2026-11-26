@@ -78,7 +78,11 @@ type Sink struct {
 	AccountID  string // X-NB-Account-Id header
 	Cluster    string // X-NB-Cluster header
 	HTTP       *http.Client
-	Logger     *slog.Logger
+	// MaxBodyBytes, when >0, refuses to send an envelope whose JSON is larger:
+	// Post returns a *BodyTooLargeError instead, so a snapshot batch can be
+	// split rather than refused by the backend.
+	MaxBodyBytes int
+	Logger       *slog.Logger
 	// Metrics, when set, records the outcome of every Post. nil disables
 	// recording (tests, and any caller without a registry).
 	Metrics SinkMetrics
@@ -122,6 +126,16 @@ func NewSink(backendURL, authSecret, accountID, cluster string, logger *slog.Log
 // multi-minute broker outage still falls through to the next resync.
 var postBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
 
+// BodyTooLargeError is what Post returns for an envelope over MaxBodyBytes.
+// Nothing was sent.
+type BodyTooLargeError struct {
+	Bytes, Limit int
+}
+
+func (e *BodyTooLargeError) Error() string {
+	return fmt.Sprintf("discovery: envelope is %d bytes, over the %d byte limit", e.Bytes, e.Limit)
+}
+
 // Post sends one envelope, retrying while the backend reports a condition that
 // is its own rather than ours. Body is gzipped if larger than 16 KB.
 //
@@ -131,6 +145,12 @@ var postBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Se
 func (s *Sink) Post(ctx context.Context, env *Envelope) (err error) {
 	if s.Metrics != nil {
 		defer func() {
+			var tooLarge *BodyTooLargeError
+			if errors.As(err, &tooLarge) {
+				// Not a failed delivery: the caller splits the batch, or
+				// reports the one object it cannot.
+				return
+			}
 			if err != nil {
 				s.Metrics.OnDiscoveryError(string(env.Type))
 				return
@@ -146,6 +166,9 @@ func (s *Sink) Post(ctx context.Context, env *Envelope) (err error) {
 	body, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
+	}
+	if s.MaxBodyBytes > 0 && len(body) > s.MaxBodyBytes {
+		return &BodyTooLargeError{Bytes: len(body), Limit: s.MaxBodyBytes}
 	}
 
 	var contentEncoding string

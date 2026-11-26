@@ -260,10 +260,10 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 	case isJSONObject(probe.Body):
 		// regular action flow — fall through to body parser below.
 	case probe.Method != "" && probe.URL != "":
-		d.handleGrafana(ctx, msg, send)
+		d.handleGrafana(ctx, msg, sendAs(send, "grafana_proxy"))
 		return
 	case probe.Action == "start" || probe.Action == "exec" || probe.Action == "read" || probe.Action == "close":
-		d.handleTerminal(ctx, msg, send)
+		d.handleTerminal(ctx, msg, sendAs(send, "pod_shell"))
 		return
 	}
 
@@ -297,6 +297,7 @@ func (d *Dispatcher) Handle(ctx context.Context, msg []byte, send relay.SendFunc
 
 	actionName, _ := raw.Body["action_name"].(string)
 	logger := d.cfg.Logger.With("action_name", actionName, "request_id", raw.RequestID)
+	send = sendAs(send, actionName)
 
 	if d.auth != nil {
 		authReq := &auth.Request{
@@ -527,6 +528,17 @@ func (d *Dispatcher) handleGrafana(ctx context.Context, msg []byte, send relay.S
 	}
 	logger.Info("dispatch: grafana ok")
 	d.respondString(send, requestID, 200, resp, "Grafana")
+}
+
+// sendAs tags each reply with the action it answers, for the relay client's
+// reply size limit.
+func sendAs(send relay.SendFunc, action string) relay.SendFunc {
+	return func(r *relay.Response) error {
+		if r.ActionName == "" {
+			r.ActionName = action
+		}
+		return send(r)
+	}
 }
 
 // respondString JSON-stringifies data, then sends a Response envelope with

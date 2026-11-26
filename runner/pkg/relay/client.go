@@ -87,6 +87,14 @@ type Config struct {
 	// OnReconnect, if set, is called before each redial after the first, so
 	// main can count reconnect attempts.
 	OnReconnect func()
+	// MaxReplyBytes caps one encoded reply. A reply over it is not sent; a 413
+	// naming the action and the size goes in its place, so the caller fails at
+	// once instead of the relay or broker refusing the reply further on. <=0
+	// disables the cap.
+	MaxReplyBytes int
+	// OnReplyTooLarge, if set, is called with the action name of each reply
+	// replaced by a 413 for being over MaxReplyBytes.
+	OnReplyTooLarge func(action string)
 }
 
 // Client manages the WebSocket lifecycle. One Client per agent process.
@@ -96,6 +104,10 @@ type Client struct {
 
 	mu   sync.Mutex // protects conn for concurrent writers
 	conn *websocket.Conn
+	// encodeMu serialises encoding in send and is held until mu is taken, so
+	// at most one encoded message waits while another is written: encoding
+	// stays off the write lock without every handler holding a buffer.
+	encodeMu sync.Mutex
 
 	sem  *semaphore.Weighted // nil = unbounded
 	shed atomic.Uint64
@@ -385,17 +397,24 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 
 // send writes one JSON-encoded value over the WS. Locks to serialise writes,
 // since gorilla/websocket forbids concurrent WriteMessage calls.
+//
+// The value is encoded before the write lock is taken and before the write
+// deadline starts: encoding a large reply under the lock used up the deadline,
+// and a write that times out closes the whole session.
 func (c *Client) send(v any) error {
+	c.encodeMu.Lock()
+	data, err := c.encode(v)
+	if err != nil {
+		c.encodeMu.Unlock()
+		return err
+	}
 	c.mu.Lock()
+	c.encodeMu.Unlock()
 	defer c.mu.Unlock()
 	if c.conn == nil {
 		return fmt.Errorf("relay: not connected")
 	}
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout)); err != nil {
-		return err
-	}
-	data, err := json.Marshal(v)
-	if err != nil {
 		return err
 	}
 	err = c.conn.WriteMessage(websocket.TextMessage, data)
@@ -407,6 +426,49 @@ func (c *Client) send(v any) error {
 		_ = c.conn.Close()
 	}
 	return err
+}
+
+// encode marshals v. A reply over MaxReplyBytes is replaced by a 413 that
+// names the action and the size.
+func (c *Client) encode(v any) ([]byte, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	r, ok := v.(*Response)
+	if !ok || c.cfg.MaxReplyBytes <= 0 || len(data) <= c.cfg.MaxReplyBytes {
+		return data, nil
+	}
+	c.cfg.Logger.Warn("relay reply over the agent's size limit; sending 413 instead",
+		"action_name", r.ActionName, "request_id", r.RequestID, "bytes", len(data), "limit_bytes", c.cfg.MaxReplyBytes)
+	if c.cfg.OnReplyTooLarge != nil {
+		c.cfg.OnReplyTooLarge(r.ActionName)
+	}
+	return json.Marshal(tooLargeReply(r, len(data), c.cfg.MaxReplyBytes))
+}
+
+// tooLargeReply is the 413 sent in place of r. Grafana and Terminal replies
+// carry their data JSON-stringified, as every other reply on those paths does.
+func tooLargeReply(r *Response, size, limit int) *Response {
+	subject := "reply"
+	if r.ActionName != "" {
+		subject = r.ActionName + " reply"
+	}
+	var data any = map[string]any{"error": fmt.Sprintf(
+		"%s was %.1f MiB, over the agent's %.1f MiB reply limit, so it was not sent; ask for less data (a narrower query, a filter or a limit)",
+		subject, float64(size)/(1<<20), float64(limit)/(1<<20))}
+	if r.OutputType == "Grafana" || r.OutputType == "Terminal" {
+		b, _ := json.Marshal(data)
+		data = string(b)
+	}
+	return &Response{
+		Action:     r.Action,
+		RequestID:  r.RequestID,
+		StatusCode: 413,
+		Data:       data,
+		OutputType: r.OutputType,
+		ActionName: r.ActionName,
+	}
 }
 
 // socketWriteFailed reports whether err came from writing to the socket itself
