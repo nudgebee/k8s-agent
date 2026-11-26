@@ -8,6 +8,48 @@ entries:
           url: https://docs.nudgebee.com/docs/installation/agent/installation/
         - name: Source
           url: https://github.com/nudgebee/k8s-agent
+      charts.openshift.io/name: NudgeBee Agent
+      charts.openshift.io/provider: NudgeBee
+    apiVersion: v2
+    appVersion: 0.1.33-rc-8
+    created: "2026-11-26T12:04:39.132638416Z"
+    dependencies:
+    - condition: opentelemetry-collector.enabled
+      name: opentelemetry-collector
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.165.0
+    description: NudgeBee Kubernetes agent — connects your cluster to the NudgeBee
+      backend for observability, cost, and incident automation.
+    digest: 643a8e52f0177ae7630d88e0e3013ae55ca0fa02b579221e0490fb850f49c3fa
+    home: https://github.com/nudgebee/k8s-agent
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    keywords:
+    - kubernetes
+    - observability
+    - opentelemetry
+    - monitoring
+    - clickhouse
+    - kubewatch
+    - sre
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - email: support@nudgebee.com
+      name: NudgeBee
+      url: https://nudgebee.com
+    name: nudgebee-agent
+    sources:
+    - https://github.com/nudgebee/k8s-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.1.33-rc-8/nudgebee-agent-0.1.33-rc-8.tgz
+    version: 0.1.33-rc-8
+  - annotations:
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://docs.nudgebee.com/docs/installation/agent/installation/
+        - name: Source
+          url: https://github.com/nudgebee/k8s-agent
     apiVersion: v2
     appVersion: 0.1.33-rc-7
     created: "2026-11-24T10:06:35.102583551Z"
@@ -7237,4 +7279,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2026-11-24T10:06:35.103288202Z"
+generated: "2026-11-26T12:04:39.133206937Z"
