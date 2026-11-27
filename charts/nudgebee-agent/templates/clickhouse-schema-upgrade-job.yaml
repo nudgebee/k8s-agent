@@ -62,8 +62,11 @@ queries won't hit the primary key on upgraded clusters.
 {{- $chSummary := default "otel_metrics_summary" (dig "summary" "name" "" $chMetricsTables) }}
 {{- $chExpHistogram := default "otel_metrics_exponential_histogram" (dig "exponential_histogram" "name" "" $chMetricsTables) }}
 {{- $chRemovedLogs := list }}
-{{- range regexFindAll "<[a-z_]+_log[[:space:]]+remove=\"1\"" (default "" .Values.clickhouse.extraOverrides) -1 }}
-{{- $chRemovedLogs = append $chRemovedLogs (regexReplaceAll "^<([a-z_]+_log).*$" . "${1}") }}
+{{- /* ClickHouse drops an element that has a remove attribute, whatever its
+       value, quotes or spacing: remove="1", remove='0' and remove = "false"
+       all turn the log off. (?s): the attributes may span lines. */}}
+{{- range regexFindAll "<[a-z_]+_log[[:space:]][^>]*\\bremove[[:space:]]*=" (default "" .Values.clickhouse.extraOverrides) -1 }}
+{{- $chRemovedLogs = append $chRemovedLogs (regexReplaceAll "(?s)^<([a-z_]+_log).*$" . "${1}") }}
 {{- end }}
 apiVersion: batch/v1
 kind: Job
