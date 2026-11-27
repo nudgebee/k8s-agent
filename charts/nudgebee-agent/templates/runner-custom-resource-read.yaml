@@ -77,6 +77,16 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     namespace: {{ .Release.Namespace }}
+  {{- if .Values.runner.splitIdentities }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-reader
+    namespace: {{ .Release.Namespace }}
+  {{- if include "nudgebee-agent.writerIdentityEnabled" . }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-writer
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
+  {{- end }}
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-script
     namespace: {{ .Release.Namespace }}
@@ -102,6 +112,16 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     namespace: {{ .Release.Namespace }}
+  {{- if .Values.runner.splitIdentities }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-reader
+    namespace: {{ .Release.Namespace }}
+  {{- if include "nudgebee-agent.writerIdentityEnabled" . }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-writer
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
+  {{- end }}
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-script
     namespace: {{ .Release.Namespace }}

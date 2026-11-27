@@ -212,6 +212,21 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
       value: {{ include "nudgebee-agent.fullname" . }}-scanner
     - name: SCRIPT_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-script
+    {{- if .Values.runner.splitIdentities }}
+    # Runner identities (templates/runner-identities.yaml).
+    - name: RUNNER_IDENTITY_MODE
+      value: split
+    - name: READER_SERVICE_ACCOUNT
+      value: {{ include "nudgebee-agent.fullname" . }}-runner-reader
+    {{- if include "nudgebee-agent.execIdentityEnabled" . }}
+    - name: EXEC_SERVICE_ACCOUNT
+      value: {{ include "nudgebee-agent.fullname" . }}-runner-exec
+    {{- end }}
+    {{- if include "nudgebee-agent.writerIdentityEnabled" . }}
+    - name: WRITER_SERVICE_ACCOUNT
+      value: {{ include "nudgebee-agent.fullname" . }}-runner-writer
+    {{- end }}
+    {{- end }}
     {{- if .Values.runner.scriptPods.allowWrite }}
     - name: SCRIPT_WRITE_SERVICE_ACCOUNT
       value: {{ include "nudgebee-agent.fullname" . }}-script-write
@@ -1077,4 +1092,52 @@ monitoring reads. Renders nothing unless openshift.enabled.
     - list
     - watch
 {{- end }}
+{{- end }}
+
+{{/*
+Exec and writer identities exist only when split identities are on, the
+switch is on, and the runner is not read-only. Each returns "true" or "".
+*/}}
+{{- define "nudgebee-agent.execIdentityEnabled" -}}
+{{- if and .Values.runner.splitIdentities .Values.runner.exec.enabled (not .Values.runner.readOnly) }}true{{ end -}}
+{{- end }}
+{{- define "nudgebee-agent.writerIdentityEnabled" -}}
+{{- if and .Values.runner.splitIdentities .Values.runner.changes.enabled (not .Values.runner.readOnly) }}true{{ end -}}
+{{- end }}
+
+{{/*
+Read-only projection of runner.customClusterRoleRules for the reader: verbs
+reduced to get/list/watch (`*` becomes those three), Secrets, connect
+subresources (exec, attach, portforward, proxy of any resource) and any
+resource containing `*` removed, `*`-resource rules dropped,
+nonResourceURLs rules kept with `get`. Renders a YAML list or nothing.
+*/}}
+{{- define "nudgebee-agent.readerCustomRules" -}}
+{{- $readVerbs := list "get" "list" "watch" -}}
+{{- $blocked := list "secrets" "pods/exec" "pods/attach" "pods/portforward" "pods/proxy" "services/proxy" "nodes/proxy" -}}
+{{- $out := list -}}
+{{- range .Values.runner.customClusterRoleRules -}}
+{{- $ruleVerbs := .verbs | default list -}}
+{{- $verbs := list -}}
+{{- if has "*" $ruleVerbs -}}
+{{- $verbs = $readVerbs -}}
+{{- else -}}
+{{- range $ruleVerbs -}}{{- if has . $readVerbs -}}{{- $verbs = append $verbs . -}}{{- end -}}{{- end -}}
+{{- end -}}
+{{- if .nonResourceURLs -}}
+{{- if has "get" $verbs -}}{{- $out = append $out (dict "nonResourceURLs" .nonResourceURLs "verbs" (list "get")) -}}{{- end -}}
+{{- else if not (has "*" (.resources | default list)) -}}
+{{- $res := list -}}
+{{- range (.resources | default list) -}}
+{{- $sub := splitList "/" . | rest | join "/" -}}
+{{- if not (or (has . $blocked) (contains "*" .) (has $sub (list "exec" "attach" "portforward" "proxy")) (hasPrefix "secrets" (lower .))) -}}{{- $res = append $res . -}}{{- end -}}
+{{- end -}}
+{{- if and $res $verbs -}}
+{{- $r := dict "apiGroups" (.apiGroups | default (list "")) "resources" $res "verbs" $verbs -}}
+{{- if .resourceNames -}}{{- $_ := set $r "resourceNames" .resourceNames -}}{{- end -}}
+{{- $out = append $out $r -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $out }}{{ toYaml $out }}{{ end -}}
 {{- end }}

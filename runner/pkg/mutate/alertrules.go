@@ -23,6 +23,21 @@ var prometheusRuleGVR = schema.GroupVersionResource{
 // (PrometheusRule CRDs aren't typed in client-go).
 func (m *Mutator) SetDynamic(d dynamic.Interface) { m.dynamic = d }
 
+// SetIdentityDynamics sets the clients for rules in the agent's own namespace
+// (own) and for reads (read). Either may be nil to fall back to SetDynamic's.
+func (m *Mutator) SetIdentityDynamics(own, read dynamic.Interface) {
+	m.ownDynamic, m.readDynamic = own, read
+}
+
+// rulesClient returns the PrometheusRule client for ns: the runner's own
+// client for the agent namespace, the change client elsewhere.
+func (m *Mutator) rulesClient(ns string) dynamic.NamespaceableResourceInterface {
+	if ns == m.Namespace && m.ownDynamic != nil {
+		return m.ownDynamic.Resource(prometheusRuleGVR)
+	}
+	return m.dynamic.Resource(prometheusRuleGVR)
+}
+
 // CreateOrReplacePrometheusRule applies a PrometheusRule object. If a rule
 // with the same name+namespace exists, it's overwritten (with ResourceVersion
 // preservation so the apiserver doesn't reject the update).
@@ -49,7 +64,7 @@ func (m *Mutator) CreateOrReplacePrometheusRule(ctx context.Context, rule any) (
 		Group: "monitoring.coreos.com", Version: "v1", Kind: "PrometheusRule",
 	})
 
-	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(u.GetNamespace())
+	ri := m.rulesClient(u.GetNamespace()).Namespace(u.GetNamespace())
 	existing, err := ri.Get(ctx, u.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		created, err := ri.Create(ctx, u, metav1.CreateOptions{})
@@ -79,7 +94,7 @@ func (m *Mutator) DeletePrometheusRule(ctx context.Context, namespace, name stri
 	if namespace == "" || name == "" {
 		return errors.New("mutate: namespace and name required")
 	}
-	err := m.dynamic.Resource(prometheusRuleGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	err := m.rulesClient(namespace).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -150,7 +165,7 @@ func (m *Mutator) CreateOrReplaceAlertRule(ctx context.Context, p LegacyAlertRul
 	// conflict retries, and each lookup is an extra apiserver call.
 	selectorLabels := m.ruleSelectorLabels(ctx)
 
-	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(m.Namespace)
+	ri := m.rulesClient(m.Namespace).Namespace(m.Namespace)
 	// Shared CR + concurrent UI sessions → 409 Conflict whenever two callers
 	// land between Get and Update. RetryOnConflict re-reads + re-applies the
 	// patch on each conflict; the AlreadyExists branch covers the rare case
@@ -227,7 +242,7 @@ func (m *Mutator) DeleteAlertRule(ctx context.Context, alert string) error {
 	if alert == "" {
 		return errors.New("mutate: alert name required")
 	}
-	ri := m.dynamic.Resource(prometheusRuleGVR).Namespace(m.Namespace)
+	ri := m.rulesClient(m.Namespace).Namespace(m.Namespace)
 	// Same conflict story as CreateOrReplaceAlertRule: shared CR, concurrent
 	// writers. Retry re-reads + re-applies the deletion on 409.
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -378,7 +393,7 @@ func (m *Mutator) locatedRuleClient(loc AlertRuleLocator) (dynamic.ResourceInter
 	if ns == "" {
 		return nil, errors.New("mutate: PrometheusRule namespace required")
 	}
-	return m.dynamic.Resource(prometheusRuleGVR).Namespace(ns), nil
+	return m.rulesClient(ns).Namespace(ns), nil
 }
 
 // ruleMatch is the position of one rule inside spec.groups.

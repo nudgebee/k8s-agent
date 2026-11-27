@@ -86,6 +86,10 @@ type KubectlExecutor struct {
 	// go through pkg/mutate. When true, any verb is allowed and the API
 	// server's RBAC becomes the enforcement boundary.
 	AllowWrite bool
+
+	// Credentials, when set, runs each segment with its own short-lived
+	// kubeconfig for the reader or writer identity (exec_identity.go).
+	Credentials *Credentials
 }
 
 // firstVerbAndSubcommand returns the kubectl verb and, only when it is the very next
@@ -218,6 +222,8 @@ var segmentSeparators = map[string]struct{}{
 type cmdSegment struct {
 	op   string   // "", "&&", "||", ";"
 	args []string // verb + args, leading "kubectl" already stripped
+	// identity is set when the executor has Credentials: "reader" or "writer".
+	identity string
 }
 
 // Run parses the command string, validates the verb of every chained segment
@@ -234,7 +240,14 @@ func (k *KubectlExecutor) Run(ctx context.Context, command string) (map[string]a
 // writes it and returns it in "stdout_gzip_b64", so output of any size is
 // neither held nor sent raw.
 func (k *KubectlExecutor) RunEncoded(ctx context.Context, command, outputEncoding string) (map[string]any, error) {
-	segments, err := k.parse(command)
+	return k.RunAs(ctx, command, outputEncoding, "")
+}
+
+// RunAs is RunEncoded with an identity hint (IdentityParam): "" lets the
+// executor classify each segment, "read" runs every segment as the reader,
+// "write" as the writer. See exec_identity.go for when each is allowed.
+func (k *KubectlExecutor) RunAs(ctx context.Context, command, outputEncoding, identity string) (map[string]any, error) {
+	segments, err := k.parse(command, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +261,10 @@ func (k *KubectlExecutor) RunEncoded(ctx context.Context, command, outputEncodin
 
 // parse splits command into its chained segments and validates every one
 // against this executor's mode, before any of them runs.
-func (k *KubectlExecutor) parse(command string) ([]cmdSegment, error) {
+func (k *KubectlExecutor) parse(command, identityHint string) ([]cmdSegment, error) {
+	if err := k.checkIdentityHint(identityHint); err != nil {
+		return nil, err
+	}
 	if command == "" {
 		return nil, errors.New("kubectl: command is required")
 	}
@@ -273,9 +289,20 @@ func (k *KubectlExecutor) parse(command string) ([]cmdSegment, error) {
 	// Validate every segment BEFORE running any, so a chain such as
 	// `get pods && delete pod foo` is rejected atomically — the read-only verb
 	// allowlist must hold for each command, not merely the first one.
-	for _, seg := range segments {
+	for i, seg := range segments {
 		if err := k.validateSegment(seg.args); err != nil {
 			return nil, err
+		}
+		if k.Credentials != nil {
+			verb, subcommand, _ := firstVerbAndSubcommand(seg.args)
+			if err := checkSplitModeArgs(verb, seg.args); err != nil {
+				return nil, err
+			}
+			id, err := k.segmentIdentity(verb, subcommand, seg.args, identityHint)
+			if err != nil {
+				return nil, err
+			}
+			segments[i].identity = id
 		}
 	}
 
@@ -287,7 +314,7 @@ func (k *KubectlExecutor) parse(command string) ([]cmdSegment, error) {
 // layer uses it so a kubectl write needs a relay signature while reads do not.
 // Unparseable commands are not read-only.
 func IsReadOnlyCommand(command string) bool {
-	_, err := (&KubectlExecutor{}).parse(command)
+	_, err := (&KubectlExecutor{}).parse(command, "")
 	return err == nil
 }
 
@@ -433,7 +460,19 @@ func (k *KubectlExecutor) runSegments(ctx context.Context, bin string, segments 
 		cmd := exec.CommandContext(ctx, bin, seg.args...) //nolint:gosec // verb-allowlist enforced per segment
 		cmd.Stdout = stdout
 		cmd.Stderr = &stderr
+		cleanup := func() {}
+		if k.Credentials != nil {
+			// Never run a segment without its own kubeconfig: falling back to
+			// the process credential would run it as the runner.
+			path, done, err := k.Credentials.kubeconfig(seg.identity)
+			if err != nil {
+				return execResult(stdout, &stderr, exitCode, err)
+			}
+			cleanup = done
+			cmd.Env = envWithKubeconfig(path)
+		}
 		runErr := cmd.Run()
+		cleanup()
 
 		// ProcessState is nil if the process never started (e.g. kubectl not on
 		// PATH); the real-exec-failure branch below turns that into an error.

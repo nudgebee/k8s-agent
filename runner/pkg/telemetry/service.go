@@ -138,6 +138,14 @@ type ActivityStats struct {
 	// WriteActionsRequireSignature: actions that change the cluster need a
 	// valid relay signature (verification on and not switched off).
 	WriteActionsRequireSignature bool `json:"writeActionsRequireSignature"`
+
+	// IdentityMode is "split" when Kubernetes calls run as the reader / exec /
+	// writer accounts, "legacy" when they run as the runner's own account.
+	// The backend counts legacy agents before the runner's ClusterRole is
+	// removed. IdentityProblems names each identity whose last check failed
+	// (identity -> reason); empty when all pass. No omitempty (jsonb merge).
+	IdentityMode     string            `json:"identityMode"`
+	IdentityProblems map[string]string `json:"identityProblems"`
 }
 
 // ClusterStatus is the wire payload posted to /v1/k8s/telemetry.
@@ -278,6 +286,10 @@ type Datasources struct {
 	// Request signing; see ActivityStats.
 	RelaySignatureVerification   bool
 	WriteActionsRequireSignature bool
+
+	// Identities; see ActivityStats.
+	IdentityMode     string
+	IdentityProblems map[string]string
 }
 
 // Service is the periodic poster.
@@ -458,6 +470,9 @@ func (s *Service) probe(ctx context.Context, ds Datasources) ActivityStats {
 
 		RelaySignatureVerification:   ds.RelaySignatureVerification,
 		WriteActionsRequireSignature: ds.WriteActionsRequireSignature,
+
+		IdentityMode:     ds.IdentityMode,
+		IdentityProblems: nonNilProblems(ds.IdentityProblems),
 	}
 
 	// Prometheus: connectivity is computed by the caller via an authenticated
@@ -696,4 +711,13 @@ func healthErr(status int, body []byte) string {
 		return fmt.Sprintf("HTTP %d", status)
 	}
 	return fmt.Sprintf("HTTP %d: %s", status, msg)
+}
+
+// nonNilProblems sends {} rather than null so the backend's jsonb merge
+// clears problems that were reported earlier and are now fixed.
+func nonNilProblems(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
 }

@@ -1,0 +1,174 @@
+{{- /*
+Runner identities (runner.splitIdentities, default true). The runner mints a
+short-lived token for each of these accounts and makes every Kubernetes call
+as the one matching what the call does, so the API server enforces the
+agent's own read/change decision and the audit log names the identity:
+
+  - <fullname>-runner-reader: cluster reads. Never Secrets (except `list` with
+    runner.helmReleaseDiscovery) and never the connect subresources that act
+    like exec on clusters before 1.35 (pods/exec, attach, portforward, proxy,
+    services/proxy, nodes/proxy).
+  - <fullname>-runner-exec: pods/exec into customer pods (pod_bash_enricher,
+    terminal). runner.exec.enabled; off under runner.readOnly.
+  - <fullname>-runner-writer: changes. Bound to the runner's own ClusterRole.
+    runner.changes.enabled; off under runner.readOnly.
+
+The runner's own account keeps its ClusterRole in this release, so an older
+runner image on this chart behaves as before; it also gets `create
+serviceaccounts/token` on exactly these accounts.
+*/}}
+{{- if .Values.runner.splitIdentities }}
+{{- $fullname := include "nudgebee-agent.fullname" . }}
+{{- $pullSecrets := include "nudgebee-agent.imagePullSecrets" (dict "secrets" .Values.runnerServiceAccount.imagePullSecrets "root" .) }}
+{{- $accounts := list "runner-reader" }}
+{{- if include "nudgebee-agent.execIdentityEnabled" . }}{{ $accounts = append $accounts "runner-exec" }}{{ end }}
+{{- if include "nudgebee-agent.writerIdentityEnabled" . }}{{ $accounts = append $accounts "runner-writer" }}{{ end }}
+{{- range $sa := $accounts }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-{{ $sa }}
+  namespace: {{ $.Release.Namespace }}
+{{- with $pullSecrets }}
+{{ . }}
+{{- end }}
+{{- end }}
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ $fullname }}-runner-reader
+rules:
+{{- include "nudgebee-agent.readOnlyClusterRules" . }}
+
+  # Read-only forms of reads the standard runner role grants together with
+  # writes.
+  - apiGroups:
+      - ""
+    resources:
+      - resourcequotas
+      - limitranges
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets/scale
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - rollouts/scale
+    verbs:
+      - get
+      - list
+      - watch
+{{- with include "nudgebee-agent.readerCustomRules" . }}
+
+  # Read-only projection of runner.customClusterRoleRules.
+{{ . | indent 2 }}
+{{- end }}
+
+{{- include "nudgebee-agent.openshiftReadOnlyClusterRules" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-runner-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-runner-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-runner-reader
+    namespace: {{ .Release.Namespace }}
+{{- if include "nudgebee-agent.execIdentityEnabled" . }}
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ $fullname }}-runner-exec
+rules:
+  # get on pods/exec is what WebSocket exec is authorized as before 1.35.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - pods/exec
+    verbs:
+      - get
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-runner-exec
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-runner-exec
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-runner-exec
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if include "nudgebee-agent.writerIdentityEnabled" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-runner-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-runner-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-runner-writer
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+# The runner mints tokens for exactly these accounts.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-runner-identity-tokens
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - serviceaccounts/token
+    verbs:
+      - create
+    resourceNames:
+    {{- range $sa := $accounts }}
+      - {{ $fullname }}-{{ $sa }}
+    {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-runner-identity-tokens
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-runner-identity-tokens
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+{{- end }}

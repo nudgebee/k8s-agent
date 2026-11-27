@@ -78,7 +78,7 @@ func Handlers(c *Client, k *KubectlExecutor, accountID string) map[string]dispat
 	if k != nil {
 		hs["kubectl_command_executor"] = func(ctx context.Context, p map[string]any) (any, error) {
 			cmd := strParam(p, "command")
-			data, err := k.RunEncoded(ctx, cmd, strParam(p, cmdout.Param))
+			data, err := k.RunAs(ctx, cmd, strParam(p, cmdout.Param), strParam(p, IdentityParam))
 			if err != nil {
 				return nil, err
 			}

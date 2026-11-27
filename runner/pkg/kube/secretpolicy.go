@@ -59,6 +59,8 @@ var mountedSecretPaths = []string{
 	"run/secrets",
 	"var/lib/kubelet/pods",
 	"kubernetes.io/serviceaccount",
+	// Per-command kubeconfigs of split identities (exec_identity.go).
+	"tmp/nb-kubeconfig",
 }
 
 // checkSecretAccess refuses a kubectl segment (verb + args, "kubectl" already
