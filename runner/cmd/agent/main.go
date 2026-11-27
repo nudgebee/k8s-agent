@@ -324,7 +324,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// below); ForURL keeps each backend's auth.
 	chPromQL := clickhousePromQLURL(cfg)
 	if chPromQL != "" {
-		clickhousePromQLAuth(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
+		clickhousePromQLRequests(promClient, chPromQL, cfg.ClickHouseUser, cfg.ClickHousePassword)
 	}
 	ph := prometheus.Handlers(promClient)
 	maps.Copy(handlers, ph)

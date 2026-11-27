@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ type fakeClickHouse struct {
 	queries []string
 	auth    []string
 	paths   []string
+	params  []url.Values
 }
 
 func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +62,7 @@ func (f *fakeClickHouse) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.queries = append(f.queries, r.URL.Query().Get("query"))
 	f.auth = append(f.auth, u+":"+p)
 	f.paths = append(f.paths, r.URL.Path)
+	f.params = append(f.params, r.URL.Query())
 	body := f.body
 	f.mu.Unlock()
 	status, b := body()
@@ -79,7 +82,7 @@ func newFallbackClient(t *testing.T, ch *fakeClickHouse) (*prometheus.Client, st
 	t.Cleanup(srv.Close)
 	chURL := srv.URL + clickhousePromQLPath
 	c := prometheus.New("", &http.Client{Timeout: 5 * time.Second})
-	clickhousePromQLAuth(c, chURL, "default", "pw")
+	clickhousePromQLRequests(c, chURL, "default", "pw")
 	return c, chURL
 }
 
@@ -253,6 +256,92 @@ func TestClickHousePromQLClusterLabel(t *testing.T) {
 	defer ch.mu.Unlock()
 	if ch.queries[0] != `count(container_net_tcp_bytes_sent_total{cluster="c1"})` {
 		t.Errorf("probe sent %q", ch.queries[0])
+	}
+}
+
+// Each PromQL query to ClickHouse is bounded: the Prometheus `timeout`, which
+// ClickHouse fails as an unknown setting, becomes max_execution_time, kept
+// within the caller's deadline and the HTTP client's timeout, since ClickHouse
+// runs a PromQL query to the end after the client has gone; memory is capped.
+// A Prometheus gets the request as the caller made it.
+func TestClickHousePromQLQueryLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		timeout  string
+		deadline time.Duration // 0: no deadline on the context
+		wantExec string
+	}{
+		{"no timeout: the HTTP client's", "", 0, "5"},
+		{"shorter timeout", "2s", 0, "2"},
+		{"timeout in seconds", "1.5", 0, "2"},
+		{"longer timeout: the HTTP client's", "10m", 0, "5"},
+		{"unparsable timeout dropped", "soon", 0, "5"},
+		{"tiny timeout in seconds", "1e-10", 0, "1"},
+		{"huge timeout in seconds ignored", "1e300", 0, "5"},
+		{"timeout over a day ignored", "25h", 0, "5"},
+		{"NaN timeout ignored", "NaN", 0, "5"},
+		{"shorter deadline", "4s", 3 * time.Second, "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }}
+			c, chURL := newFallbackClient(t, ch)
+			c.SetURL(chURL)
+			ctx := context.Background()
+			if tc.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+			}
+			if _, err := c.Query(ctx, "up", "", tc.timeout); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.QueryRange(ctx, "up", "1", "2", "1", tc.timeout); err != nil {
+				t.Fatal(err)
+			}
+			ch.mu.Lock()
+			defer ch.mu.Unlock()
+			for i, p := range ch.params {
+				if p.Has("timeout") {
+					t.Errorf("request %d sent timeout=%q", i, p.Get("timeout"))
+				}
+				if got := p.Get("max_execution_time"); got != tc.wantExec {
+					t.Errorf("request %d max_execution_time = %q; want %q", i, got, tc.wantExec)
+				}
+				if got := p.Get("max_memory_usage"); got != "1000000000" {
+					t.Errorf("request %d max_memory_usage = %q", i, got)
+				}
+				if p.Get("query") != "up" || ch.auth[i] != "default:pw" {
+					t.Errorf("request %d query=%q auth=%q", i, p.Get("query"), ch.auth[i])
+				}
+			}
+		})
+	}
+
+	// A deadline that has already passed still sets the shortest limit. The
+	// HTTP client would not send such a request, so Apply is called directly.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "http://ch/prometheus/api/v1/query?query=up&timeout=30s", nil)
+	limits := &clickhouseQueryLimits{auth: prometheus.NewBasicAuth("default", "pw"), maxWait: time.Minute}
+	if err := limits.Apply(expired, req); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.URL.Query().Get("max_execution_time"); got != "1" {
+		t.Errorf("expired deadline: max_execution_time = %q; want 1", got)
+	}
+
+	prom := &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }}
+	srv := httptest.NewServer(prom)
+	t.Cleanup(srv.Close)
+	c, _ := newFallbackClient(t, &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }})
+	c.SetURL(srv.URL)
+	if _, err := c.Query(context.Background(), "up", "", "30s"); err != nil {
+		t.Fatal(err)
+	}
+	prom.mu.Lock()
+	defer prom.mu.Unlock()
+	if p := prom.params[0]; p.Get("timeout") != "30s" || p.Has("max_execution_time") || p.Has("max_memory_usage") || prom.auth[0] != ":" {
+		t.Errorf("prometheus got %v auth=%q; want the request unchanged", p, prom.auth[0])
 	}
 }
 
