@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -84,6 +85,11 @@ type Proxy struct {
 	ExtraHeaders []string
 
 	HTTP *http.Client
+
+	// APIHTTP is the client for API-proxy requests. Its dialer refuses
+	// loopback, link-local and cloud metadata addresses (see
+	// blockedUpstream), because the caller picks the upstream host.
+	APIHTTP *http.Client
 }
 
 // New returns a Proxy ready for HandleGrafana / HandleAPI / HandlePrometheus
@@ -102,6 +108,7 @@ func New(grafanaURL, user, pass string, extra []string, promURL string, promHead
 		Password:          pass,
 		ExtraHeaders:      extra,
 		HTTP:              c,
+		APIHTTP:           newAPIClient(),
 	}
 }
 
@@ -120,17 +127,34 @@ func (p *Proxy) HandleGrafana(ctx context.Context, req *Request) *Response {
 	if p.GrafanaURL == "" {
 		return errResp(503, "Grafana not configured (GRAFANA_URL unset)")
 	}
-	return p.do(ctx, p.GrafanaURL+req.URL, req)
+	full, err := joinBase(p.GrafanaURL, req.URL)
+	if err != nil {
+		return errResp(400, err.Error())
+	}
+	return p.do(ctx, p.HTTP, full, req, p.grafanaAuth)
 }
 
 // HandleAPI proxies a request to a caller-supplied base URL. The relay
-// extracts the URL from the X-API-Base-URL header
-// . Returns 400 if the base URL is empty.
+// extracts the URL from the X-API-Base-URL header. Returns 400 if the base
+// URL is empty or not http(s). The Grafana credentials and
+// GRAFANA_EXTRA_HEADER are not sent: the upstream is not Grafana.
 func (p *Proxy) HandleAPI(ctx context.Context, baseURL string, req *Request) *Response {
 	if baseURL == "" {
 		return errResp(400, "Missing X-API-Base-URL header")
 	}
-	return p.do(ctx, strings.TrimRight(baseURL, "/")+req.URL, req)
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return errResp(400, "X-API-Base-URL must be an http(s) URL without credentials")
+	}
+	full, err := joinBase(strings.TrimRight(baseURL, "/"), req.URL)
+	if err != nil {
+		return errResp(400, err.Error())
+	}
+	c := p.APIHTTP
+	if c == nil {
+		c = newAPIClient()
+	}
+	return p.do(ctx, c, full, req, nil)
 }
 
 // HandlePrometheus proxies a request to the configured PROMETHEUS_URL.
@@ -150,7 +174,45 @@ func (p *Proxy) HandlePrometheus(ctx context.Context, req *Request) *Response {
 	}
 	enriched := *req
 	enriched.Header = mergeHeaders(req.Header, p.PrometheusHeaders)
-	return p.do(ctx, base+req.URL, &enriched)
+	full, err := joinBase(base, req.URL)
+	if err != nil {
+		return errResp(400, err.Error())
+	}
+	// The Grafana auth has always gone to the configured Prometheus too; it
+	// stays, since both upstreams come from the agent's own config.
+	return p.do(ctx, p.HTTP, full, &enriched, p.grafanaAuth)
+}
+
+// joinBase appends a request path to a base URL and refuses a path that
+// changes the base's host ("@host/...", "//host/...", a full URL).
+func joinBase(base, reqURL string) (string, error) {
+	full := base + reqURL
+	b, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+	f, err := url.Parse(full)
+	if err != nil {
+		return "", fmt.Errorf("invalid request URL: %w", err)
+	}
+	if f.Scheme != b.Scheme || f.Host != b.Host || f.User.String() != b.User.String() {
+		return "", fmt.Errorf("request URL %q changes the upstream host", reqURL)
+	}
+	return full, nil
+}
+
+// grafanaAuth adds the Grafana basic auth and GRAFANA_EXTRA_HEADER headers.
+func (p *Proxy) grafanaAuth(r *http.Request) {
+	if p.Username != "" && p.Password != "" {
+		r.SetBasicAuth(p.Username, p.Password)
+	}
+	for _, h := range p.ExtraHeaders {
+		i := strings.IndexByte(h, ':')
+		if i <= 0 {
+			continue
+		}
+		r.Header.Set(strings.TrimSpace(h[:i]), strings.TrimSpace(h[i+1:]))
+	}
 }
 
 // mergeHeaders returns a new header map containing every entry from
@@ -168,7 +230,7 @@ func mergeHeaders(base, extras http.Header) map[string][]string {
 	return out
 }
 
-func (p *Proxy) do(ctx context.Context, fullURL string, req *Request) *Response {
+func (p *Proxy) do(ctx context.Context, c *http.Client, fullURL string, req *Request, addAuth func(*http.Request)) *Response {
 	method := req.Method
 	if method == "" {
 		method = http.MethodGet
@@ -188,16 +250,8 @@ func (p *Proxy) do(ctx context.Context, fullURL string, req *Request) *Response 
 		return errResp(400, "Build request: "+err.Error())
 	}
 
-	// Auth + extra headers.
-	if p.Username != "" && p.Password != "" {
-		httpReq.SetBasicAuth(p.Username, p.Password)
-	}
-	for _, h := range p.ExtraHeaders {
-		i := strings.IndexByte(h, ':')
-		if i <= 0 {
-			continue
-		}
-		httpReq.Header.Set(strings.TrimSpace(h[:i]), strings.TrimSpace(h[i+1:]))
+	if addAuth != nil {
+		addAuth(httpReq)
 	}
 	// Forward incoming request headers — except cookies (intentionally dropped).
 	for k, vs := range req.Header {
@@ -213,7 +267,7 @@ func (p *Proxy) do(ctx context.Context, fullURL string, req *Request) *Response 
 		httpReq.Header.Set("Content-Length", fmt.Sprintf("%d", req.ContentLength))
 	}
 
-	resp, err := p.HTTP.Do(httpReq)
+	resp, err := c.Do(httpReq)
 	if err != nil {
 		return errResp(502, "Upstream error: "+err.Error())
 	}

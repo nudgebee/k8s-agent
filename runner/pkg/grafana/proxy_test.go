@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -94,6 +96,7 @@ func TestProxy_HandleAPI(t *testing.T) {
 
 	// Empty GrafanaURL — confirms APIProxy doesn't depend on it.
 	p := New("", "", "", nil, "", nil, nil)
+	p.APIHTTP = upstream.Client() // the test server listens on loopback, which the real client refuses
 	resp := p.HandleAPI(context.Background(), upstream.URL, &Request{
 		Method: "GET", URL: "/v2/things",
 	})
@@ -290,5 +293,127 @@ func TestProxy_HandlePrometheus_UsesTheURLLookupWhenSet(t *testing.T) {
 	}
 	if gotPath != "/api/v1/labels" {
 		t.Errorf("upstream path = %q; want /api/v1/labels (trailing slash on the base must not double up)", gotPath)
+	}
+}
+
+// TestProxy_HandleAPI_NoGrafanaCredentials: the API proxy's upstream is
+// picked by the caller, so the Grafana basic auth and GRAFANA_EXTRA_HEADER
+// must not go to it.
+func TestProxy_HandleAPI_NoGrafanaCredentials(t *testing.T) {
+	var gotAuth, gotExtra, gotCaller string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotExtra = r.Header.Get("X-Grafana-Org-Id")
+		gotCaller = r.Header.Get("X-Custom")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p := New("http://grafana.example", "admin", "secret", []string{"X-Grafana-Org-Id: 7"}, "", nil, nil)
+	p.APIHTTP = upstream.Client()
+	resp := p.HandleAPI(context.Background(), upstream.URL, &Request{
+		Method: "GET", URL: "/v1/data", Header: map[string][]string{"X-Custom": {"v"}},
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d; want 200", resp.StatusCode)
+	}
+	if gotAuth != "" || gotExtra != "" {
+		t.Errorf("upstream got Authorization=%q X-Grafana-Org-Id=%q; want neither", gotAuth, gotExtra)
+	}
+	if gotCaller != "v" {
+		t.Errorf("caller header X-Custom = %q; want it forwarded", gotCaller)
+	}
+}
+
+// TestProxy_HandleAPI_RefusesBlockedAddresses dials through the real API
+// client: loopback is refused whether named by IP or by a hostname that
+// resolves to it, and a redirect to it is refused too.
+func TestProxy_HandleAPI_RefusesBlockedAddresses(t *testing.T) {
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+	port := upstream.URL[strings.LastIndexByte(upstream.URL, ':'):]
+
+	p := New("", "", "", nil, "", nil, nil)
+	for _, base := range []string{upstream.URL, "http://localhost" + port, "http://[::ffff:127.0.0.1]" + port} {
+		resp := p.HandleAPI(context.Background(), base, &Request{Method: "GET", URL: "/x"})
+		if resp.StatusCode != 502 {
+			t.Errorf("%s: status = %d; want 502", base, resp.StatusCode)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("upstream reached %d times; want 0", hits)
+	}
+
+	// A redirect hop is dialled by the same client, so it is checked too.
+	redirector := httptest.NewServer(http.RedirectHandler(upstream.URL+"/x", http.StatusFound))
+	defer redirector.Close()
+	c := p.APIHTTP
+	blocking := c.Transport.(*http.Transport)
+	allowFirst := blocking.Clone()
+	first := true
+	allowFirst.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if first {
+			first = false
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}
+		return blocking.DialContext(ctx, network, addr)
+	}
+	p.APIHTTP = &http.Client{Transport: allowFirst}
+	if resp := p.HandleAPI(context.Background(), redirector.URL, &Request{Method: "GET", URL: "/"}); resp.StatusCode != 502 {
+		t.Errorf("redirect to loopback: status = %d; want 502", resp.StatusCode)
+	}
+	if hits != 0 {
+		t.Fatalf("upstream reached via redirect")
+	}
+}
+
+func TestProxy_HandleAPI_RejectsBadBase(t *testing.T) {
+	p := New("", "", "", nil, "", nil, nil)
+	for _, base := range []string{"file:///etc/passwd", "gopher://x", "http://user:pw@api.example", "api.example"} {
+		if resp := p.HandleAPI(context.Background(), base, &Request{Method: "GET", URL: "/x"}); resp.StatusCode != 400 {
+			t.Errorf("%s: status = %d; want 400", base, resp.StatusCode)
+		}
+	}
+}
+
+// TestProxy_HostChangingPathRefused: a request path appended to the Grafana
+// or Prometheus base must not move the request to another host.
+func TestProxy_HostChangingPathRefused(t *testing.T) {
+	p := New("http://grafana.example:3000", "admin", "secret", nil, "http://prom.example:9090", nil, nil)
+	for _, u := range []string{"@other.example/api/health", "@other.example:80/x"} {
+		if resp := p.HandleGrafana(context.Background(), &Request{Method: "GET", URL: u}); resp.StatusCode != 400 {
+			t.Errorf("grafana %q: status = %d; want 400", u, resp.StatusCode)
+		}
+		if resp := p.HandlePrometheus(context.Background(), &Request{Method: "GET", URL: u}); resp.StatusCode != 400 {
+			t.Errorf("prometheus %q: status = %d; want 400", u, resp.StatusCode)
+		}
+	}
+}
+
+func TestRefuseBlocked(t *testing.T) {
+	for addr, refused := range map[string]bool{
+		"127.0.0.1:80": true, "[::1]:80": true, "[::1%lo]:80": true, "[fe80::1%eth0]:80": true,
+		"[::ffff:169.254.169.254]:80": true, "100.100.100.200:80": true, "168.63.129.16:80": true,
+		"[fd00:ec2::254]:80": true, "10.96.0.10:443": false, "[fd12:3456::1]:80": false,
+	} {
+		if err := refuseBlocked("tcp", addr, nil); (err != nil) != refused {
+			t.Errorf("%s: err = %v; want refused=%v", addr, err, refused)
+		}
+	}
+}
+
+func TestBlockedUpstream(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"127.0.0.1": true, "0.0.0.0": true, "169.254.169.254": true, "100.100.100.200": true,
+		"168.63.129.16": true, "::1": true, "fe80::1": true, "fd00:ec2::254": true, "::ffff:169.254.169.254": true,
+		"10.96.0.10": false, "172.20.1.5": false, "192.168.1.1": false, "100.64.0.1": false, "203.0.113.9": false,
+	} {
+		if got := blockedUpstream(netip.MustParseAddr(addr)); got != want {
+			t.Errorf("%s: blocked = %v; want %v", addr, got, want)
+		}
 	}
 }

@@ -806,8 +806,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 	}
 	validator.SignedOnly = signedOnly
-	// Pod-shell start/exec and HTTP-proxy writes (Grafana, API proxy,
-	// Prometheus admin) follow the same switch.
+	// Pod-shell start/exec, every API-proxy call and Grafana / Prometheus
+	// writes follow the same switch.
 	validator.SignedMessageWrites = writesNeedSignature
 
 	// refresh_playbook hot-reloads the allowlist from the backend so we can

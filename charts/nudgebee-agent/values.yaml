@@ -271,9 +271,10 @@ runner:
   # the cluster without being full mutations — scan Jobs (schedule/delete),
   # alert-rule create/delete, continuous rightsizing that patches, script pods
   # (pod_script_run_enricher), kubectl write commands (with
-  # enableWritePermissions), non-GET HTTP proxy calls, pod-shell start/exec and
-  # Grafana / API-proxy / Prometheus writes (anything but GET/HEAD and query
-  # POSTs) — need a valid relay signature, like every other mutation. Read
+  # enableWritePermissions), non-GET HTTP proxy calls, pod-shell start/exec,
+  # Grafana / Prometheus writes (anything but GET/HEAD and query POSTs) and
+  # every API-proxy call (its caller picks the upstream host, so a GET counts
+  # too) — need a valid relay signature, like every other mutation. Read
   # actions never do. The pod-shell and Grafana checks need a server whose
   # relay signs those messages: upgrade the server before the agent. Has no effect
   # without the key (the agent cannot verify a signature). Set to false only as
