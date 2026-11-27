@@ -276,6 +276,10 @@ func TestClickHousePromQLQueryLimits(t *testing.T) {
 		{"timeout in seconds", "1.5", 0, "2"},
 		{"longer timeout: the HTTP client's", "10m", 0, "5"},
 		{"unparsable timeout dropped", "soon", 0, "5"},
+		{"tiny timeout in seconds", "1e-10", 0, "1"},
+		{"huge timeout in seconds ignored", "1e300", 0, "5"},
+		{"timeout over a day ignored", "25h", 0, "5"},
+		{"NaN timeout ignored", "NaN", 0, "5"},
 		{"shorter deadline", "4s", 3 * time.Second, "3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,6 +315,19 @@ func TestClickHousePromQLQueryLimits(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// A deadline that has already passed still sets the shortest limit. The
+	// HTTP client would not send such a request, so Apply is called directly.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "http://ch/prometheus/api/v1/query?query=up&timeout=30s", nil)
+	limits := &clickhouseQueryLimits{auth: prometheus.NewBasicAuth("default", "pw"), maxWait: time.Minute}
+	if err := limits.Apply(expired, req); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.URL.Query().Get("max_execution_time"); got != "1" {
+		t.Errorf("expired deadline: max_execution_time = %q; want 1", got)
 	}
 
 	prom := &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }}

@@ -97,7 +97,8 @@ func (l *clickhouseQueryLimits) Apply(ctx context.Context, req *http.Request) er
 		wait = t
 	}
 	if dl, ok := ctx.Deadline(); ok {
-		if left := time.Until(dl); wait == 0 || left < wait {
+		// A deadline already passed still gets the shortest limit, not none.
+		if left := max(time.Until(dl), time.Nanosecond); wait == 0 || left < wait {
 			wait = left
 		}
 	}
@@ -111,17 +112,28 @@ func (l *clickhouseQueryLimits) Apply(ctx context.Context, req *http.Request) er
 	return l.auth.Apply(ctx, req)
 }
 
+// maxPromTimeout is the longest `timeout` parsePromDuration accepts; a longer
+// one is ignored (the HTTP client's timeout applies), which also keeps a huge
+// number of seconds from overflowing time.Duration.
+const maxPromTimeout = 24 * time.Hour
+
 // parsePromDuration parses a Prometheus API duration: a Go duration ("30s",
-// "1m30s") or a number of seconds ("30", "1.5").
+// "1m30s") or a number of seconds ("30", "1.5"). It reports false for
+// anything not positive or longer than maxPromTimeout, and rounds a positive
+// value below 1ns up, so that a parsed timeout always sets a limit.
 func parsePromDuration(s string) (time.Duration, bool) {
 	if s == "" {
 		return 0, false
 	}
-	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+	if d, err := time.ParseDuration(s); err == nil {
+		if d <= 0 || d > maxPromTimeout {
+			return 0, false
+		}
 		return d, true
 	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 && !math.IsInf(f, 0) {
-		return time.Duration(f * float64(time.Second)), true
+	// f > 0 is false for NaN; f <= the limit is false for +Inf.
+	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 && f <= maxPromTimeout.Seconds() {
+		return max(time.Nanosecond, time.Duration(f*float64(time.Second))), true
 	}
 	return 0, false
 }
