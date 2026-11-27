@@ -1,0 +1,9 @@
+# Use the 'create api' subcommand to add watches to this file.
+- group: agent.nudgebee.com
+  version: v1alpha1
+  kind: NudgebeeAgent
+  chart: helm-charts/nudgebee-agent
+  overrideValues:
+    # A random restart annotation would make every reconcile an upgrade.
+    runner.rolloutOnUpgrade: "false"
+# +kubebuilder:scaffold:watch

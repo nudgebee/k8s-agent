@@ -132,6 +132,10 @@ runner:
   image:
     repository: ghcr.io/nudgebee/nudgebee-agent
     tag: 2026-10-05T18-41-56_c54355997233265c8a310e8957471ad298fc8ffd
+  # Restart the runner on every `helm upgrade`. Turn off where the chart is
+  # re-rendered continuously (the operator): the runner then restarts only when
+  # a value changes.
+  rolloutOnUpgrade: true
   # Image template the pod_profiler action launches debugger pods from.
   # The agent substitutes `{}` for the variant (bpf, jvm, python, perf, ruby).
   # Surfaces as PROFILER_IMAGE; leave empty to fall back to the binary default.
