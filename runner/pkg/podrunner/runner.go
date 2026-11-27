@@ -56,6 +56,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/enrichers"
 )
@@ -64,11 +65,14 @@ import (
 // k8s Secrets. One Runner per agent process; safe for concurrent use.
 type Runner struct {
 	Client           kubernetes.Interface
-	DefaultNamespace string        // used when params.namespace is empty
-	ServiceAccount   string        // pod.spec.serviceAccountName; empty → cluster default
-	AccountID        string        // tenant id; passed through to FindingResponse
-	PollInterval     time.Duration // status poll cadence; default 5s
-	Now              func() time.Time
+	DefaultNamespace string // used when params.namespace is empty
+	ServiceAccount   string // pod.spec.serviceAccountName; empty → cluster default
+	// WriteServiceAccount is the account a request with cluster_access=write
+	// runs as. Empty → such requests are refused.
+	WriteServiceAccount string
+	AccountID           string        // tenant id; passed through to FindingResponse
+	PollInterval        time.Duration // status poll cadence; default 5s
+	Now                 func() time.Time
 }
 
 // New builds a Runner with defaults filled in.
@@ -81,6 +85,50 @@ func New(cs kubernetes.Interface, defaultNS, sa, accountID string) *Runner {
 		PollInterval:     5 * time.Second,
 		Now:              time.Now,
 	}
+}
+
+// Values of the cluster_access request param: what the script pod may do
+// against the Kubernetes API.
+const (
+	// ClusterAccessRead (the default when the param is absent) runs the pod as
+	// ServiceAccount with its token mounted: cluster reads, no writes.
+	ClusterAccessRead = "read"
+	// ClusterAccessNone mounts no token: the pod cannot call the API at all.
+	// For datastore CLIs and anything else that never needs the cluster.
+	ClusterAccessNone = "none"
+	// ClusterAccessWrite runs the pod as WriteServiceAccount. Only honoured
+	// when the agent has one, and the validator requires a relay signature.
+	ClusterAccessWrite = "write"
+)
+
+// ClusterAccess returns the request's cluster_access value, defaulting to
+// ClusterAccessRead, or an error for a value it does not know.
+func ClusterAccess(params map[string]any) (string, error) {
+	raw, present := params["cluster_access"]
+	if !present || raw == nil {
+		return ClusterAccessRead, nil
+	}
+	v, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("pod_script_run_enricher: cluster_access must be a string, got %T", raw)
+	}
+	switch v {
+	case "":
+		return ClusterAccessRead, nil
+	case ClusterAccessRead, ClusterAccessNone, ClusterAccessWrite:
+		return v, nil
+	}
+	return "", fmt.Errorf("pod_script_run_enricher: unknown cluster_access %q (want %q, %q or %q)",
+		v, ClusterAccessRead, ClusterAccessNone, ClusterAccessWrite)
+}
+
+// IsWriteRequest reports whether a request asks for cluster write access. The
+// validator uses it to require a relay signature for exactly those requests.
+// An unparseable value counts as a write so it cannot dodge the check (Handle
+// refuses it anyway).
+func IsWriteRequest(params map[string]any) bool {
+	v, err := ClusterAccess(params)
+	return err != nil || v == ClusterAccessWrite
 }
 
 // Common waiting-state reasons that won't resolve on their own.
@@ -113,6 +161,20 @@ func (r *Runner) Handle(ctx context.Context, params map[string]any) (any, error)
 	}
 	if command == "" {
 		return enrichers.ErrorResponse("pod_script_run_enricher: command is required", 400), nil
+	}
+	access, err := ClusterAccess(params)
+	if err != nil {
+		return enrichers.ErrorResponse(err.Error(), 400), nil
+	}
+	serviceAccount, mountToken := r.ServiceAccount, true
+	switch access {
+	case ClusterAccessNone:
+		mountToken = false
+	case ClusterAccessWrite:
+		if r.WriteServiceAccount == "" {
+			return enrichers.ErrorResponse("pod_script_run_enricher: cluster_access=write is not enabled on this agent (chart value runner.scriptPods.allowWrite)", 403), nil
+		}
+		serviceAccount = r.WriteServiceAccount
 	}
 
 	// "ns/secret" pattern: api-server's CommandExecutor splits the secret
@@ -158,7 +220,7 @@ func (r *Runner) Handle(ctx context.Context, params map[string]any) (any, error)
 	}
 	defer r.deleteConfigMap(namespace, cmName)
 
-	if err := r.createPod(ctx, namespace, podName, image, cmName, secret, envVars); err != nil {
+	if err := r.createPod(ctx, namespace, podName, image, cmName, secret, serviceAccount, mountToken, envVars); err != nil {
 		return r.failure(params, namespace, podName, image, command, secret,
 			fmt.Sprintf("create pod: %v", err)), nil
 	}
@@ -190,7 +252,7 @@ func (r *Runner) deleteConfigMap(ns, name string) {
 	}
 }
 
-func (r *Runner) createPod(ctx context.Context, ns, name, image, cmName, secret string, env map[string]string) error {
+func (r *Runner) createPod(ctx context.Context, ns, name, image, cmName, secret, serviceAccount string, mountToken bool, env map[string]string) error {
 	volume := "script-volume"
 	envFrom := []corev1.EnvFromSource{}
 	if secret != "" {
@@ -208,8 +270,11 @@ func (r *Runner) createPod(ctx context.Context, ns, name, image, cmName, secret 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: corev1.PodSpec{
-			ServiceAccountName: r.ServiceAccount,
-			RestartPolicy:      corev1.RestartPolicyNever,
+			ServiceAccountName: serviceAccount,
+			// Set explicitly so a token never appears because someone edited
+			// the account's own automountServiceAccountToken.
+			AutomountServiceAccountToken: ptr.To(mountToken),
+			RestartPolicy:                corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
 					Name:            "runner-container",

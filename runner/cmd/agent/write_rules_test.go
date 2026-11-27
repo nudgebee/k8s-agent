@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/auth"
+	"github.com/nudgebee/nudgebee-agent/pkg/podrunner"
 	"github.com/nudgebee/nudgebee-agent/pkg/relaysig"
 )
 
@@ -98,6 +99,33 @@ func TestWriteRulesThroughValidator(t *testing.T) {
 	} {
 		if err := v.Validate(req(body)); (err == nil) != wantOK {
 			t.Errorf("%s: err = %v, want ok=%v", body, err, wantOK)
+		}
+	}
+}
+
+// A script request for <release>-script-write needs a signature even on an agent where
+// pod_script_run_enricher is otherwise a light action; read and no-token
+// requests stay light.
+func TestScriptWriteAccessNeedsSignature(t *testing.T) {
+	v := &auth.Validator{
+		LightActions: map[string]struct{}{"pod_script_run_enricher": {}},
+		SignedOnly:   map[string]auth.SignedRule{"pod_script_run_enricher": podrunner.IsWriteRequest},
+	}
+	req := func(access string) *auth.Request {
+		params := map[string]any{"image": "busybox", "command": "true"}
+		if access != "" {
+			params["cluster_access"] = access
+		}
+		return &auth.Request{ActionName: "pod_script_run_enricher", Body: map[string]any{"action_params": params}}
+	}
+	for _, access := range []string{"", "read", "none"} {
+		if err := v.Validate(req(access)); err != nil {
+			t.Errorf("cluster_access=%q unsigned: %v; want accepted", access, err)
+		}
+	}
+	for _, access := range []string{"write", "Write"} {
+		if err := v.Validate(req(access)); err == nil {
+			t.Errorf("cluster_access=%q unsigned: accepted; want refused", access)
 		}
 	}
 }

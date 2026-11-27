@@ -171,6 +171,18 @@ The agent's ServiceAccount needs:
 
 Scanners that need cluster-wide reads (`popeye_scan`, `krr_scan`, `trivy_cis_scan`) get them via the `SCANNER_SERVICE_ACCOUNT` — distinct from the agent's own SA so the agent can run with narrower permissions.
 
+### Script and scan pod identity
+
+Pods the agent starts run under their own accounts, never the runner's (`templates/script-scanner-service-accounts.yaml`):
+
+| Env | Chart sets it to | Used for |
+|---|---|---|
+| `SCANNER_SERVICE_ACCOUNT` | `<release>-scanner` | every scan Job; `JobSpec.service_account` is ignored, `no_api_access: true` mounts no token |
+| `SCRIPT_SERVICE_ACCOUNT` | `<release>-script` | `pod_script_run_enricher` pods (default `cluster_access: read`; `none` mounts no token) |
+| `SCRIPT_WRITE_SERVICE_ACCOUNT` | `<release>-script-write`, only with `runner.scriptPods.allowWrite` | `cluster_access: write`; such a request needs a valid relay signature |
+
+`<release>-script` and `<release>-scanner` share `<release>-script-scanner-read`: cluster-wide get/list/watch (the read-only runner rules), no Secrets, no writes, no exec. `<release>-script-write` is bound to the runner's own ClusterRole. When `SCRIPT_SERVICE_ACCOUNT` is unset (a chart older than the image), script pods fall back to `SCANNER_SERVICE_ACCOUNT` and the agent logs a warning.
+
 ## Deployment
 
 The agent ships in the `nudgebee/k8s-agent` Helm chart as the `runner` Deployment image (`ghcr.io/nudgebee/nudgebee-agent`). The chart's existing Secret provides every env var the agent needs (NUDGEBEE_ENDPOINT, NUDGEBEE_AUTH_SECRET_KEY, PROMETHEUS_URL, LOKI_URL, ELASTICSEARCH_URL, SIGNOZ_URL, etc.), and discovery / kube reads / pod-exec are default-on, so the agent serves its full surface with zero env additions. The Service name, port, and AlertManager webhook URL stay the same — no AlertManager config change needed.

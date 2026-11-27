@@ -30,4 +30,9 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     namespace: {{ .Release.Namespace }}
+  {{- if .Values.runner.scriptPods.allowWrite }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-script-write
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
 {{- end }}
