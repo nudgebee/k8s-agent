@@ -151,7 +151,7 @@ func TestGrafanaAuth(t *testing.T) {
 				t.Errorf("%v: status %d; want 200", m["url"], r.StatusCode)
 			}
 		}
-		for _, m := range []map[string]any{req("POST", "/api/dashboards/db", ""), req("DELETE", "/api/datasources/1", ""), req("POST", "/v1/data", "APIProxy"), req("POST", "/api/v1/admin/tsdb/delete_series", "Prometheus")} {
+		for _, m := range []map[string]any{req("POST", "/api/dashboards/db", ""), req("DELETE", "/api/datasources/1", ""), req("POST", "/v1/data", "APIProxy"), req("GET", "/v1/data", "APIProxy"), req("POST", "/api/v1/admin/tsdb/delete_series", "Prometheus"), req("GET", "@other.example/api/health", "")} {
 			b, _ := json.Marshal(m)
 			r := send(d, b).only(t)
 			if r.StatusCode != 401 || r.OutputType != "Grafana" || r.RequestID != "g1" {

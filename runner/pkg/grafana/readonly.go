@@ -16,11 +16,24 @@ var promReadPath = regexp.MustCompile(`/api/v1/(query|query_range|query_exemplar
 
 // IsReadRequest reports whether a proxied HTTP request only reads, given its
 // X-NB-Request-Type ("Grafana", "APIProxy", "Prometheus"), method and URL.
-// GET and HEAD read. POST reads only for Prometheus query endpoints and
-// Grafana's query endpoints; everything else (other methods, admin and write
-// endpoints, API-proxy POSTs, a path with "." or ".." segments or encoded
-// characters, anything but a plain absolute path) counts as a write.
+//
+// An API-proxy request never counts as a read: its caller picks the upstream
+// host, so even a GET can reach any address the agent can, and it needs a
+// relay signature like a write. For Grafana and Prometheus, GET and HEAD read
+// and POST reads only for Prometheus query endpoints and Grafana's query
+// endpoints. Everything else counts as a write: other methods, admin and write
+// endpoints, a URL that is not a plain absolute path (the proxy appends it to
+// its base URL as a string, so "@host/..." or "//host/..." would change the
+// host), and for POST a path with "." or ".." segments or encoded characters.
 func IsReadRequest(requestType, method, rawURL string) bool {
+	switch requestType {
+	case "", "Grafana", "Prometheus":
+	default:
+		return false
+	}
+	if !isPlainPath(rawURL) {
+		return false
+	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
 		return true
@@ -28,26 +41,28 @@ func IsReadRequest(requestType, method, rawURL string) bool {
 	default:
 		return false
 	}
-	// The proxy appends rawURL to its base URL as a string, so it must be a
-	// plain absolute path: "@host/..." or "//host/..." would change the host.
-	if !strings.HasPrefix(rawURL, "/") || strings.HasPrefix(rawURL, "//") {
-		return false
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.RawPath != "" || u.Path == "" || path.Clean(u.Path) != u.Path {
+	u, _ := url.Parse(rawURL)
+	if u.RawPath != "" || u.Path == "" || path.Clean(u.Path) != u.Path {
 		return false
 	}
 	p := u.Path
-	switch requestType {
-	case "Prometheus":
+	if requestType == "Prometheus" {
 		return promReadPath.MatchString(p)
-	case "", "Grafana":
-		if p == "/api/ds/query" {
-			return true
-		}
-		// Grafana datasource proxy / resource calls to a Prometheus datasource.
-		return (strings.HasPrefix(p, "/api/datasources/proxy/") || strings.HasPrefix(p, "/api/datasources/uid/")) &&
-			promReadPath.MatchString(p)
 	}
-	return false
+	if p == "/api/ds/query" {
+		return true
+	}
+	// Grafana datasource proxy / resource calls to a Prometheus datasource.
+	return (strings.HasPrefix(p, "/api/datasources/proxy/") || strings.HasPrefix(p, "/api/datasources/uid/")) &&
+		promReadPath.MatchString(p)
+}
+
+// isPlainPath reports whether rawURL is an absolute path that keeps the host
+// of whatever base URL it is appended to.
+func isPlainPath(rawURL string) bool {
+	if !strings.HasPrefix(rawURL, "/") || strings.HasPrefix(rawURL, "//") || strings.ContainsRune(rawURL, '\\') {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "" && u.Host == "" && u.User == nil
 }

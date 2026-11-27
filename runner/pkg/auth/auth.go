@@ -62,8 +62,9 @@ type Validator struct {
 	SignedOnly map[string]SignedRule
 
 	// SignedMessageWrites makes pod-shell and HTTP-proxy (Grafana, API proxy,
-	// Prometheus) messages that change something need a valid relay v2
-	// signature. Reads pass either way. Set once at startup.
+	// Prometheus) messages that change something — and every API-proxy call —
+	// need a valid relay v2 signature. Grafana / Prometheus reads pass either
+	// way. Set once at startup.
 	SignedMessageWrites bool
 }
 
