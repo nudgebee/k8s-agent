@@ -847,8 +847,13 @@ clickhouse:
     enabled: true
   containerSecurityContext:
     enabled: true
-  # Most system logs are off to save disk. query_views_log stays: the runner's
-  # ClickHouse service map reads failed summary-view runs from it, and serves
+  # Most system logs are off to save disk, processors_profile_log,
+  # query_metric_log and background_schedule_pool_log included, which the
+  # bundled ClickHouse turns on by default. Before each upgrade the schema job
+  # drops the tables of the logs removed here, and the <log>_<N> tables
+  # ClickHouse leaves behind when a version changes a log's columns, which it
+  # never writes or expires. query_views_log stays: the runner's ClickHouse
+  # service map reads failed summary-view runs from it, and serves
   # only windows it still covers (without it every map read falls back to
   # Prometheus). It keeps 8 days, longer than the summary tables' 7, in daily
   # partitions dropped whole once expired.
@@ -860,7 +865,7 @@ clickhouse:
   # Refused trace and metric inserts are retried by the collector for
   # retry_on_failure's max_elapsed_time, then dropped; container logs are held
   # back until inserts resume (the clickhouse/logs exporter).
-  extraOverrides: "<clickhouse>\n  <merge_tree>\n    <min_free_disk_ratio_to_perform_insert>0.05</min_free_disk_ratio_to_perform_insert>\n  </merge_tree>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n</clickhouse>\n"
+  extraOverrides: "<clickhouse>\n  <merge_tree>\n    <min_free_disk_ratio_to_perform_insert>0.05</min_free_disk_ratio_to_perform_insert>\n  </merge_tree>\n  <asynchronous_metric_log remove=\"1\"/>\n  <metric_log remove=\"1\"/>\n  <query_log remove=\"1\" />\n  <query_thread_log remove=\"1\" />  \n  <query_views_log>\n    <database>system</database>\n    <table>query_views_log</table>\n    <partition_by>toYYYYMMDD(event_date)</partition_by>\n    <ttl>event_time + INTERVAL 8 DAY DELETE</ttl>\n    <settings>ttl_only_drop_parts = 1</settings>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n  </query_views_log>\n  <part_log remove=\"1\"/>\n  <text_log remove=\"1\" />\n  <trace_log remove=\"1\"/>\n  <opentelemetry_span_log remove=\"1\"/>\n  <processors_profile_log remove=\"1\"/>\n  <query_metric_log remove=\"1\"/>\n  <background_schedule_pool_log remove=\"1\"/>\n</clickhouse>\n"
   # A read-only user for the runner's query_data action, which runs SQL the
   # NudgeBee backend sends (log and trace reads, LLM-written log queries
   # included). It can read and set query settings (readonly=2) but not write

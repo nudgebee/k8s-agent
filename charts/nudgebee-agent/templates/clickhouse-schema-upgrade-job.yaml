@@ -28,6 +28,15 @@ job exits 0 when the ClickHouse Service does not exist. Before this, the pod
 never started (secret not found) and the upgrade failed with
 "pre-upgrade hooks failed".
 
+It also drops system log tables nothing writes any more: those of the logs
+clickhouse.extraOverrides removes (`<name_log remove="1"/>`), which keep the
+rows from before the log was turned off, and the <log>_<N> tables ClickHouse
+leaves behind when a new version changes a log's columns, which it never writes
+or expires again.
+A table that ClickHouse still writes until its pod restarts with the new
+configuration is recreated by it, and goes at the next upgrade. A failed drop
+is logged and does not fail the upgrade.
+
 Note that upgraded tables keep their original ORDER BY — new installs sort
 metrics by (ServiceName, MetricName, ...), upgraded ones still by
 (MetricName, Attributes, ...). Inserts are unaffected (the exporter names its
@@ -52,6 +61,10 @@ queries won't hit the primary key on upgraded clusters.
 {{- $chHistogram := default "otel_metrics_histogram" (dig "histogram" "name" "" $chMetricsTables) }}
 {{- $chSummary := default "otel_metrics_summary" (dig "summary" "name" "" $chMetricsTables) }}
 {{- $chExpHistogram := default "otel_metrics_exponential_histogram" (dig "exponential_histogram" "name" "" $chMetricsTables) }}
+{{- $chRemovedLogs := list }}
+{{- range regexFindAll "<[a-z_]+_log[[:space:]]+remove=\"1\"" (default "" .Values.clickhouse.extraOverrides) -1 }}
+{{- $chRemovedLogs = append $chRemovedLogs (regexReplaceAll "^<([a-z_]+_log).*$" . "${1}") }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -102,6 +115,8 @@ spec:
             {{- /* Only the delta/cumulative signals carry AggregationTemporality. */}}
             - name: CH_TEMPORALITY_TABLES
               value: {{ printf "%s %s %s" $chSum $chHistogram $chExpHistogram | quote }}
+            - name: CH_REMOVED_LOGS
+              value: {{ join " " $chRemovedLogs | quote }}
             - name: CH_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -162,5 +177,15 @@ spec:
                       ADD COLUMN IF NOT EXISTS ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)) AFTER ScopeVersion,
                       ADD COLUMN IF NOT EXISTS EventName String CODEC(ZSTD(1))"
               fi
+              # Names are [a-z0-9_] only (the regexes above and below), so they
+              # need no quoting in SQL.
+              stale=$(cc "SELECT name FROM system.tables
+                          WHERE database = 'system' AND engine LIKE '%MergeTree'
+                            AND (match(name, '^[a-z_]+_log_[0-9]+\$')
+                                 OR has(splitByChar(' ', '${CH_REMOVED_LOGS}'), name))") || stale=""
+              for tbl in ${stale}; do
+                echo "dropping unused system.${tbl}..."
+                cc "DROP TABLE IF EXISTS system.${tbl} SYNC" || echo "could not drop system.${tbl}; leaving it"
+              done
               echo "schema upgrade complete."
 {{- end }}
