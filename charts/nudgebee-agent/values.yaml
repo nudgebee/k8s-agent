@@ -684,8 +684,14 @@ opentelemetry-collector:
           case "$ep" in *://*) scheme="${ep%%://*}"; ep="${ep#*://}" ;; esac
           ep="${ep%%[/?]*}"; ep="${ep##*@}"; ep="${ep%%,*}"
           case "$scheme" in http) port=8123 ;; https) port=8443 ;; *) port=9000 ;; esac
+          # An IPv6 address is in brackets ([::1]:9000); bash's /dev/tcp takes
+          # it without them.
           host="$ep"
-          case "$ep" in *:*) host="${ep%:*}"; port="${ep##*:}" ;; esac
+          case "$ep" in
+            \[*\]*) host="${ep#\[}"; host="${host%%\]*}"
+                    case "$ep" in *\]:*) port="${ep##*\]:}" ;; esac ;;
+            *:*) host="${ep%:*}"; port="${ep##*:}" ;;
+          esac
           i=0
           until timeout 3 bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; do
             if [ $((i % 15)) -eq 0 ]; then echo "waiting for ClickHouse at ${host}:${port}"; fi
