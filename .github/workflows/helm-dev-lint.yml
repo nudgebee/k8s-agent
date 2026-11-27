@@ -404,6 +404,27 @@ jobs:
             || fail "own TIMESERIES_CLUSTER: doubled or overridden"
           echo 'ok: clickhouse.timeseries'
 
+      # The collector exits when its clickhouse exporters cannot create their
+      # tables, so it crash-looped whenever it started before ClickHouse. Its
+      # wait-for-clickhouse init container holds it back, and must get the
+      # exporter's endpoint, including one an operator overrides.
+      - name: Assert the collector waits for ClickHouse
+        run: |
+          endpoint() {
+            helm template nudgebee-agent charts/nudgebee-agent --namespace nudgebee-agent "$@" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "nudgebee-agent-opentelemetry-collector")
+          init = [c for c in dep["spec"]["template"]["spec"].get("initContainers") or [] if c["name"] == "wait-for-clickhouse"]
+          assert len(init) == 1, "no wait-for-clickhouse init container"
+          print(next(e["value"] for e in init[0]["env"] if e["name"] == "CLICKHOUSE_ENDPOINT"))'
+          }
+          fail() { echo "$*"; exit 1; }
+          case "$(endpoint)" in tcp://nudgebee-agent-clickhouse:9000\?*) ;; *) fail "default: endpoint not filled in";; esac
+          [ "$(endpoint --set 'opentelemetry-collector.config.exporters.clickhouse.endpoint=tcp://ch.example.com:9440')" = "tcp://ch.example.com:9440" ] \
+            || fail "overridden endpoint not used"
+          echo 'ok: collector waits for ClickHouse'
+
       # logs.collection is the one switch for where container logs go. node-agent
       # points the node-agent's log push at the bundled collector and is the only
       # thing that makes the runner report clickhouseLogsCollected. A value it
