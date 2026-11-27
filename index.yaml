@@ -11,6 +11,48 @@ entries:
       charts.openshift.io/name: NudgeBee Agent
       charts.openshift.io/provider: NudgeBee
     apiVersion: v2
+    appVersion: 0.1.33-rc-9
+    created: "2026-11-27T10:11:02.765000546Z"
+    dependencies:
+    - condition: opentelemetry-collector.enabled
+      name: opentelemetry-collector
+      repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+      version: 0.165.0
+    description: NudgeBee Kubernetes agent — connects your cluster to the NudgeBee
+      backend for observability, cost, and incident automation.
+    digest: 5f5a3dd4b87b6dbe98b58d56e1ac46f0689eea3337c9face854b35a4f09f394e
+    home: https://github.com/nudgebee/k8s-agent
+    icon: https://nudgebee-documents.s3.amazonaws.com/images/Nudgebee-logo.png
+    keywords:
+    - kubernetes
+    - observability
+    - opentelemetry
+    - monitoring
+    - clickhouse
+    - kubewatch
+    - sre
+    kubeVersion: '>=1.24.0-0'
+    maintainers:
+    - email: support@nudgebee.com
+      name: NudgeBee
+      url: https://nudgebee.com
+    name: nudgebee-agent
+    sources:
+    - https://github.com/nudgebee/k8s-agent
+    type: application
+    urls:
+    - https://github.com/nudgebee/k8s-agent/releases/download/nudgebee-agent-0.1.33-rc-9/nudgebee-agent-0.1.33-rc-9.tgz
+    version: 0.1.33-rc-9
+  - annotations:
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Documentation
+          url: https://docs.nudgebee.com/docs/installation/agent/installation/
+        - name: Source
+          url: https://github.com/nudgebee/k8s-agent
+      charts.openshift.io/name: NudgeBee Agent
+      charts.openshift.io/provider: NudgeBee
+    apiVersion: v2
     appVersion: 0.1.33-rc-8
     created: "2026-11-26T12:04:39.132638416Z"
     dependencies:
@@ -7279,4 +7321,4 @@ entries:
     urls:
     - https://nudgebee.github.io/k8s-agent/nudgebee-agent-0.0.0.tgz
     version: 0.0.0
-generated: "2026-11-26T12:04:39.133206937Z"
+generated: "2026-11-27T10:11:02.76582233Z"
