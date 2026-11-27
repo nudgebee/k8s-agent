@@ -71,8 +71,36 @@ func ResolveCustomResources(ctx context.Context, disco discovery.DiscoveryInterf
 	counts := map[string]int{CustomResourceWatching: 0, CustomResourceUnresolved: 0, CustomResourceRefused: 0}
 	var out []ResolvedCustomResource
 	seen := map[schema.GroupResource]bool{}
+	// Preferred versions come from one ServerGroups call, made only if some
+	// entry leaves its version unset.
+	var (
+		preferred    map[string]string
+		preferredErr error
+	)
+	preferredVersion := func(group string) (string, error) {
+		if preferred == nil && preferredErr == nil {
+			groups, err := disco.ServerGroups()
+			if err != nil {
+				preferredErr = err
+			} else {
+				preferred = make(map[string]string, len(groups.Groups))
+				for _, g := range groups.Groups {
+					preferred[g.Name] = g.PreferredVersion.Version
+				}
+			}
+		}
+		if preferredErr != nil {
+			return "", preferredErr
+		}
+		if v := preferred[group]; v != "" {
+			return v, nil
+		}
+		return "", unresolvedError("API group not served")
+	}
 	for _, e := range entries {
-		gr := schema.GroupResource{Group: e.Group, Resource: strings.ToLower(e.Resource)}
+		// API group and resource names are lower-case; an operator's casing
+		// must not make a served resource look unserved.
+		gr := schema.GroupResource{Group: strings.ToLower(e.Group), Resource: strings.ToLower(e.Resource)}
 		if seen[gr] {
 			continue
 		}
@@ -83,7 +111,7 @@ func ResolveCustomResources(ctx context.Context, disco discovery.DiscoveryInterf
 				"group", gr.Group, "resource", gr.Resource)
 			continue
 		}
-		r, err := resolveOne(ctx, disco, dyn, namespace, gr, e)
+		r, err := resolveOne(ctx, disco, dyn, namespace, gr, e, preferredVersion)
 		if err != nil {
 			counts[CustomResourceUnresolved]++
 			logger.Warn("k8s watch: custom resource not watched; it is picked up on the next runner restart once it is served and listable",
@@ -106,23 +134,15 @@ type unresolvedError string
 func (e unresolvedError) Error() string { return string(e) }
 
 func resolveOne(ctx context.Context, disco discovery.DiscoveryInterface, dyn dynamic.Interface,
-	namespace string, gr schema.GroupResource, e CustomResourceEntry,
+	namespace string, gr schema.GroupResource, e CustomResourceEntry, preferredVersion func(string) (string, error),
 ) (ResolvedCustomResource, error) {
 	version := e.Version
 	if version == "" {
-		groups, err := disco.ServerGroups()
+		v, err := preferredVersion(gr.Group)
 		if err != nil {
 			return ResolvedCustomResource{}, err
 		}
-		for _, g := range groups.Groups {
-			if g.Name == gr.Group {
-				version = g.PreferredVersion.Version
-				break
-			}
-		}
-		if version == "" {
-			return ResolvedCustomResource{}, unresolvedError("API group not served")
-		}
+		version = v
 	}
 	gv := schema.GroupVersion{Group: gr.Group, Version: version}
 	list, err := disco.ServerResourcesForGroupVersion(gv.String())

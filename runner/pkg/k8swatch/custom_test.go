@@ -201,12 +201,12 @@ func TestResolveCustomResources_ClusterScopedWithNamespaceIsUnresolved(t *testin
 		{Name: "nodepools", Kind: "NodePool", Namespaced: false},
 	}})
 	dyn := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{npGVR: "NodePoolList"})
-	entries := []CustomResourceEntry{{Group: "karpenter.sh", Resource: "NodePools"}}
+	entries := []CustomResourceEntry{{Group: "Karpenter.sh", Resource: "NodePools"}}
 	if got := ResolveCustomResources(context.Background(), disco, dyn, "apps", entries, nil, nil); len(got) != 0 {
 		t.Fatalf("cluster-scoped resource with a namespace-limited watch must not be watched, got %+v", got)
 	}
 	got := ResolveCustomResources(context.Background(), disco, dyn, "", entries, nil, nil)
 	if len(got) != 1 || got[0].Namespaced || got[0].GVR != npGVR {
-		t.Fatalf("cluster-wide watch: want the cluster-scoped resource (resource name lower-cased), got %+v", got)
+		t.Fatalf("cluster-wide watch: want the cluster-scoped resource (group and resource lower-cased), got %+v", got)
 	}
 }
