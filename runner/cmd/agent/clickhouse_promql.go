@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -57,12 +59,71 @@ func clickhousePromQLURL(cfg *config.Config) string {
 	return c.BaseURL + clickhousePromQLPath
 }
 
-// clickhousePromQLAuth gives requests to chURL basic auth as the ClickHouse
-// user and leaves the client's configured authorizer for any Prometheus that
-// SetURL points it at later. Set once, at startup: the URL changes at
-// runtime, the authorizer does not.
-func clickhousePromQLAuth(c *prometheus.Client, chURL, user, password string) {
-	c.Auth = prometheus.ForURL(chURL, prometheus.NewBasicAuth(user, password), c.Auth)
+// clickhousePromQLRequests gives requests to chURL basic auth as the
+// ClickHouse user and query limits (clickhouseQueryLimits), and leaves the
+// client's configured authorizer for any Prometheus that SetURL points it at
+// later. Set once, at startup: the URL changes at runtime, the authorizer
+// does not.
+func clickhousePromQLRequests(c *prometheus.Client, chURL, user, password string) {
+	var maxWait time.Duration
+	if c.HTTP != nil {
+		maxWait = c.HTTP.Timeout
+	}
+	limits := &clickhouseQueryLimits{auth: prometheus.NewBasicAuth(user, password), maxWait: maxWait}
+	c.Auth = prometheus.ForURL(chURL, limits, c.Auth)
+}
+
+// clickhousePromQLMaxMemory caps one PromQL query's memory in ClickHouse
+// (max_memory_usage), so a broad query cannot take the memory that inserts
+// and the other queries share (the chart's pod limit is 2000Mi).
+const clickhousePromQLMaxMemory = 1_000_000_000
+
+// clickhouseQueryLimits bounds each PromQL query ClickHouse runs. ClickHouse
+// takes the Prometheus API's `timeout` for a setting it does not know and
+// fails the query, so it is turned into max_execution_time. ClickHouse runs a
+// PromQL query to the end even after the client has gone (it ignores
+// cancel_http_readonly_queries_on_client_close there), so max_execution_time
+// is also kept within the caller's deadline and the HTTP client's timeout:
+// a query no one waits for any more stops. Then the auth is applied.
+type clickhouseQueryLimits struct {
+	auth    prometheus.Authorizer
+	maxWait time.Duration // the HTTP client's timeout; 0 for none
+}
+
+func (l *clickhouseQueryLimits) Apply(ctx context.Context, req *http.Request) error {
+	q := req.URL.Query()
+	wait := l.maxWait
+	if t, ok := parsePromDuration(q.Get("timeout")); ok && (wait == 0 || t < wait) {
+		wait = t
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); wait == 0 || left < wait {
+			wait = left
+		}
+	}
+	q.Del("timeout")
+	if wait > 0 {
+		// Whole seconds, at least 1: 0 would mean no limit.
+		q.Set("max_execution_time", strconv.FormatInt(max(1, int64(math.Ceil(wait.Seconds()))), 10))
+	}
+	q.Set("max_memory_usage", strconv.Itoa(clickhousePromQLMaxMemory))
+	req.URL.RawQuery = q.Encode()
+	return l.auth.Apply(ctx, req)
+}
+
+// parsePromDuration parses a Prometheus API duration: a Go duration ("30s",
+// "1m30s") or a number of seconds ("30", "1.5").
+func parsePromDuration(s string) (time.Duration, bool) {
+	if s == "" {
+		return 0, false
+	}
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return d, true
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 && !math.IsInf(f, 0) {
+		return time.Duration(f * float64(time.Second)), true
+	}
+	return 0, false
 }
 
 // errNoNodeAgentSeries is the probe's reason when the query works but the
