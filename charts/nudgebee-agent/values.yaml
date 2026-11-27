@@ -658,6 +658,51 @@ opentelemetry-collector:
         secretKeyRef:
           name: "nudgebee-agent-clickhouse" # Default name, can be overridden
           key: admin-password
+  # Holds the collector back until ClickHouse accepts connections. The
+  # clickhouse exporters create their tables when the collector starts, and the
+  # collector exits when that fails, so a collector that starts before
+  # ClickHouse (every install, and an upgrade that restarts both) crash-looped
+  # until ClickHouse was up. It waits for the host and port of
+  # config.exporters.clickhouse.endpoint (the subchart fills in the {{ }}),
+  # without a time limit, and does not wait when that exporter is gone. The
+  # image is the base of the runner's image. Helm replaces lists: an override
+  # of initContainers drops this one unless it repeats it.
+  initContainers:
+    - name: wait-for-clickhouse
+      image: registry.access.redhat.com/ubi9/ubi-micro@sha256:dbd325b96bcd432dd42816d31412bdf1dc0fb973b79ed310344bc23c76c068db
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: CLICKHOUSE_ENDPOINT
+          value: '{{ with .Values.config.exporters.clickhouse }}{{ .endpoint }}{{ end }}'
+      command:
+        - /bin/bash
+        - -c
+        - |
+          ep="${CLICKHOUSE_ENDPOINT}"
+          if [ -z "$ep" ]; then echo "no clickhouse exporter endpoint; not waiting"; exit 0; fi
+          scheme=tcp
+          case "$ep" in *://*) scheme="${ep%%://*}"; ep="${ep#*://}" ;; esac
+          ep="${ep%%[/?]*}"; ep="${ep##*@}"; ep="${ep%%,*}"
+          case "$scheme" in http) port=8123 ;; https) port=8443 ;; *) port=9000 ;; esac
+          host="$ep"
+          case "$ep" in *:*) host="${ep%:*}"; port="${ep##*:}" ;; esac
+          i=0
+          until timeout 3 bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; do
+            if [ $((i % 15)) -eq 0 ]; then echo "waiting for ClickHouse at ${host}:${port}"; fi
+            i=$((i + 1)); sleep 2
+          done
+          echo "ClickHouse at ${host}:${port} accepts connections"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
   # A second config file, rendered by templates/collector-timeseries.yaml: the
   # node-agent pipeline into ClickHouse's TimeSeries table when
   # clickhouse.timeseries.enabled, otherwise nothing. Helm replaces lists, so
