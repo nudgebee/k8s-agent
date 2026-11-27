@@ -48,8 +48,15 @@ type Mutator struct {
 	Namespace string
 
 	// dynamic is the dynamic client used for CRD operations like
-	// PrometheusRule. Set via SetDynamic.
+	// PrometheusRule. Set via SetDynamic. With split identities it is the
+	// writer's client.
 	dynamic dynamic.Interface
+
+	// ownDynamic (the runner's own client) serves PrometheusRules in the
+	// agent's namespace, which are agent housekeeping, not a change to the
+	// customer's cluster; readDynamic serves reads (the Prometheus selector
+	// lookup). Both nil = use dynamic (one identity). Set via SetIdentityDynamics.
+	ownDynamic, readDynamic dynamic.Interface
 
 	// exec runs commands inside pods (SPDY). Required only by the
 	// rightsize_pvc downsize migration's data-mover pod. Set via SetExec;

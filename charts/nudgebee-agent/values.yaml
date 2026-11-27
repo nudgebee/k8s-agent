@@ -291,6 +291,23 @@ runner:
   # read-only accounts (<release>-script for scripts, <release>-scanner for
   # scans): they can read the cluster (get/list/watch, no Secrets) but not
   # change it or exec into pods.
+  # Runner identities: the runner makes each Kubernetes call as an account
+  # matching what the call does — <release>-runner-reader for reads,
+  # <release>-runner-exec for exec into pods, <release>-runner-writer for
+  # changes — with short-lived tokens it mints for them. The API server then
+  # refuses a change the agent mistook for a read, and the cluster audit log
+  # names the identity. false = every call as the runner's own account
+  # (previous behaviour).
+  splitIdentities: true
+  exec:
+    # Create <release>-runner-exec: pod_bash_enricher and the terminal. Off
+    # under readOnly.
+    enabled: true
+  changes:
+    # Create <release>-runner-writer: remediation actions, rightsizing apply,
+    # kubectl writes, profiling. Off under readOnly. Planned to default to
+    # false in a later major release.
+    enabled: true
   scriptPods:
     # Create <release>-script-write, bound to the runner's own ClusterRole, and let
     # a script request ask for it (cluster_access: write). Such a request also

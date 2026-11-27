@@ -96,6 +96,31 @@ type Rightsizer struct {
 	// the resize subresource, and server-version discovery). May be nil — then
 	// in-place is skipped and apply always uses the template Update (rollout).
 	client kubernetes.Interface
+
+	// readDyn / readClient serve reads when the change identity (dyn,
+	// client) is separate. nil = use dyn / client. Set via SetReaders.
+	readDyn    dynamic.Interface
+	readClient kubernetes.Interface
+}
+
+// SetReaders sets the clients used for reads, so only Update and the in-place
+// resize patch use the change identity. Either may be nil.
+func (r *Rightsizer) SetReaders(dyn dynamic.Interface, client kubernetes.Interface) {
+	r.readDyn, r.readClient = dyn, client
+}
+
+func (r *Rightsizer) readerDyn() dynamic.Interface {
+	if r.readDyn != nil {
+		return r.readDyn
+	}
+	return r.dyn
+}
+
+func (r *Rightsizer) readerClient() kubernetes.Interface {
+	if r.readClient != nil {
+		return r.readClient
+	}
+	return r.client
 }
 
 // New builds a Rightsizer. prom + dyn are required; client enables in-place pod
@@ -141,7 +166,7 @@ func (r *Rightsizer) rightsizeWorkload(ctx context.Context, s Settings, app Appl
 	}
 
 	ri := r.dyn.Resource(gvr).Namespace(app.Namespace)
-	obj, err := ri.Get(ctx, app.Name, metav1.GetOptions{})
+	obj, err := r.readerDyn().Resource(gvr).Namespace(app.Namespace).Get(ctx, app.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("rightsize: get %s %s/%s: %w", app.Kind, app.Namespace, app.Name, err)
 	}

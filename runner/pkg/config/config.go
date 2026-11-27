@@ -226,6 +226,15 @@ type Config struct {
 	// cluster_access=write runs as. Empty unless runner.scriptPods.allowWrite.
 	ScriptWriteServiceAccount string
 
+	// RunnerIdentityMode "split" makes each Kubernetes call as the reader,
+	// exec or writer ServiceAccount (pkg/identity). Set by the chart only when
+	// it renders those accounts; anything else = every call as the runner.
+	RunnerIdentityMode   string
+	ReaderServiceAccount string
+	// Exec/WriterServiceAccount are empty when the chart disabled them.
+	ExecServiceAccount   string
+	WriterServiceAccount string
+
 	// ScannerAutoCopyPullSecrets lets image scans pull private images by copying
 	// the scanned workload's imagePullSecrets into the scanner namespace. On by
 	// default: the node-local image copy a scan reuses is routinely gone by scan
@@ -417,6 +426,10 @@ func FromEnv() (*Config, error) {
 		ScannerServiceAccount:     os.Getenv("SCANNER_SERVICE_ACCOUNT"),
 		ScriptServiceAccount:      os.Getenv("SCRIPT_SERVICE_ACCOUNT"),
 		ScriptWriteServiceAccount: os.Getenv("SCRIPT_WRITE_SERVICE_ACCOUNT"),
+		RunnerIdentityMode:        os.Getenv("RUNNER_IDENTITY_MODE"),
+		ReaderServiceAccount:      os.Getenv("READER_SERVICE_ACCOUNT"),
+		ExecServiceAccount:        os.Getenv("EXEC_SERVICE_ACCOUNT"),
+		WriterServiceAccount:      os.Getenv("WRITER_SERVICE_ACCOUNT"),
 		// On by default: an image scan runs the target image as its own container,
 		// and the node-local copy it relies on is routinely gone by scan time
 		// (containerd GCs the image record, the workload rolled, a spot node was

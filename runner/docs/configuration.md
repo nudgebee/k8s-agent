@@ -171,6 +171,18 @@ The agent's ServiceAccount needs:
 
 Scanners that need cluster-wide reads (`popeye_scan`, `krr_scan`, `trivy_cis_scan`) get them via the `SCANNER_SERVICE_ACCOUNT` — distinct from the agent's own SA so the agent can run with narrower permissions.
 
+### Runner identities
+
+With `RUNNER_IDENTITY_MODE=split` (the chart sets it with `runner.splitIdentities`, default true) the runner makes every Kubernetes call as the account matching it, using short-lived TokenRequest tokens it mints for them (`pkg/identity`):
+
+| Env | Chart sets it to | Used for |
+|---|---|---|
+| `READER_SERVICE_ACCOUNT` | `<release>-runner-reader` | informers, typed reads, kubectl reads |
+| `EXEC_SERVICE_ACCOUNT` | `<release>-runner-exec` (`runner.exec.enabled`) | `pod_bash_enricher`, terminal |
+| `WRITER_SERVICE_ACCOUNT` | `<release>-runner-writer` (`runner.changes.enabled`) | mutate actions, rightsizing apply, kubectl writes, `auth can-i`, profiler |
+
+The runner's own account keeps release-namespace housekeeping (script/scan pods, its own PrometheusRules) and mints the tokens. Each kubectl command runs with a private per-command kubeconfig for the reader or writer (a request's `identity` param can force `read`, or `write` when signed — see actions.md); caller identity/endpoint flags, `config`, `debug` and `-v` are refused in this mode. At startup each identity is proven (`SelfSubjectReview`, or a negative access probe where that API is not served) and checked for its permissions; a failing reader makes `/readyz` return 503 and informers do not start; a failing exec or writer only refuses those actions. Checks repeat every 5 minutes. Without the env var every call runs as the runner (legacy).
+
 ### Script and scan pod identity
 
 Pods the agent starts run under their own accounts, never the runner's (`templates/script-scanner-service-accounts.yaml`):

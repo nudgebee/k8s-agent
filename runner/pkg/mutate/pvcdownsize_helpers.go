@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/ptr"
 
 	"github.com/nudgebee/nudgebee-agent/pkg/podexec"
 )
@@ -251,6 +252,8 @@ func moverPod(name, srcPVC, dstPVC, image string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			// Copies files only; never calls the API, so it gets no token.
+			AutomountServiceAccountToken: ptr.To(false),
 			Containers: []corev1.Container{{
 				Name:            "data-copier",
 				Image:           image,

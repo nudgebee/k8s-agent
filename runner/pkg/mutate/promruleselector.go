@@ -37,7 +37,11 @@ func (m *Mutator) ruleSelectorLabels(ctx context.Context) map[string]string {
 	if m.dynamic == nil {
 		return nil
 	}
-	list, err := m.dynamic.Resource(prometheusGVR).Namespace(metav1.NamespaceAll).
+	read := m.dynamic
+	if m.readDynamic != nil {
+		read = m.readDynamic
+	}
+	list, err := read.Resource(prometheusGVR).Namespace(metav1.NamespaceAll).
 		List(ctx, metav1.ListOptions{})
 	if err != nil {
 		m.logger().Warn("mutate: cannot read Prometheus CRs to derive ruleSelector labels; "+

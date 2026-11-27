@@ -129,3 +129,20 @@ func TestScriptWriteAccessNeedsSignature(t *testing.T) {
 		}
 	}
 }
+
+// identity=write on a read command still needs a signature.
+func TestKubectlWriteIdentityHintNeedsSignature(t *testing.T) {
+	for _, tc := range []struct {
+		params map[string]any
+		want   bool
+	}{
+		{map[string]any{"command": "kubectl get pods"}, false},
+		{map[string]any{"command": "kubectl get pods", "identity": "read"}, false},
+		{map[string]any{"command": "kubectl get pods", "identity": "write"}, true},
+		{map[string]any{"command": "kubectl delete pod x", "identity": "read"}, true},
+	} {
+		if got := isWriteKubectlCommand(tc.params); got != tc.want {
+			t.Errorf("isWriteKubectlCommand(%v) = %v, want %v", tc.params, got, tc.want)
+		}
+	}
+}

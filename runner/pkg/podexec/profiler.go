@@ -977,7 +977,10 @@ func buildDebuggerPod(a buildDebuggerArgs) *corev1.Pod {
 			NodeName:      a.NodeName,
 			RestartPolicy: corev1.RestartPolicyNever,
 			HostPID:       true, // profiler reads /proc/<pid> across containers
-			Volumes:       volumes,
+			// Runs as the workload namespace's default account; it never calls
+			// the API, so it gets no token.
+			AutomountServiceAccountToken: ptr.To(false),
+			Volumes:                      volumes,
 			Containers: []corev1.Container{{
 				Name:    debuggerContainer,
 				Image:   a.Image,

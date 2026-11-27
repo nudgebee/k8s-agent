@@ -112,11 +112,13 @@ Use `target: "*"` only if the operator opts into wildcard mode (ON only when `*=
 | `get_resource` | Get one resource (or list of types) via dynamic client | `group`, `version`, `resource_type` (comma-separated allowed), `namespace`?, `name`?, `all_namespaces`? |
 | `get_resource_yaml` | Same, returned as YAML | (same) |
 | `list_resource_names` | Just names + namespaces | (same as get_resource) |
-| `kubectl_command_executor` | Run kubectl with read verbs only | `command` (full kubectl line) |
+| `kubectl_command_executor` | Run kubectl with read verbs only | `command` (full kubectl line), `identity`? (`read` / `write`, split identities only) |
 
 The read family also accepts the legacy/UI shape `kind` ("Deployment") in place of `group`/`version`/`resource_type` — it's resolved to the canonical GVR for common built-in kinds and the workload CRDs (see `pkg/kube/kind_resolver.go`). An explicit `resource_type` always wins over `kind`; arbitrary/CRD kinds not in the table must pass an explicit GVR.
 
 `kubectl_command_executor` enforces a **read-only verb allowlist**: `get`, `describe`, `logs`, `top`, `explain`, `api-resources`, `api-versions`, `version`, `cluster-info`, `config`, `auth`. Mutating verbs (`apply`, `delete`, `patch`, etc.) are rejected — they go through Group D actions instead, which need a valid relay signature. With `KUBECTL_ALLOW_WRITE` they run, and need a valid relay signature when the agent has the relay key.
+
+With split identities each segment runs as `runner-reader` (reads) or `runner-writer` (writes, `auth can-i`, `auth whoami`). The optional `identity` param overrides that classification: `read` runs every segment as the reader and is allowed for any request (it only removes rights; a write run as the reader is refused by the API server); `write` runs every segment as the writer, needs the writer identity and `KUBECTL_ALLOW_WRITE`, and counts as a write for signature checks. Any other value is refused.
 
 ## Group C — Pod-exec  🔐
 

@@ -230,10 +230,28 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		cfg.K8sWatchEnabled = false
 	}
 
+	// Identities: in split mode each Kubernetes call runs as the account that
+	// matches it (pkg/identity) — reads as the reader, exec as exec, changes as
+	// the writer — with tokens the runner mints for them. Legacy mode (a chart
+	// that predates split identities) uses the runner's own client everywhere.
+	ids, readerReady, err := setupIdentities(ctx, cfg, typedKube, dynamicKube, kubeRestCfg, logger)
+	if err != nil {
+		return err
+	}
+	rd := ids.Reader
+	ex := identityOrReader(ids, ids.Exec)
+	wr := identityOrReader(ids, ids.Writer)
+	if !readerReady {
+		// Informers that cannot list never sync; do not start them. The
+		// identity watcher restarts the agent once the reader passes.
+		cfg.DiscoveryEnabled = false
+		cfg.K8sWatchEnabled = false
+	}
+
 	// Service-discovery: only fills blank URLs, never overrides env. Mirrors
 	// the legacy PrometheusDiscovery / AlertManagerDiscovery / GrafanaLokiDiscovery.
 	// A 1h cache avoids hammering the API server.
-	disc := svcdiscover.New(typedKube, "")
+	disc := svcdiscover.New(rd.Typed, "")
 	if cfg.PrometheusURL == "" {
 		if !cfg.PrometheusDiscoveryEnabled {
 			logger.Info("prometheus discovery disabled (PROMETHEUS_DISCOVERY_ENABLED=false); only PROMETHEUS_URL is used")
@@ -497,7 +515,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// the typed client. Light-action — log read is non-mutating; no signature
 	// required for log reads.
 	if typedKube != nil {
-		logsEnr := enrichers.NewLogsEnricher(typedKube, cfg.AccountID)
+		logsEnr := enrichers.NewLogsEnricher(rd.Typed, cfg.AccountID)
 		handlers["logs_enricher"] = logsEnr.Handle
 		lightActions["logs_enricher"] = struct{}{}
 		logger.Info("logs_enricher enabled")
@@ -553,7 +571,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Warn("SERVICE_MAP_SOURCE needs ClickHouse, which is not configured; using prometheus", "value", cfg.ServiceMapSource)
 	}
 	if typedKube != nil {
-		smSvc.NodeAgentCount = nodeAgentCounter(typedKube, installNamespace(cfg))
+		smSvc.NodeAgentCount = nodeAgentCounter(rd.Typed, installNamespace(cfg))
 	}
 	smSvc.UseClickHouse(ch, smSource, logger)
 	smSvc.StartSummary(ctx)
@@ -567,12 +585,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	lightActions["api_traces_enricher_v2"] = struct{}{}
 
 	if cfg.KubeEnabled {
-		kc := kube.NewClient(dynamicKube, typedKube)
+		kc := kube.NewClient(rd.Dynamic, rd.Typed)
 		kc.MaxResultBytes = cfg.GetResourceMaxBytes
 		kc.SetUnscopedListLimit(cfg.GetResourceUnscopedConcurrency)
 		// AllowWrite lifts the read-only verb allowlist; gated by the chart's
 		// runner.enableWritePermissions, which also grants the write RBAC.
 		kx := &kube.KubectlExecutor{AllowWrite: cfg.KubectlAllowWrite} // uses kubectl on PATH
+		if ids.Split {
+			// Each kubectl command runs with its own short-lived kubeconfig
+			// for the reader or the writer, never the runner's credential.
+			kx.Credentials = kubectlCredentials(ids, kubeRestCfg, installNamespace(cfg))
+		}
 		kh := kube.Handlers(kc, kx, cfg.AccountID)
 		maps.Copy(handlers, kh)
 		for name := range kh {
@@ -599,7 +622,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if typedKube != nil {
 			handlers["list_helm_releases"] = func(ctx context.Context, p map[string]any) (any, error) {
 				ns, _ := p["namespace"].(string)
-				rels, err := discovery.ListHelmReleases(ctx, typedKube, ns)
+				rels, err := discovery.ListHelmReleases(ctx, rd.Typed, ns)
 				if err != nil {
 					return nil, err
 				}
@@ -640,7 +663,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	if cfg.PodExecEnabled {
-		execer := podexec.New(typedKube, kubeRestCfg)
+		execer := podexec.New(ex.Typed, ex.Rest)
 		// pod_profiler reuses the same gating: it spawns a privileged
 		// debugger pod + runs SPDY exec, both of which need the same
 		// signing posture as pod_bash_enricher. ProfilerHandler is
@@ -648,7 +671,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// SPDY); HandlersWithProfiler omits the action otherwise.
 		var profiler *podexec.ProfilerHandler
 		if kubeRestCfg != nil {
-			profiler = podexec.NewProfilerHandler(typedKube, kubeRestCfg)
+			// The profiler starts a privileged pod: a change.
+			profiler = podexec.NewProfilerHandler(wr.Typed, wr.Rest)
 			// Lets a request that carries no language resolve one from the
 			// node-agent's container_application_type metric — the signal
 			// the pod-details UI already uses. The pod_profiler playbook
@@ -713,13 +737,18 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				amHeaders[k] = v[0]
 			}
 		}
-		mut := mutate.New(typedKube, cfg.AlertManagerURL, amHeaders)
-		mut.SetDynamic(dynamicKube) // unlocks PrometheusRule CRUD actions
+		mut := mutate.New(wr.Typed, cfg.AlertManagerURL, amHeaders)
+		mut.SetDynamic(wr.Dynamic) // unlocks PrometheusRule CRUD actions
+		if ids.Split {
+			// Rules in the agent's own namespace are housekeeping (runner);
+			// the Prometheus selector lookup is a read.
+			mut.SetIdentityDynamics(dynamicKube, rd.Dynamic)
+		}
 		// SPDY exec capability for the rightsize_pvc downsize migration's
 		// data-mover pod. Without a REST config the downsize path errors at
 		// request time; expansion / replica / volume_delete still work.
 		if kubeRestCfg != nil {
-			mut.SetExec(podexec.New(typedKube, kubeRestCfg))
+			mut.SetExec(podexec.New(wr.Typed, wr.Rest))
 		}
 		// Required by the legacy alert-rule path.
 		installNs := installNamespace(cfg)
@@ -765,7 +794,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// typedKube (may be nil) enables zero-downtime in-place pod resize; the
 		// rightsizer falls back to the template rollout when it's unavailable or
 		// the cluster is < 1.33.
-		rs := rightsize.New(promClient, dynamicKube, typedKube)
+		rs := rightsize.New(promClient, wr.Dynamic, wr.Typed)
+		rs.SetReaders(rd.Dynamic, rd.Typed)
 		maps.Copy(handlers, rightsize.Handlers(rs))
 		lightActions["continuous_rightsizing"] = struct{}{}
 		// recommend_only runs read usage and patch nothing.
@@ -783,7 +813,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// and is NOT a lightAction (an unsigned WS delivery of a mutation is
 	// correctly rejected). Skipped when the dynamic client is unavailable.
 	if dynamicKube != nil {
-		handlers["rightsizing_resource"] = rightsize.NewApplier(dynamicKube).Handle
+		handlers["rightsizing_resource"] = rightsize.NewApplier(wr.Dynamic).Handle
 		logger.Info("rightsizing_resource enabled")
 	} else {
 		logger.Warn("rightsizing_resource disabled — needs a dynamic K8s client")
@@ -874,6 +904,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	mreg := metrics.New()
+	guardIdentityActions(handlers, ids)
 	disp := dispatch.New(dispatch.Config{
 		Logger:          logger,
 		LongTaskTimeout: longTaskTimeout,
@@ -889,7 +920,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// loops (after errgroup is built).
 	var shellMgr *podshell.Manager
 	if typedKube != nil && kubeRestCfg != nil {
-		shellMgr = podshell.NewManager(typedKube, kubeRestCfg)
+		shellMgr = podshell.NewManager(ex.Typed, ex.Rest)
 		disp.SetTerminal(&shellTerminalAdapter{m: shellMgr})
 		logger.Info("pod_shell enabled")
 	}
@@ -964,7 +995,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 	var sharedFactory informers.SharedInformerFactory
 	if typedKube != nil && (cfg.DiscoveryEnabled || cfg.K8sWatchEnabled) {
-		sharedFactory = discovery.NewFactory(typedKube, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
+		sharedFactory = discovery.NewFactory(rd.Typed, cfg.DiscoveryResync, cfg.K8sWatchEnabled)
 	}
 	smInventory, ok := servicemap.ParseInventory(cfg.ServiceMapInventory)
 	if !ok {
@@ -989,7 +1020,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// per request, so no restart and no re-registration is needed.
 	if watchForPrometheus && typedKube != nil {
 		g.Go(func() error {
-			svcdiscover.WatchUntilFound(gctx, typedKube, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
+			svcdiscover.WatchUntilFound(gctx, rd.Typed, "", svcdiscover.PrometheusSelectors, promDiscoveryInterval, func(u string) {
 				promClient.SetURL(u)
 				logger.Info("prometheus discovered after startup; prometheus_* actions, rightsizing and service-map now use it", "url", redact.URL(u))
 			})
@@ -1044,7 +1075,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// without a typed client the correction falls back to the alert's own
 		// labels, and the backend corrects what reaches it either way.
 		if typedKube != nil {
-			fwd.SetNodeLocator(newNodeLocator(typedKube))
+			fwd.SetNodeLocator(newNodeLocator(rd.Typed))
 		}
 		fwd.OnShed = func(source string) { mreg.ForwardShed.WithLabelValues(source).Inc() }
 		fwd.OnForward = mreg.OnAlertForwarded
@@ -1087,9 +1118,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		eng := triggers.NewEngine(specs, time.Now()).WithLogger(logger)
 		if typedKube != nil {
-			eventsLister := newK8sEventsLister(typedKube)
+			eventsLister := newK8sEventsLister(rd.Typed)
 			if cfg.TriggerEventsCache {
-				cached, err := newCachedEventsLister(typedKube, eventsLister)
+				cached, err := newCachedEventsLister(rd.Typed, eventsLister)
 				if err != nil {
 					logger.Warn("events cache unavailable; evidence tables use live List calls", "err", err)
 				} else {
@@ -1105,7 +1136,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			// Service's selector against live pods + workload templates.
 			// Without it (no K8s client) that matcher never fires. The
 			// dynamic client (nilable) adds the Argo Rollouts template sweep.
-			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(typedKube, dynamicKube))
+			eng = eng.WithServiceBackendsLister(newServiceBackendsLister(rd.Typed, rd.Dynamic))
 		}
 		fwd.Engine = &triggerAdapter{e: eng}
 		logger.Info("trigger engine enabled", "matcher_count", len(specs))
@@ -1124,8 +1155,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				},
 			}, fwd, eng.Handles, mreg, logger)
 			kw.RegisterShared(sharedFactory)
-			kw.RegisterOwn(typedKube)
-			kw.RegisterRollouts(gctx, typedKube, dynamicKube)
+			kw.RegisterOwn(rd.Typed)
+			kw.RegisterRollouts(gctx, rd.Typed, rd.Dynamic)
 			g.Go(func() error {
 				logger.Info("starting k8s watch (kubewatch posts are ignored)")
 				if err := kw.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -1137,6 +1168,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		mux := http.NewServeMux()
 		mux.Handle("/", fwd.Mux())
 		mux.Handle("/metrics", mreg.Handler())
+		mux.HandleFunc("/readyz", readyzHandler(ids))
 		// pprof: the runner exhibits transient heap bursts (live heap stays
 		// small, heap_sys spikes to >1.5GB then releases). Expose the
 		// standard profiles so `go tool pprof` can attribute allocations —
@@ -1242,7 +1274,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		var k8sServerVersion string
 		if typedKube != nil {
 			detectCtx, detectCancel := context.WithTimeout(gctx, 10*time.Second)
-			providerInfo = telemetry.DetectProvider(detectCtx, typedKube, logger)
+			providerInfo = telemetry.DetectProvider(detectCtx, rd.Typed, logger)
 			detectCancel()
 			logger.Info("cluster provider detected",
 				"provider", providerInfo.Provider,
@@ -1255,7 +1287,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			// (Provider/Version)" cell; stays "GKE /" without it. Stable
 			// per cluster lifetime; cached on the Service struct and
 			// emitted on every tick.
-			if serverVersion, err := typedKube.Discovery().ServerVersion(); err != nil {
+			if serverVersion, err := rd.Typed.Discovery().ServerVersion(); err != nil {
 				logger.Warn("k8s server version fetch failed", "err", err)
 			} else {
 				k8sServerVersion = serverVersion.GitVersion
@@ -1271,7 +1303,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		promRuleClusterWrite := false
 		if alertRuleLocatorWrites {
 			rbacCtx, rbacCancel := context.WithTimeout(gctx, 10*time.Second)
-			promRuleClusterWrite = telemetry.CanUpdatePrometheusRulesClusterWide(rbacCtx, typedKube, logger)
+			promRuleClusterWrite = telemetry.CanUpdatePrometheusRulesClusterWide(rbacCtx, wr.Typed, logger)
 			rbacCancel()
 			logger.Info("prometheusrule write capability", "cluster_wide", promRuleClusterWrite)
 		}
@@ -1295,7 +1327,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				defer probeCancel()
 				probeClient := &http.Client{Timeout: 5 * time.Second}
 				logsProvider, logsURL, logsOK, logsErr, logCfg := probeLogsProvider(probeCtx, cfg)
-				as := telemetry.DetectAutoScaler(probeCtx, typedKube, providerInfo.Provider, logger)
+				as := telemetry.DetectAutoScaler(probeCtx, rd.Typed, providerInfo.Provider, logger)
 				clickhouseStatus, clickhouseErr := probeClickhouse(probeCtx, probeClient, clickhouseHost, clickhousePort)
 				chLogsPresent, chLogsErr, chLogsTable := clickhouseLogsStatus(probeCtx, queryCh, cfg.ClickHouseLogsDatabase, cfg.ClickHouseLogsTable)
 				promConnected, promErr := prometheusConnected(probeCtx, promClient, logger)
@@ -1339,6 +1371,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 
 					RelaySignatureVerification:   relayVerifier.Enabled(),
 					WriteActionsRequireSignature: writesNeedSignature,
+
+					IdentityMode:     identityMode(ids),
+					IdentityProblems: identityProblems(ids),
 				}
 			},
 			LightActions: func() []string {
@@ -1382,7 +1417,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	if cfg.DiscoveryEnabled {
 		discoverySink := discovery.NewSink(cfg.BackendEndpoint, cfg.AuthSecretKey, cfg.AccountID, cfg.ClusterName, logger)
 		discoverySink.Metrics = mreg
-		discSvc := discovery.NewServiceWithFactory(typedKube, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
+		discSvc := discovery.NewServiceWithFactory(rd.Typed, discoverySink, sharedFactory, cfg.DiscoveryResync, logger)
 		discSvc.SetOptions(discovery.Options{
 			SnapshotBatching:  cfg.DiscoverySnapshotBatching,
 			BatchSize:         cfg.DiscoveryBatchSize,
@@ -1396,7 +1431,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if dynamicKube != nil {
 			// Argo Rollouts inventory. No-ops (with a log) when the Rollout CRD
 			// is not served or the rollouts RBAC is absent.
-			discSvc.RegisterRollouts(gctx, dynamicKube)
+			discSvc.RegisterRollouts(gctx, rd.Dynamic)
 		}
 		g.Go(func() error {
 			logger.Info("starting discovery", "resync", cfg.DiscoveryResync)
@@ -1411,7 +1446,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// cluster. The Prometheus source skips itself while no URL is known.
 		var kubeForRules *kube.Client
 		if dynamicKube != nil {
-			kubeForRules = kube.NewClient(dynamicKube, typedKube)
+			kubeForRules = kube.NewClient(rd.Dynamic, rd.Typed)
 		}
 		ar := &discovery.AlertRulesCollector{
 			Prom:   promClient,
@@ -1943,7 +1978,9 @@ func isWriteHTTPMethod(params map[string]any) bool {
 // when the read-only executor would refuse it.
 func isWriteKubectlCommand(params map[string]any) bool {
 	command, _ := params["command"].(string)
-	return !kube.IsReadOnlyCommand(command)
+	// identity=write runs the command as the writer whatever the parser says,
+	// so it needs the same signature as a write.
+	return !kube.IsReadOnlyCommand(command) || kube.IsWriteIdentityHint(params)
 }
 
 // isRightsizingApply marks a continuous_rightsizing run as a write unless its

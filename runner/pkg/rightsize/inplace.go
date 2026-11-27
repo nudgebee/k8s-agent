@@ -64,7 +64,7 @@ func (r *Rightsizer) supportsInPlaceResize() bool {
 	if r.client == nil {
 		return false
 	}
-	v, err := r.client.Discovery().ServerVersion()
+	v, err := r.readerClient().Discovery().ServerVersion()
 	if err != nil || v == nil {
 		return false
 	}
@@ -91,7 +91,7 @@ func (r *Rightsizer) applyInPlace(ctx context.Context, app Application, obj *uns
 		sel = append(sel, k+"="+v)
 	}
 	sort.Strings(sel) // deterministic selector string
-	podList, err := r.client.CoreV1().Pods(app.Namespace).List(ctx, metav1.ListOptions{LabelSelector: strings.Join(sel, ",")})
+	podList, err := r.readerClient().CoreV1().Pods(app.Namespace).List(ctx, metav1.ListOptions{LabelSelector: strings.Join(sel, ",")})
 	if err != nil || len(podList.Items) == 0 {
 		return false // listing failed / no pods → fall back rather than abort
 	}
@@ -116,7 +116,7 @@ func (r *Rightsizer) applyInPlace(ctx context.Context, app Application, obj *uns
 	defer timer.Stop()
 	for attempt := 0; attempt < resizePollAttempts; attempt++ {
 		for name := range pending {
-			p, err := r.client.CoreV1().Pods(app.Namespace).Get(ctx, name, metav1.GetOptions{})
+			p, err := r.readerClient().CoreV1().Pods(app.Namespace).Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
 				continue
 			}

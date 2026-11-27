@@ -26,6 +26,19 @@
         "relay_address": { "type": "string" },
         "enableWritePermissions": { "type": "boolean", "description": "Let the agent change workloads (remediation actions)." },
         "readOnly": { "type": "boolean", "description": "Install a strictly read-only role." },
+        "splitIdentities": { "type": "boolean", "description": "Make each Kubernetes call as the reader, exec or writer account matching it." },
+        "exec": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "description": "Create the exec identity (pod_bash_enricher, terminal)." }
+          }
+        },
+        "changes": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "description": "Create the writer identity (remediation, rightsizing apply, kubectl writes)." }
+          }
+        },
         "scriptPods": {
           "type": "object",
           "properties": {
