@@ -34,7 +34,7 @@ func testEvent(ns, name, kind, objName, reason string, last time.Time) *corev1.E
 // liveStub records that a lookup fell through to the live lister.
 type liveStub struct{ calls int }
 
-func (s *liveStub) ListEvents(context.Context, string, string, string, int) ([]triggers.K8sEvent, error) {
+func (s *liveStub) ListEvents(context.Context, string, string, string, string, int) ([]triggers.K8sEvent, error) {
 	s.calls++
 	return []triggers.K8sEvent{{Reason: "live"}}, nil
 }
@@ -82,7 +82,7 @@ func TestCachedEventsLister_LookupShapes(t *testing.T) {
 	ctx := context.Background()
 
 	// Subject: one object, its namespace only, newest first.
-	got, err := l.ListEvents(ctx, "prod", "Pod", "web-0", 30)
+	got, err := l.ListEvents(ctx, "prod", "", "Pod", "web-0", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,19 +91,19 @@ func TestCachedEventsLister_LookupShapes(t *testing.T) {
 	}
 
 	// Node: cluster-wide by involved object.
-	got, _ = l.ListEvents(ctx, "", "Node", "node-1", 10)
+	got, _ = l.ListEvents(ctx, "", "", "Node", "node-1", 10)
 	if r := strings.Join(reasons(got), ","); r != "NodeNotReady" {
 		t.Errorf("node events = %s; want NodeNotReady", r)
 	}
 
 	// Namespace-wide, capped to the limit, newest first.
-	got, _ = l.ListEvents(ctx, "prod", "", "", 2)
+	got, _ = l.ListEvents(ctx, "prod", "", "", "", 2)
 	if r := strings.Join(reasons(got), ","); r != "Updated,BackOff" {
 		t.Errorf("namespace events = %s; want Updated,BackOff", r)
 	}
 
 	// kubewatch reports some kinds lower-case.
-	got, _ = l.ListEvents(ctx, "prod", "configmap", "cfg", 10)
+	got, _ = l.ListEvents(ctx, "prod", "", "configmap", "cfg", 10)
 	if len(got) != 1 {
 		t.Errorf("lower-case kind lookup = %v; want the ConfigMap event", reasons(got))
 	}
@@ -142,7 +142,7 @@ func TestCachedEventsLister_FallsBackUntilSynced(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Not started: never synced.
-	got, _ := l.ListEvents(context.Background(), "prod", "Pod", "web-0", 30)
+	got, _ := l.ListEvents(context.Background(), "prod", "", "Pod", "web-0", 30)
 	if live.calls != 1 || len(got) != 1 || got[0].Reason != "live" {
 		t.Errorf("unsynced lookup = %v (live calls %d); want the live lister's answer", reasons(got), live.calls)
 	}

@@ -33,13 +33,13 @@ const supplementaryEventsLimit = 10
 //
 // Returns nil when no lister is wired, when the lister errored, or
 // when there are no events to surface.
-func recentEventsTable(ec EnrichContext, namespace, kind, name, title string, limit int) []EvidenceBlock {
+func recentEventsTable(ec EnrichContext, namespace, apiGroup, kind, name, title string, limit int) []EvidenceBlock {
 	if ec.EventsLister == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), recentEventsTimeout)
 	defer cancel()
-	events, err := ec.EventsLister.ListEvents(ctx, namespace, kind, name, limit)
+	events, err := ec.EventsLister.ListEvents(ctx, namespace, apiGroup, kind, name, limit)
 	if err != nil || len(events) == 0 {
 		return nil
 	}

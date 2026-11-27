@@ -74,9 +74,9 @@ func (l *cachedEventsLister) Run(ctx context.Context) {
 	l.inf.Run(ctx.Done())
 }
 
-func (l *cachedEventsLister) ListEvents(ctx context.Context, namespace, kind, name string, limit int) ([]triggers.K8sEvent, error) {
+func (l *cachedEventsLister) ListEvents(ctx context.Context, namespace, apiGroup, kind, name string, limit int) ([]triggers.K8sEvent, error) {
 	if !l.inf.HasSynced() {
-		return l.live.ListEvents(ctx, namespace, kind, name, limit)
+		return l.live.ListEvents(ctx, namespace, apiGroup, kind, name, limit)
 	}
 	var (
 		objs []any
@@ -89,7 +89,7 @@ func (l *cachedEventsLister) ListEvents(ctx context.Context, namespace, kind, na
 		objs, err = l.inf.GetIndexer().ByIndex(cache.NamespaceIndex, namespace)
 	default:
 		// Not a shape the engine asks for; keep the live behaviour.
-		return l.live.ListEvents(ctx, namespace, kind, name, limit)
+		return l.live.ListEvents(ctx, namespace, apiGroup, kind, name, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -103,6 +103,11 @@ func (l *cachedEventsLister) ListEvents(ctx context.Context, namespace, kind, na
 		// A subject lookup is scoped to the subject's namespace; a Node
 		// lookup passes "" and takes events from every namespace.
 		if namespace != "" && e.Namespace != namespace {
+			continue
+		}
+		// The index is by bare kind, so a custom resource and a built-in
+		// kind of the same name share a bucket; the group separates them.
+		if !inAPIGroup(e.InvolvedObject.APIVersion, apiGroup) {
 			continue
 		}
 		events = append(events, toAgentEvent(e))
@@ -133,9 +138,10 @@ func trimEvent(obj any) (any, error) {
 			CreationTimestamp: e.CreationTimestamp,
 		},
 		InvolvedObject: corev1.ObjectReference{
-			Kind:      e.InvolvedObject.Kind,
-			Namespace: e.InvolvedObject.Namespace,
-			Name:      e.InvolvedObject.Name,
+			APIVersion: e.InvolvedObject.APIVersion,
+			Kind:       e.InvolvedObject.Kind,
+			Namespace:  e.InvolvedObject.Namespace,
+			Name:       e.InvolvedObject.Name,
 		},
 		Type:                e.Type,
 		Reason:              e.Reason,

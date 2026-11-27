@@ -162,3 +162,23 @@ func TestGetResource_RedactsSecretValues(t *testing.T) {
 		t.Errorf("YAML still carries the secret value:\n%s", y)
 	}
 }
+
+func TestIsSecretBearingResource(t *testing.T) {
+	for _, c := range []struct {
+		group, resource string
+		want            bool
+	}{
+		{"external-secrets.io", "externalsecrets", true},
+		{"bitnami.com", "sealedsecrets", true},
+		{"anything.example.com", "secretstores", true}, // matched without the group: a miss cannot leak
+		{"operator.victoriametrics.com", "vmusers", true},
+		{"operator.victoriametrics.com", "VMAlertManagers", true},
+		{"operator.victoriametrics.com", "vmagents", false},
+		{"other.io", "vmusers", false},
+		{"cert-manager.io", "certificates", false},
+	} {
+		if got := IsSecretBearingResource(c.group, c.resource); got != c.want {
+			t.Errorf("IsSecretBearingResource(%q, %q) = %v, want %v", c.group, c.resource, got, c.want)
+		}
+	}
+}

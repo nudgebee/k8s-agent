@@ -34,6 +34,12 @@ type Registry struct {
 	KubewatchMatch     *prometheus.HistogramVec // labels: kind; predicates + evidence lookups
 	K8sWatchEvents     *prometheus.CounterVec   // labels: kind, outcome; the runner's own watch (pkg/k8swatch)
 	K8sWatchPending    prometheus.Gauge         // objects with changes waiting to be matched
+	// K8sWatchCustomResources counts listed custom resources by state
+	// (watching / unresolved / refused), set once at start.
+	K8sWatchCustomResources *prometheus.GaugeVec
+	// K8sWatchCustomResourceErrors counts list/watch failures of a watched
+	// custom resource, by qualified kind (a version removed by an upgrade).
+	K8sWatchCustomResourceErrors *prometheus.CounterVec
 }
 
 // New builds the registry and pre-registers all collectors.
@@ -126,6 +132,16 @@ func New() *Registry {
 		Name:      "k8s_watch_pending",
 		Help:      "Objects with changes waiting to be matched by the runner's own watch.",
 	})
+	reg.K8sWatchCustomResources = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "k8s_watch_custom_resources",
+		Help:      "Custom resources listed for change tracking, by state at runner start: watching, unresolved (not served or not listable; picked up on the next restart), refused (can hold credentials).",
+	}, []string{"state"})
+	reg.K8sWatchCustomResourceErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "nudgebee_agent",
+		Name:      "k8s_watch_custom_resource_errors_total",
+		Help:      "List/watch failures of a watched custom resource, by qualified kind. Persistent failures usually mean its version was removed; restart the runner.",
+	}, []string{"kind"})
 
 	r.MustRegister(
 		reg.ActionsTotal,
@@ -143,6 +159,8 @@ func New() *Registry {
 		reg.KubewatchMatch,
 		reg.K8sWatchEvents,
 		reg.K8sWatchPending,
+		reg.K8sWatchCustomResources,
+		reg.K8sWatchCustomResourceErrors,
 	)
 	return reg
 }
@@ -202,6 +220,16 @@ func (r *Registry) OnK8sWatchEvent(kind, outcome string) {
 
 // SetK8sWatchPending satisfies k8swatch.Metrics.
 func (r *Registry) SetK8sWatchPending(n int) { r.K8sWatchPending.Set(float64(n)) }
+
+// SetK8sWatchCustomResources satisfies k8swatch.CustomResourceMetrics.
+func (r *Registry) SetK8sWatchCustomResources(state string, n int) {
+	r.K8sWatchCustomResources.WithLabelValues(state).Set(float64(n))
+}
+
+// OnK8sWatchCustomResourceError satisfies k8swatch.CustomResourceMetrics.
+func (r *Registry) OnK8sWatchCustomResourceError(kind string) {
+	r.K8sWatchCustomResourceErrors.WithLabelValues(kind).Inc()
+}
 
 // OnKubewatchEvent satisfies alerts.KubewatchMetrics.
 func (r *Registry) OnKubewatchEvent(kind, outcome string) {

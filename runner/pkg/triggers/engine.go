@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type Engine struct {
 	eventsLister    K8sEventsLister       // optional; threaded into EnrichBlocks
 	serviceBackends ServiceBackendsLister // optional; threaded into PredicateCtx + EnrichBlocks
 	churn           *ChurnSuppressor      // frequency-based suppression for SuppressChurn matchers
+	crChurn         *ChurnSuppressor      // the same for custom-resource matchers (APIGroup set), with their own thresholds
 	logger          *slog.Logger          // optional; used to report churn classifications
 }
 
@@ -32,9 +34,11 @@ type Engine struct {
 // be `time.Now()` at process start — used by the resync grace window.
 func NewEngine(specs []MatcherSpec, agentStartTime time.Time) *Engine {
 	return &Engine{
-		specs:       specs,
-		rl:          NewRateLimiter(0),
-		churn:       NewChurnSuppressor(0, 0, 0, 0),
+		specs: specs,
+		rl:    NewRateLimiter(0),
+		churn: NewChurnSuppressor(0, 0, 0, 0),
+		crChurn: NewChurnSuppressor(0, CustomResourceChurnThreshold,
+			CustomResourceChurnWindow, CustomResourceChurnCooldown).MuteAtThreshold(),
 		startTime:   agentStartTime,
 		graceWindow: DefaultGraceWindow,
 		now:         time.Now,
@@ -86,12 +90,12 @@ func (e *Engine) enrichContext() EnrichContext {
 // Centralizing this in the engine — rather than per-matcher EnrichBlocks
 // — lets every matcher (current + future) inherit the evidence without
 // repeating the same recentEventsTable call.
-func (e *Engine) fetchSubjectEvents(kind, namespace, name string) []EvidenceBlock {
+func (e *Engine) fetchSubjectEvents(apiGroup, kind, namespace, name string) []EvidenceBlock {
 	if e.eventsLister == nil || namespace == "" || name == "" || kind == "" {
 		return nil
 	}
 	return recentEventsTable(EnrichContext{EventsLister: e.eventsLister},
-		namespace, kind, name, "Recent "+kind+" events", recentEventsLimit)
+		namespace, apiGroup, kind, name, "Recent "+kind+" events", recentEventsLimit)
 }
 
 // fetchNodeEvents builds a "Recent Node events on <node>" table for the
@@ -104,7 +108,7 @@ func (e *Engine) fetchNodeEvents(node string) []EvidenceBlock {
 		return nil
 	}
 	return recentEventsTable(EnrichContext{EventsLister: e.eventsLister},
-		"", "Node", node, "Recent Node events on "+node, supplementaryEventsLimit)
+		"", "", "Node", node, "Recent Node events on "+node, supplementaryEventsLimit)
 }
 
 // fetchNamespaceEvents builds a "Recent events in namespace <ns>" table
@@ -115,7 +119,7 @@ func (e *Engine) fetchNamespaceEvents(namespace string) []EvidenceBlock {
 		return nil
 	}
 	return recentEventsTable(EnrichContext{EventsLister: e.eventsLister},
-		namespace, "", "", "Recent events in namespace "+namespace, supplementaryEventsLimit)
+		namespace, "", "", "", "Recent events in namespace "+namespace, supplementaryEventsLimit)
 }
 
 // Match runs every matcher against the event and returns one Match per
@@ -184,20 +188,35 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		if !e.rl.Allow(spec.Name+":"+fingerprint, spec.RateLimit) {
 			continue
 		}
+		var muteNote EvidenceBlock
 		if spec.SuppressChurn {
-			allowed, classified := e.churn.Allow(spec.Name + ":" + fingerprint)
-			if classified && e.logger != nil {
+			churn := e.churn
+			if spec.APIGroup != "" {
+				churn = e.crChurn
+			}
+			d := churn.AllowDetail(spec.Name + ":" + fingerprint)
+			if d.Classified && e.logger != nil {
 				// Announced once per cooldown. A resource that silently stops
 				// producing events looks identical to one that stopped
 				// changing, which is an expensive ambiguity mid-incident.
 				name, namespace, _, _ := SubjectFromObj(ev.Kind, ev.Obj)
 				e.logger.Info("change suppressed: resource rewrites itself continuously",
 					"matcher", spec.Name, "namespace", namespace, "name", name,
-					"threshold", e.churn.threshold, "window", e.churn.window,
-					"cooldown", e.churn.cooldown)
+					"threshold", churn.threshold, "window", churn.window,
+					"cooldown", churn.cooldown)
 			}
-			if !allowed {
+			if !d.Allowed {
 				continue
+			}
+			if d.Classified {
+				// The mute started on this fire (custom resources), so the
+				// Finding itself says so: the log line above is not where
+				// anyone looking at the change history will look.
+				muteNote = EvidenceBlock{
+					"type": "markdown",
+					"data": fmt.Sprintf("%d changes in %s: further changes to this object are not reported until %s.",
+						churn.threshold, churn.window, d.MutedUntil.UTC().Format(time.RFC3339)),
+				}
 			}
 		}
 
@@ -205,6 +224,15 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		var extra []EvidenceBlock
 		if spec.EnrichBlocks != nil {
 			extra = spec.EnrichBlocks(ev.Obj, ev.OldObj, ec)
+		}
+		if muteNote != nil {
+			extra = append(extra, muteNote)
+		}
+		// A custom resource is looked up by its bare kind within its group;
+		// a built-in kind by its kind alone.
+		eventsKind := ev.Kind
+		if spec.SubjectKind != "" {
+			eventsKind = spec.SubjectKind
 		}
 		// Default evidence: three K8s events tables per match —
 		//   1. subject events (Pod / Deployment / Job / ...)
@@ -215,14 +243,14 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 		// the primary finding (sick node, sibling-pod failures) so users
 		// don't have to leave the Finding card to triage. All three are
 		// skipped when the lister isn't wired (unit tests / no K8s client).
-		extra = append(extra, e.fetchSubjectEvents(ev.Kind, namespace, name)...)
+		extra = append(extra, e.fetchSubjectEvents(spec.APIGroup, eventsKind, namespace, name)...)
 		extra = append(extra, e.fetchNodeEvents(node)...)
 		extra = append(extra, e.fetchNamespaceEvents(namespace)...)
 		occurrenceKey := ""
 		if spec.OccurrenceKeyFn != nil {
 			occurrenceKey = spec.OccurrenceKeyFn(ev.Obj)
 		}
-		matches = append(matches, Match{
+		m := Match{
 			Spec:             spec,
 			Fingerprint:      fingerprint,
 			OccurrenceKey:    occurrenceKey,
@@ -232,7 +260,15 @@ func (e *Engine) Match(ev IncomingK8sEvent) []Match {
 			SubjectKind:      lowerKind,
 			SubjectNode:      node,
 			ExtraBlocks:      extra,
-		})
+		}
+		if spec.APIGroup != "" {
+			// Unattributed: no owner, so neither the subject owner nor the
+			// service key can tie the change to a workload.
+			m.Owner = OwnerRef{}
+			m.SubjectDisplayKind = spec.SubjectKind
+			m.Unattributed = true
+		}
+		matches = append(matches, m)
 	}
 	return matches
 }

@@ -12,7 +12,9 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -172,6 +174,13 @@ type Config struct {
 	// watch, lower-case (nil: every kind a matcher reads).
 	K8sWatchNamespace string
 	K8sWatchKinds     []string
+	// K8sWatchCustomResources are the custom resources whose changes the
+	// runner's watch reports (configuration_change Findings with a diff).
+	// From K8S_WATCH_CUSTOM_RESOURCES, a JSON list; see
+	// ParseK8sWatchCustomResources. K8sWatchCustomResourcesErr is why the
+	// value was rejected, for main to log; the list is then empty.
+	K8sWatchCustomResources    []K8sWatchCustomResource
+	K8sWatchCustomResourcesErr error
 	// TriggerEventsCache serves the evidence tables on a matched Finding
 	// (recent subject / node / namespace events) from a trimmed Event
 	// informer instead of three API List calls per match. Default true.
@@ -457,6 +466,7 @@ func FromEnv() (*Config, error) {
 		ClickHouseReaderUser:       os.Getenv("CLICKHOUSE_READER_USER"),
 	}
 	c.ClickHouseLogsDatabase = cmp(os.Getenv("CLICKHOUSE_LOGS_DATABASE"), c.ClickHouseDB)
+	c.K8sWatchCustomResources, c.K8sWatchCustomResourcesErr = ParseK8sWatchCustomResources(os.Getenv("K8S_WATCH_CUSTOM_RESOURCES"))
 	// Azure token endpoint defaults to the tenant-scoped login URL, mirroring
 	// the legacy f-string default (utils.py).
 	if c.AzureTokenEndpoint == "" {
@@ -531,6 +541,45 @@ func parseDuration(s string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// K8sWatchCustomResource is one entry of K8S_WATCH_CUSTOM_RESOURCES.
+type K8sWatchCustomResource struct {
+	Group    string `json:"group"`
+	Resource string `json:"resource"`
+	// Version is optional; empty means the API server's preferred version
+	// at runner start.
+	Version string `json:"version,omitempty"`
+	// DiffPaths are the top-level fields diffed and sent; empty means
+	// ["spec"].
+	DiffPaths []string `json:"diffPaths,omitempty"`
+}
+
+// ParseK8sWatchCustomResources parses K8S_WATCH_CUSTOM_RESOURCES. Empty is no
+// entries. Malformed JSON, an entry without a group or resource, or a
+// diffPaths entry naming metadata (always sent) or a nested path is an error,
+// and no entries are returned: an operator who listed resources must see the
+// value refused, not watch a subset of it.
+func ParseK8sWatchCustomResources(s string) ([]K8sWatchCustomResource, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var out []K8sWatchCustomResource
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil, fmt.Errorf("K8S_WATCH_CUSTOM_RESOURCES is not a JSON list: %w", err)
+	}
+	for i, e := range out {
+		if strings.TrimSpace(e.Group) == "" || strings.TrimSpace(e.Resource) == "" {
+			return nil, fmt.Errorf("K8S_WATCH_CUSTOM_RESOURCES[%d]: group and resource are required", i)
+		}
+		for _, p := range e.DiffPaths {
+			if p == "" || p == "metadata" || p == "apiVersion" || p == "kind" || strings.ContainsAny(p, ".[") {
+				return nil, fmt.Errorf("K8S_WATCH_CUSTOM_RESOURCES[%d]: diffPaths entry %q must be a top-level field other than metadata, apiVersion and kind", i, p)
+			}
+		}
+	}
+	return out, nil
 }
 
 // ParseTriggerRateLimits parses a "name=duration,name=duration" string into
