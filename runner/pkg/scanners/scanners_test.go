@@ -145,10 +145,24 @@ func TestBuildJob_ServiceAccountFallback(t *testing.T) {
 		t.Errorf("SA fallback = %q; want default-sa", got)
 	}
 
-	// Server-supplied ServiceAccount wins.
-	job = r.BuildJob(JobSpec{NamePrefix: "x", Image: "x:1", ServiceAccount: "explicit-sa"}, "x-2", "u")
-	if got := job.Spec.Template.Spec.ServiceAccountName; got != "explicit-sa" {
-		t.Errorf("explicit SA = %q; want explicit-sa", got)
+	// A server-supplied ServiceAccount is ignored: it could name the runner's
+	// own account.
+	job = r.BuildJob(JobSpec{NamePrefix: "x", Image: "x:1", ServiceAccount: "runner-service-account"}, "x-2", "u")
+	if got := job.Spec.Template.Spec.ServiceAccountName; got != "default-sa" {
+		t.Errorf("requested SA = %q; want default-sa", got)
+	}
+}
+
+func TestBuildJob_TokenMount(t *testing.T) {
+	r := NewRunner(fake.NewClientset(), "ns", "default-sa")
+
+	job := r.BuildJob(JobSpec{NamePrefix: "x", Image: "x:1"}, "x-1", "u")
+	if got := job.Spec.Template.Spec.AutomountServiceAccountToken; got == nil || !*got {
+		t.Errorf("default automount = %v; want true", got)
+	}
+	job = r.BuildJob(JobSpec{NamePrefix: "x", Image: "x:1", NoAPIAccess: true}, "x-2", "u")
+	if got := job.Spec.Template.Spec.AutomountServiceAccountToken; got == nil || *got {
+		t.Errorf("no_api_access automount = %v; want false", got)
 	}
 }
 

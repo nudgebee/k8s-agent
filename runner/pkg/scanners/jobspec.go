@@ -18,7 +18,11 @@ type JobSpec struct {
 	Command        []string          `json:"command,omitempty"`         // optional ENTRYPOINT override
 	Args           []string          `json:"args,omitempty"`            // container args
 	Env            map[string]string `json:"env,omitempty"`             // simple key/value env
-	ServiceAccount string            `json:"service_account,omitempty"` // empty → cfg.ScannerServiceAccount default
+	ServiceAccount string            `json:"service_account,omitempty"` // ignored: scan pods always run as cfg.ScannerServiceAccount
+
+	// NoAPIAccess mounts no service account token, for scans that never call
+	// the Kubernetes API (image_scanner). Old agents ignore the field.
+	NoAPIAccess bool `json:"no_api_access,omitempty"`
 
 	Privileged  bool `json:"privileged,omitempty"`   // securityContext.privileged
 	HostPID     bool `json:"host_pid,omitempty"`     // pod.spec.hostPID

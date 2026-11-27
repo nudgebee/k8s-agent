@@ -614,6 +614,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	if cfg.ScannersEnabled {
+		if cfg.ScriptServiceAccount == "" {
+			// A chart older than this image: its SCANNER_SERVICE_ACCOUNT is the
+			// runner's own account, so scan Jobs keep the runner's rights.
+			logger.Warn("SCRIPT_SERVICE_ACCOUNT is not set (chart older than the image): scan Jobs run as SCANNER_SERVICE_ACCOUNT, which older charts set to the runner's own account; upgrade the chart to run them as the read-only <release>-scanner account",
+				"service_account", cfg.ScannerServiceAccount)
+		}
 		runner := scanners.NewRunner(typedKube, cfg.ScannerNamespace, cfg.ScannerServiceAccount)
 		runner.AutoCopyPullSecrets = cfg.ScannerAutoCopyPullSecrets
 		sh := scanners.Handlers(runner)
@@ -664,9 +670,21 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		// image + sources env vars from a k8s Secret + returns logs as a
 		// JsonBlock-wrapped Finding — the wire shape api-server's
 		// relay.CommandExecutor, runbook-server, and llm-server all expect).
-		// Service account: uses ScannerServiceAccount when set so we don't
-		// add a new env knob just for this; falls back to "" (cluster default).
-		runner := podrunner.New(typedKube, cfg.ScannerNamespace, cfg.ScannerServiceAccount, cfg.AccountID)
+		// Service account: the chart's <release>-script (cluster reads, no writes),
+		// never the runner's own. A request may opt down to no token
+		// (cluster_access=none) or, when the chart created one, up to the
+		// <release>-script-write (cluster_access=write, signed requests only — see the
+		// validator's SignedOnly below).
+		scriptSA := cfg.ScriptServiceAccount
+		if scriptSA == "" {
+			// A chart older than this image sets no SCRIPT_SERVICE_ACCOUNT;
+			// keep its behaviour rather than fall to the namespace default.
+			scriptSA = cfg.ScannerServiceAccount
+			logger.Warn("SCRIPT_SERVICE_ACCOUNT is not set: script pods run as the scanner service account; upgrade the chart to run them as the read-only <release>-script account",
+				"service_account", scriptSA)
+		}
+		runner := podrunner.New(typedKube, cfg.ScannerNamespace, scriptSA, cfg.AccountID)
+		runner.WriteServiceAccount = cfg.ScriptWriteServiceAccount
 		rh := podrunner.Handlers(runner)
 		maps.Copy(handlers, rh)
 		// By trust posture pod_script_run_enricher belongs with pod_bash_enricher
@@ -682,7 +700,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		logger.Info("pod-runner enabled",
 			"default_namespace", cfg.ScannerNamespace,
-			"service_account", cfg.ScannerServiceAccount,
+			"service_account", scriptSA,
+			"write_service_account", cfg.ScriptWriteServiceAccount,
 			"actions", len(rh))
 	}
 
@@ -794,6 +813,18 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		logger.Warn("WRITE_ACTIONS_REQUIRE_SIGNATURE is off: these actions run without a relay signature", "actions", sortedNames(writeLightActions))
 	default:
 		logger.Warn("RELAY_SIGNING_PUBLIC_KEY is not set: these actions run without a relay signature; set runner.nudgebee.relay_signing_public_key to require one", "actions", sortedNames(writeLightActions))
+	}
+	// A script that asks for <release>-script-write (cluster_access=write) needs a
+	// valid relay signature whatever the switches above say: it runs
+	// caller-chosen code with the runner's write rights.
+	if cfg.PodExecEnabled && cfg.ScriptWriteServiceAccount != "" {
+		// Already present means nil: every request is signed-only already.
+		if _, ok := signedOnly["pod_script_run_enricher"]; !ok {
+			signedOnly["pod_script_run_enricher"] = podrunner.IsWriteRequest
+		}
+		if !relayVerifier.Enabled() {
+			logger.Warn("SCRIPT_WRITE_SERVICE_ACCOUNT is set but RELAY_SIGNING_PUBLIC_KEY is not; every cluster_access=write script request will be refused")
+		}
 	}
 	if cfg.PodScriptRunRequireSignature {
 		signedOnly["pod_script_run_enricher"] = nil

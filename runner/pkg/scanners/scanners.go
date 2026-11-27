@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -69,7 +70,7 @@ const (
 type Runner struct {
 	Client            kubernetes.Interface
 	Namespace         string // hard-clamped — server cannot override
-	DefaultSA         string // applied when JobSpec.ServiceAccount == ""
+	DefaultSA         string // every scan pod runs as this; JobSpec.ServiceAccount is ignored
 	MaxConcurrentJobs int    // 0 → defaultMaxConcurrent
 	LogCapBytes       int    // 0 → defaultLogCapBytes
 
@@ -143,9 +144,12 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		}
 	}
 
-	saName := spec.ServiceAccount
-	if saName == "" {
-		saName = r.DefaultSA
+	// Every scan pod runs as the agent's scanner account. A caller-named account
+	// could be any account in this namespace, the runner's own included.
+	saName := r.DefaultSA
+	if spec.ServiceAccount != "" && spec.ServiceAccount != saName {
+		slog.Warn("schedule_k8s_job: ignoring requested service account",
+			"requested", spec.ServiceAccount, "using", saName, "job", jobName)
 	}
 
 	podSpec := corev1.PodSpec{
@@ -157,7 +161,9 @@ func (r *Runner) BuildJob(spec JobSpec, jobName, jobUUID string) *batchv1.Job {
 		NodeName:           spec.NodeName,
 		NodeSelector:       spec.NodeSelector,
 		ServiceAccountName: saName,
-		Volumes:            spec.Volumes,
+		// NoAPIAccess drops the token for scans that never call the API.
+		AutomountServiceAccountToken: ptr.To(!spec.NoAPIAccess),
+		Volumes:                      spec.Volumes,
 	}
 
 	ttl := jobTTLSeconds

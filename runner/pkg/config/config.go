@@ -218,6 +218,14 @@ type Config struct {
 	ScannerNamespace      string
 	ScannerServiceAccount string
 
+	// ScriptServiceAccount is the account pod_script_run_enricher pods run as
+	// (the chart's <release>-script: cluster reads, no writes). Empty on a chart that
+	// predates it; main then falls back to ScannerServiceAccount.
+	ScriptServiceAccount string
+	// ScriptWriteServiceAccount is the account a signed script request with
+	// cluster_access=write runs as. Empty unless runner.scriptPods.allowWrite.
+	ScriptWriteServiceAccount string
+
 	// ScannerAutoCopyPullSecrets lets image scans pull private images by copying
 	// the scanned workload's imagePullSecrets into the scanner namespace. On by
 	// default: the node-local image copy a scan reuses is routinely gone by scan
@@ -404,9 +412,11 @@ func FromEnv() (*Config, error) {
 		PodScriptRunRequireSignature:   envBool("POD_SCRIPT_RUN_REQUIRE_SIGNATURE", false),
 		WriteActionsRequireSignature:   envBool("WRITE_ACTIONS_REQUIRE_SIGNATURE", true),
 		// Off by default — these need extra config (scanner SA, GCP ADC):
-		ScannersEnabled:       envBool("SCANNERS_ENABLED", false),
-		ScannerNamespace:      cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
-		ScannerServiceAccount: os.Getenv("SCANNER_SERVICE_ACCOUNT"),
+		ScannersEnabled:           envBool("SCANNERS_ENABLED", false),
+		ScannerNamespace:          cmp(os.Getenv("SCANNER_NAMESPACE"), "nudgebee-agent"),
+		ScannerServiceAccount:     os.Getenv("SCANNER_SERVICE_ACCOUNT"),
+		ScriptServiceAccount:      os.Getenv("SCRIPT_SERVICE_ACCOUNT"),
+		ScriptWriteServiceAccount: os.Getenv("SCRIPT_WRITE_SERVICE_ACCOUNT"),
 		// On by default: an image scan runs the target image as its own container,
 		// and the node-local copy it relies on is routinely gone by scan time
 		// (containerd GCs the image record, the workload rolled, a spot node was

@@ -26,6 +26,12 @@
         "relay_address": { "type": "string" },
         "enableWritePermissions": { "type": "boolean", "description": "Let the agent change workloads (remediation actions)." },
         "readOnly": { "type": "boolean", "description": "Install a strictly read-only role." },
+        "scriptPods": {
+          "type": "object",
+          "properties": {
+            "allowWrite": { "type": "boolean", "description": "Create a write-capable identity that signed script requests can ask for." }
+          }
+        },
         "nudgebee": {
           "type": "object",
           "properties": {

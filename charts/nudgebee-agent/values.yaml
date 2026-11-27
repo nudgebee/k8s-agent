@@ -285,6 +285,19 @@ runner:
   # refused, since none can be verified. With the key set,
   # writeActionsRequireSignature already covers this action.
   podScriptRunRequireSignature: false
+  # Identities for the pods the runner starts (script pods and scan Jobs).
+  # They never run as the runner's own service account: by default they run as
+  # read-only accounts (<release>-script for scripts, <release>-scanner for
+  # scans): they can read the cluster (get/list/watch, no Secrets) but not
+  # change it or exec into pods.
+  scriptPods:
+    # Create <release>-script-write, bound to the runner's own ClusterRole, and let
+    # a script request ask for it (cluster_access: write). Such a request also
+    # needs a valid relay signature, so it is refused without
+    # runner.nudgebee.relay_signing_public_key. A script running as the writer
+    # can do whatever the runner can, including listing Secrets when
+    # helmReleaseDiscovery is on. Incompatible with runner.readOnly.
+    allowWrite: false
   # Let image scans pull private workload images by copying the scanned pod's
   # imagePullSecrets into the scanner namespace for the duration of the scan
   # Job. An image scan runs the target image as its own container, and the

@@ -206,8 +206,16 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     {{- end }}
     - name: SCANNER_NAMESPACE
       value: {{ .Release.Namespace }}
+    # Script pods and scan Jobs run as their own read-only accounts, not as
+    # the runner (templates/script-scanner-service-accounts.yaml).
     - name: SCANNER_SERVICE_ACCOUNT
-      value: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+      value: {{ include "nudgebee-agent.fullname" . }}-scanner
+    - name: SCRIPT_SERVICE_ACCOUNT
+      value: {{ include "nudgebee-agent.fullname" . }}-script
+    {{- if .Values.runner.scriptPods.allowWrite }}
+    - name: SCRIPT_WRITE_SERVICE_ACCOUNT
+      value: {{ include "nudgebee-agent.fullname" . }}-script-write
+    {{- end }}
     # SCANNER_AUTO_COPY_PULL_SECRETS lets an image scan pull a private workload
     # image by copying that workload's imagePullSecrets into this namespace for
     # the life of the scan Job. Opt-in: it needs read access to registry
@@ -747,4 +755,326 @@ as on, as in the chart defaults.
 {{- end -}}
 {{- end -}}
 {{- join "," $kinds -}}
+{{- end }}
+
+{{/*
+Read-only (get/list/watch) cluster rules shared by the read-only runner
+ClusterRole (runner-service-account-readonly.yaml) and the
+script-scanner-read ClusterRole that script and scan pods run under
+(script-scanner-service-accounts.yaml).
+No Secrets, no write verbs. Emitted as list items indented two spaces.
+*/}}
+{{- define "nudgebee-agent.readOnlyClusterRules" }}
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - daemonsets
+      - deployments
+      - events
+      - namespaces
+      - persistentvolumes
+      - persistentvolumeclaims
+      - pods
+      - pods/status
+      - pods/log
+      - replicasets
+      - replicationcontrollers
+      - services
+      - serviceaccounts
+      - endpoints
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "apiregistration.k8s.io"
+    resources:
+      - apiservices
+    verbs:
+      - get
+      - list
+
+  - apiGroups:
+      - "rbac.authorization.k8s.io"
+    resources:
+      - clusterroles
+      - clusterrolebindings
+      - roles
+      - rolebindings
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "autoscaling"
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+      - deployments
+      - deployments/scale
+      - replicasets
+      - replicasets/scale
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - extensions
+    resources:
+      - daemonsets
+      - deployments
+      - deployments/scale
+      - ingresses
+      - replicasets
+      - replicasets/scale
+      - replicationcontrollers/scale
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "events.k8s.io"
+    resources:
+      - events
+    verbs:
+      - get
+      - list
+
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "policy"
+    resources:
+      - poddisruptionbudgets
+      - podsecuritypolicies
+    verbs:
+      - get
+      - list
+
+  - apiGroups:
+      - "scheduling.k8s.io"
+    resources:
+      - priorityclasses
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "storage.k8s.io"
+    resources:
+      - storageclasses
+      - volumeattachments
+      - csidrivers
+      - csinodes
+      - csistoragecapacities
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "coordination.k8s.io"
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "discovery.k8s.io"
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "node.k8s.io"
+    resources:
+      - runtimeclasses
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "admissionregistration.k8s.io"
+    resources:
+      - mutatingwebhookconfigurations
+      - validatingwebhookconfigurations
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "flowcontrol.apiserver.k8s.io"
+    resources:
+      - flowschemas
+      - prioritylevelconfigurations
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - cert-manager.io
+    resources:
+      - certificates
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - "monitoring.coreos.com"
+    resources:
+      - prometheusrules
+    verbs:
+      - get
+      - list
+
+  # ruleSelector discovery: the runner reads the Prometheus CR's
+  # spec.ruleSelector.matchLabels so UI-created PrometheusRules carry the
+  # labels prometheus-operator requires before it will load them. Read-only.
+  - apiGroups:
+      - "monitoring.coreos.com"
+    resources:
+      - prometheuses
+    verbs:
+      - get
+      - list
+
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+
+  # Argo Rollouts read permissions are granted unconditionally. An RBAC rule
+  # for an absent CRD is inert and becomes active the moment Argo Rollouts is
+  # installed (see runner-service-account.yaml for the full rationale).
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - rollouts
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Karpenter read permissions are granted unconditionally. An RBAC rule for
+  # an absent CRD is inert and becomes active the moment karpenter is
+  # installed (see runner-service-account.yaml for the full rationale).
+  - apiGroups:
+      - karpenter.sh
+    resources:
+      - nodepools
+      - nodepools/status
+      - nodeclaims
+      - nodeclaims/status
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - karpenter.k8s.aws
+    resources:
+      - ec2nodeclasses
+    verbs:
+      - get
+      - list
+      - watch
+
+  - apiGroups:
+      - karpenter.azure.com
+    resources:
+      - aksnodeclasses
+    verbs:
+      - get
+      - list
+      - watch
+
+{{- if .Capabilities.APIVersions.Has "snapshot.storage.k8s.io/v1/VolumeSnapshot" }}
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - watch
+{{- end }}
+{{- end }}
+
+{{/*
+OpenShift additions to the read-only rules: `use` on the agent SCCs and
+monitoring reads. Renders nothing unless openshift.enabled.
+*/}}
+{{- define "nudgebee-agent.openshiftReadOnlyClusterRules" }}
+{{- if .Values.openshift.enabled }}
+  - apiGroups:
+    - security.openshift.io
+    resources:
+    - securitycontextconstraints
+    verbs:
+    - use
+    resourceNames:
+    - {{ if .Values.openshift.createScc }}"{{ include "nudgebee-agent.fullname" . }}-scc"{{ else }}{{ .Values.openshift.sccName | quote }}{{ end }}
+{{- if .Values.openshift.createPrivilegedScc }}
+    - {{ include "nudgebee-agent.fullname" . }}-scc-privileged
+{{- end }}
+{{- if .Values.openshift.privilegedSccName }}
+    - {{ .Values.openshift.privilegedSccName }}
+{{- end }}
+  - apiGroups:
+    - monitoring.coreos.com
+    resources:
+    - servicemonitors
+    - prometheusrules
+    - alertmanagers
+    - silences
+    - podmonitors
+    verbs:
+    - get
+    - list
+    - watch
+{{- end }}
 {{- end }}

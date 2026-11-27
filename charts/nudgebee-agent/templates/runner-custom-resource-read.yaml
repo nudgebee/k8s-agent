@@ -77,6 +77,17 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-script
+    namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-scanner
+    namespace: {{ .Release.Namespace }}
+  {{- if .Values.runner.scriptPods.allowWrite }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-script-write
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
 {{- if $cr.viewRole }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -91,5 +102,16 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
     namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-script
+    namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-scanner
+    namespace: {{ .Release.Namespace }}
+  {{- if .Values.runner.scriptPods.allowWrite }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-script-write
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
 {{- end }}
 {{- end }}
