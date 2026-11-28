@@ -25,6 +25,7 @@ func TestParseSource(t *testing.T) {
 		want Source
 	}{
 		{"", SourcePrometheus}, {"prometheus", SourcePrometheus}, {" ClickHouse ", SourceClickHouse}, {"shadow", SourceShadow},
+		{"timeseries", SourceTimeSeries}, {" TimeSeries ", SourceTimeSeries},
 	} {
 		if got, ok := ParseSource(tc.in); !ok || got != tc.want {
 			t.Errorf("ParseSource(%q) = %q, %v; want %q, true", tc.in, got, ok, tc.want)

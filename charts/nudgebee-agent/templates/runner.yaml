@@ -246,6 +246,13 @@ stringData:
   TRACE_TABLE: {{ .Values.runner.trace_table }}
   {{- end }}
   {{- if .Values.runner.serviceMapSource }}
+  {{- /* timeseries reads ClickHouse's Prometheus query API, which only
+         clickhouse.timeseries.enabled sets up: without it the map would
+         query a handler and table that are not there. With ClickHouse off
+         the runner falls back to prometheus on its own. */}}
+  {{- if and (eq (lower (toString .Values.runner.serviceMapSource)) "timeseries") .Values.runner.clickhouse_enabled (not (dig "timeseries" "enabled" false (default (dict) .Values.clickhouse))) }}
+  {{- fail "runner.serviceMapSource=timeseries needs clickhouse.timeseries.enabled=true: it reads ClickHouse's Prometheus query API and TimeSeries table, which that setting creates. Turn it on, or set runner.serviceMapSource to prometheus." }}
+  {{- end }}
   SERVICE_MAP_SOURCE: {{ .Values.runner.serviceMapSource | quote }}
   {{- end }}
   {{- with .Values.runner.serviceMapInventory }}

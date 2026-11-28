@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,113 @@ const (
 	oneSeries = `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"2052"]}]}}`
 	noSeries  = `{"status":"success","data":{"resultType":"vector","result":[]}}`
 )
+
+func TestClickhouseTimeSeriesURL(t *testing.T) {
+	base := config.Config{ClickHouseEnabled: true, ClickHouseHost: "nudgebee-agent-clickhouse", ClickHousePort: 8123}
+	for _, tc := range []struct {
+		name string
+		edit func(*config.Config)
+		want string
+	}{
+		{"clickhouse", func(*config.Config) {}, "http://nudgebee-agent-clickhouse:8123/prometheus"},
+		{"prometheus configured too", func(c *config.Config) { c.PrometheusURL = "http://prom:9090" }, "http://nudgebee-agent-clickhouse:8123/prometheus"},
+		{"clickhouse disabled", func(c *config.Config) { c.ClickHouseEnabled = false }, ""},
+		{"no host", func(c *config.Config) { c.ClickHouseHost = "" }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.edit(&cfg)
+			if got := clickhouseTimeSeriesURL(&cfg); got != tc.want {
+				t.Errorf("clickhouseTimeSeriesURL = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// SERVICE_MAP_SOURCE=timeseries gives the service map a client of its own on
+// ClickHouse, with the ClickHouse user and without the Prometheus headers,
+// while the shared client stays on the configured Prometheus. Any other
+// source, or no ClickHouse, keeps the shared client.
+func TestServiceMapPromQL(t *testing.T) {
+	ch := &fakeClickHouse{body: func() (int, string) { return 200, oneSeries }}
+	chSrv := httptest.NewServer(ch)
+	t.Cleanup(chSrv.Close)
+	host, port, _ := strings.Cut(strings.TrimPrefix(chSrv.URL, "http://"), ":")
+	chPort, _ := strconv.Atoi(port)
+
+	var promCalls atomic.Int32
+	promSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		promCalls.Add(1)
+		_, _ = w.Write([]byte(oneSeries))
+	}))
+	t.Cleanup(promSrv.Close)
+
+	base := config.Config{
+		PrometheusURL:     promSrv.URL,
+		ClickHouseEnabled: true, ClickHouseHost: host, ClickHousePort: chPort,
+		ClickHouseUser: "default", ClickHousePassword: "pw",
+	}
+	for _, tc := range []struct {
+		name           string
+		edit           func(*config.Config)
+		wantTimeSeries bool
+	}{
+		{"timeseries with a prometheus configured", func(c *config.Config) { c.ServiceMapSource = "timeseries" }, true},
+		{"timeseries without clickhouse", func(c *config.Config) {
+			c.ServiceMapSource = "timeseries"
+			c.ClickHouseEnabled = false
+		}, false},
+		{"prometheus", func(c *config.Config) { c.ServiceMapSource = "prometheus" }, false},
+		{"clickhouse summary tables", func(c *config.Config) { c.ServiceMapSource = "clickhouse" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.edit(&cfg)
+			prom := prometheus.New(cfg.PrometheusURL, &http.Client{Timeout: 5 * time.Second})
+			prom.ExtraHeaders = http.Header{"X-Scope-Orgid": {"tenant"}}
+			before := ch.calls()
+			promCalls.Store(0)
+
+			c, hasPrometheus, ts := serviceMapPromQL(&cfg, prom, clickhousePromQLURL(&cfg))
+			if ts != tc.wantTimeSeries {
+				t.Fatalf("timeSeries = %v; want %v", ts, tc.wantTimeSeries)
+			}
+			if prom.URL() != promSrv.URL {
+				t.Errorf("shared client moved to %q; want it on the Prometheus", prom.URL())
+			}
+			if _, err := c.Query(context.Background(), "up", "", ""); err != nil {
+				t.Fatalf("query: %v", err)
+			}
+			if !tc.wantTimeSeries {
+				if c != prom || !hasPrometheus() || promCalls.Load() != 1 || ch.calls() != before {
+					t.Errorf("want the shared Prometheus client: same=%v hasPrometheus=%v prom calls=%d clickhouse calls=%d",
+						c == prom, hasPrometheus(), promCalls.Load(), ch.calls()-before)
+				}
+				return
+			}
+			if c == prom || hasPrometheus() || promCalls.Load() != 0 || ch.calls() != before+1 {
+				t.Fatalf("want a ClickHouse client of its own: same=%v hasPrometheus=%v prom calls=%d clickhouse calls=%d",
+					c == prom, hasPrometheus(), promCalls.Load(), ch.calls()-before)
+			}
+			if len(c.ExtraHeaders) != 0 {
+				t.Errorf("ClickHouse client carries the Prometheus headers %v", c.ExtraHeaders)
+			}
+			ch.mu.Lock()
+			defer ch.mu.Unlock()
+			if got := ch.auth[len(ch.auth)-1]; got != "default:pw" {
+				t.Errorf("ClickHouse got auth %q; want the ClickHouse user", got)
+			}
+			if got := ch.paths[len(ch.paths)-1]; got != "/prometheus/api/v1/query" {
+				t.Errorf("ClickHouse got path %q", got)
+			}
+			// The map's own client goes through clickhouseQueryLimits too, so
+			// its queries are bounded like every other PromQL to ClickHouse.
+			if got := ch.params[len(ch.params)-1]; got.Get("max_memory_usage") == "" || got.Get("max_execution_time") == "" || got.Has("timeout") {
+				t.Errorf("ClickHouse got params %v; want max_memory_usage and max_execution_time, no timeout", got)
+			}
+		})
+	}
+}
 
 func TestClickhousePromQLURL(t *testing.T) {
 	base := config.Config{ClickHouseEnabled: true, ClickHouseHost: "nudgebee-agent-clickhouse", ClickHousePort: 8123}
