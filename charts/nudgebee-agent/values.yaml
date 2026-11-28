@@ -663,7 +663,8 @@ opentelemetry-collector:
   # collector exits when that fails, so a collector that starts before
   # ClickHouse (every install, and an upgrade that restarts both) crash-looped
   # until ClickHouse was up. It waits for the host and port of
-  # config.exporters.clickhouse.endpoint (the subchart fills in the {{ }}),
+  # config.exporters.clickhouse.endpoint, rendered as the collector's config
+  # renders it, so an endpoint with {{ }} in it resolves the same way,
   # without a time limit, and does not wait when that exporter is gone. The
   # image is the base of the runner's image. Helm replaces lists: an override
   # of initContainers drops this one unless it repeats it.
@@ -673,7 +674,7 @@ opentelemetry-collector:
       imagePullPolicy: IfNotPresent
       env:
         - name: CLICKHOUSE_ENDPOINT
-          value: '{{ with .Values.config.exporters.clickhouse }}{{ .endpoint }}{{ end }}'
+          value: '{{ with .Values.config.exporters.clickhouse }}{{ tpl (toString .endpoint) $ }}{{ end }}'
       command:
         - /bin/bash
         - -c

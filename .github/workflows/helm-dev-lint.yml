@@ -417,7 +417,11 @@ jobs:
           dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "nudgebee-agent-opentelemetry-collector")
           init = [c for c in dep["spec"]["template"]["spec"].get("initContainers") or [] if c["name"] == "wait-for-clickhouse"]
           assert len(init) == 1, "no wait-for-clickhouse init container"
-          print(next(e["value"] for e in init[0]["env"] if e["name"] == "CLICKHOUSE_ENDPOINT"))'
+          waits = next(e["value"] for e in init[0]["env"] if e["name"] == "CLICKHOUSE_ENDPOINT")
+          cm = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "nudgebee-agent-opentelemetry-collector")
+          exports = yaml.safe_load(cm["data"]["relay"])["exporters"]["clickhouse"]["endpoint"]
+          assert waits == exports, f"waits for {waits!r}, exports to {exports!r}"
+          print(waits)'
           }
           fail() { echo "$*"; exit 1; }
           case "$(endpoint)" in tcp://nudgebee-agent-clickhouse:9000\?*) ;; *) fail "default: endpoint not filled in";; esac
