@@ -1025,6 +1025,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 	}
 	smSvc.Inventory = smInventory
+	if smTimeSeries && smInventory != servicemap.InventoryKubernetes {
+		// ClickHouse's TimeSeries table holds node-agent metrics only, no
+		// kube_* series: the kube_* queries would come back empty and the map
+		// would have no pods or services. Put the map back on the shared
+		// client, which has them.
+		logger.Warn("SERVICE_MAP_SOURCE=timeseries needs the kubernetes inventory (ClickHouse holds no kube_* series); the service map uses the Prometheus client", "inventory", string(smInventory))
+		smSvc.Prom, smSvc.HasPrometheus = sharedServiceMapPromQL(promClient, chPromQL)
+	}
 	logger.Info("service map inventory", "inventory", string(smInventory))
 
 	// Keep looking for a Prometheus we could not find at boot, and point the

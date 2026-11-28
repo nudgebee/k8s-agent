@@ -436,7 +436,11 @@ runner:
   #               configured or discovered: only the service map moves, the
   #               other PromQL users (rightsizing, prometheus_* actions,
   #               enrichers) keep that Prometheus. Creates no tables. With
-  #               ClickHouse disabled it falls back to prometheus.
+  #               ClickHouse disabled it falls back to prometheus. Needs
+  #               serviceMapInventory: kubernetes (the TimeSeries table has no
+  #               kube_* series; otherwise the runner warns and uses
+  #               prometheus), and the chart refuses to render it with
+  #               ClickHouse on but clickhouse.timeseries.enabled off.
   # shadow and clickhouse need the OTel collector to scrape node-agent /metrics
   # into ClickHouse with cumulative_to_delta applied, and a ClickHouse that
   # holds this cluster's metrics only (the bundled one does). They create
