@@ -19,7 +19,11 @@ spec:
         component: runner
         nudgebeeComponent: "runner"
       annotations:
+        {{- if eq (toString .Values.runner.rolloutOnUpgrade) "true" }}
         rollme: {{ randAlphaNum 5 | quote }}
+        {{- else }}
+        checksum/values: {{ toJson .Values | sha256sum }}
+        {{- end }}
       {{- if or .Values.runner.annotations .Values.globalConfig.custom_annotations }}
         {{- if .Values.runner.annotations}} {{ toYaml .Values.runner.annotations | nindent 8 }}
         {{- end }}

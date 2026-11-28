@@ -1,0 +1,154 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nudgebeeagents.agent.nudgebee.com
+spec:
+  group: agent.nudgebee.com
+  names:
+    kind: NudgebeeAgent
+    listKind: NudgebeeAgentList
+    plural: nudgebeeagents
+    singular: nudgebeeagent
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NudgebeeAgent is the Schema for the nudgebeeagents API
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Chart values. The fields listed here are typed; any other chart value is passed through.
+            type: object
+            required: [runner, clickhouse]
+            x-kubernetes-preserve-unknown-fields: true
+            properties:
+              runner:
+                type: object
+                required: [nudgebee]
+                x-kubernetes-preserve-unknown-fields: true
+                properties:
+                  readOnly:
+                    type: boolean
+                    default: true
+                    description: Run the runner with a read-only role.
+                  enableWritePermissions:
+                    type: boolean
+                    default: false
+                    description: Grant write permissions when readOnly is false.
+                  nudgebee:
+                    type: object
+                    required: [authSecretKeyFrom]
+                    x-kubernetes-preserve-unknown-fields: true
+                    properties:
+                      authSecretKeyFrom:
+                        type: object
+                        description: Secret holding <access_key>:<access_secret>.
+                        required: [name, key]
+                        properties:
+                          name: {type: string, minLength: 1}
+                          key: {type: string, minLength: 1}
+              nodeAgent:
+                type: object
+                default: {}
+                x-kubernetes-preserve-unknown-fields: true
+                properties:
+                  enabled:
+                    type: boolean
+                    default: true
+                    description: Run the eBPF node agent (privileged).
+              clickhouse:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+                # The operator's trial render cannot read the cluster, so any value
+                # the chart would generate or look up must be given here.
+                x-kubernetes-validations:
+                # The collector's values name the Secret and key literally.
+                - rule: "!self.enabled || (has(self.auth) && has(self.auth.existingSecret) && self.auth.existingSecret == 'nudgebee-agent-clickhouse')"
+                  message: create the Secret nudgebee-agent-clickhouse and set auth.existingSecret to that name, or set enabled to false
+                - rule: "!self.enabled || !has(self.auth) || !has(self.auth.existingSecretKey) || self.auth.existingSecretKey in ['', 'admin-password']"
+                  message: the password must be under the key admin-password
+                - rule: "!self.enabled || !has(self.timeseries) || !has(self.timeseries.enabled) || !self.timeseries.enabled || (has(self.timeseries.clusterName) && self.timeseries.clusterName != '')"
+                  message: set timeseries.clusterName when timeseries.enabled is true
+                properties:
+                  enabled:
+                    type: boolean
+                    default: true
+                    description: Install ClickHouse for traces.
+                  auth:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                    properties:
+                      existingSecret:
+                        type: string
+                        description: >-
+                          Secret you create with the ClickHouse password under admin-password.
+                          Must be named nudgebee-agent-clickhouse.
+                      existingSecretKey:
+                        type: string
+                        description: Only admin-password is supported.
+                  timeseries:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                    properties:
+                      enabled:
+                        type: boolean
+                      clusterName:
+                        type: string
+                        description: Cluster label for node-agent metrics.
+                  podSecurityContext:
+                    type: object
+                    default: {}
+                    x-kubernetes-preserve-unknown-fields: true
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                        description: Off so that OpenShift assigns the user ID.
+                  containerSecurityContext:
+                    type: object
+                    default: {}
+                    x-kubernetes-preserve-unknown-fields: true
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                        description: Off so that OpenShift assigns the user ID.
+              openshift:
+                type: object
+                default: {}
+                x-kubernetes-preserve-unknown-fields: true
+                properties:
+                  enabled:
+                    type: boolean
+                    default: true
+                    description: Apply OpenShift settings.
+                  createScc:
+                    type: boolean
+                    default: true
+                    description: Create the SCC for the runner and forwarder.
+                  createPrivilegedScc:
+                    type: boolean
+                    default: true
+                    description: Create the privileged SCC the node agent needs.
+          status:
+            description: Status defines the observed state of NudgebeeAgent
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

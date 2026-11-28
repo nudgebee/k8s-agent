@@ -1,0 +1,23 @@
+# Create the two Secrets first:
+#   kubectl -n nudgebee-agent create secret generic nudgebee-agent-auth \
+#     --from-literal=auth-key='<access_key>:<access_secret>'
+#   kubectl -n nudgebee-agent create secret generic nudgebee-agent-clickhouse \
+#     --from-literal=admin-password="$(openssl rand -hex 16)"
+apiVersion: agent.nudgebee.com/v1alpha1
+kind: NudgebeeAgent
+metadata:
+  # The chart's collector settings expect this name.
+  name: nudgebee-agent
+spec:
+  runner:
+    readOnly: true
+    nudgebee:
+      authSecretKeyFrom:
+        name: nudgebee-agent-auth
+        key: auth-key
+  nodeAgent:
+    enabled: true
+  clickhouse:
+    enabled: true
+    auth:
+      existingSecret: nudgebee-agent-clickhouse
