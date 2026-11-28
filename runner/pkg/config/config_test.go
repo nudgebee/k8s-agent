@@ -423,3 +423,25 @@ func TestFromEnv_PrometheusDiscoveryEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestParseK8sWatchCustomResources(t *testing.T) {
+	got, err := ParseK8sWatchCustomResources(`[{"group":"cert-manager.io","resource":"certificates"},{"group":"a.io","resource":"things","version":"v2","diffPaths":["spec","config"]}]`)
+	if err != nil || len(got) != 2 || got[1].Version != "v2" || len(got[1].DiffPaths) != 2 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got, err := ParseK8sWatchCustomResources("  "); got != nil || err != nil {
+		t.Errorf("empty = no entries, got %+v, %v", got, err)
+	}
+	for _, bad := range []string{
+		`{"group":"a.io"}`,                 // not a list
+		`[{"group":"","resource":"x"}]`,    // no group
+		`[{"group":"a.io","resource":""}]`, // no resource
+		`[{"group":"a.io","resource":"x","diffPaths":["metadata"]}]`,
+		`[{"group":"a.io","resource":"x","diffPaths":["spec.foo"]}]`,
+		`[{"group":"a.io","resource":"x","diffPaths":[""]}]`,
+	} {
+		if got, err := ParseK8sWatchCustomResources(bad); err == nil || got != nil {
+			t.Errorf("%s: want an error and no entries, got %+v, %v", bad, got, err)
+		}
+	}
+}

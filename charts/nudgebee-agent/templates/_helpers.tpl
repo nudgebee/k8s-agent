@@ -303,6 +303,10 @@ Runner container template. Invoked with root context: include "nudgebee.runner.c
     - name: K8S_WATCH_MAX_PENDING
       value: {{ .maxPending | quote }}
     {{- end }}
+    {{- with .customResources }}
+    - name: K8S_WATCH_CUSTOM_RESOURCES
+      value: {{ include "nudgebee-agent.k8sWatchCustomResources" $ | quote }}
+    {{- end }}
     {{- end }}
     {{- end }}
     {{- if .Values.runner.profilerImage }}
@@ -1140,4 +1144,38 @@ nonResourceURLs rules kept with `get`. Renders a YAML list or nothing.
 {{- end -}}
 {{- end -}}
 {{- if $out }}{{ toYaml $out }}{{ end -}}
+{{- end }}
+
+{{/*
+runner.k8sWatch.customResources, validated, as the JSON the runner reads from
+K8S_WATCH_CUSTOM_RESOURCES. Refuses what runner.customResourceRead refuses
+(the core group, "*", secrets); the runner itself refuses kinds that can hold
+credentials, from one list in pkg/kube/secretpolicy.go.
+*/}}
+{{- define "nudgebee-agent.k8sWatchCustomResources" -}}
+{{- $out := list -}}
+{{- range $i, $e := .Values.runner.k8sWatch.customResources -}}
+{{- if not (kindIs "map" $e) -}}
+{{- fail (printf "runner.k8sWatch.customResources[%d] must be a map with group and resource" $i) -}}
+{{- end -}}
+{{- /* RBAC matches group and resource names exactly, and both are lower-case. */ -}}
+{{- $group := lower (toString (default "" $e.group)) -}}
+{{- $resource := lower (toString (default "" $e.resource)) -}}
+{{- if or (eq $group "") (eq $group "*") -}}
+{{- fail (printf "runner.k8sWatch.customResources[%d]: group %q is not allowed; list custom resources only" $i $group) -}}
+{{- end -}}
+{{- if or (eq $resource "") (eq $resource "*") (eq (lower $resource) "secrets") -}}
+{{- fail (printf "runner.k8sWatch.customResources[%d]: resource %q is not allowed" $i $resource) -}}
+{{- end -}}
+{{- $entry := dict "group" $group "resource" $resource -}}
+{{- with $e.version }}{{- $_ := set $entry "version" (toString .) -}}{{- end -}}
+{{- with $e.diffPaths }}
+{{- if not (kindIs "slice" .) -}}
+{{- fail (printf "runner.k8sWatch.customResources[%d].diffPaths must be a list" $i) -}}
+{{- end -}}
+{{- $_ := set $entry "diffPaths" . -}}
+{{- end -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
+{{- toJson $out -}}
 {{- end }}

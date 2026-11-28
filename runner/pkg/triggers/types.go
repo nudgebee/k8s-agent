@@ -35,8 +35,21 @@ type MatcherSpec struct {
 	Name string
 
 	// Kind filters by `IncomingK8sEvent.Kind`. Use "Any" to match every
-	// kind (rarely needed; most matchers are kind-specific).
+	// kind (rarely needed; most matchers are kind-specific). A custom
+	// resource's kind is group-qualified ("Certificate.cert-manager.io"),
+	// so it never matches a built-in matcher of the same bare kind.
 	Kind string
+
+	// APIGroup is set for a custom-resource matcher (see
+	// CustomResourceChangeMatcher) and empty for every built-in one. A
+	// non-empty group makes the Finding unattributed: no owner walk and no
+	// service key, so the backend never links it to a same-named workload.
+	APIGroup string
+
+	// SubjectKind is the bare Kind ("Certificate") of a custom-resource
+	// matcher, used for the events lookup and user-facing text. Empty for
+	// built-in matchers, whose Kind is already bare.
+	SubjectKind string
 
 	// Operations filters by `IncomingK8sEvent.Operation`. Empty slice
 	// matches every operation. job_failure / pod_oom_killed fire on
@@ -174,9 +187,14 @@ type EnrichContext struct {
 // K8sEventsLister fetches recent K8s events for an object. The engine
 // uses it to attach three tables to every match by default:
 //
-//   - subject events:   ListEvents(ns, kind, name, …) — the matched object
-//   - node events:      ListEvents("", "Node", nodeName, …) — cluster-wide
-//   - namespace events: ListEvents(ns, "", "", …) — no involvedObject filter
+//   - subject events:   ListEvents(ns, group, kind, name, …) — the matched object
+//   - node events:      ListEvents("", "", "Node", nodeName, …) — cluster-wide
+//   - namespace events: ListEvents(ns, "", "", "", …) — no involvedObject filter
+//
+// apiGroup, when set, keeps only events whose involvedObject.apiVersion is in
+// that group (any version: controllers stamp the version they use), so a
+// custom resource's events are not mixed with a built-in kind of the same
+// bare name. Empty means no group filter.
 //
 // Empty kind/name means "no filter on that dimension"; empty namespace
 // means "cluster-wide" (Events("").List()). The implementation rejects
@@ -187,7 +205,7 @@ type EnrichContext struct {
 // with a short timeout. A nil lister is valid (tests, environments without a
 // K8s client) — matchers handle it by emitting a placeholder event-table block.
 type K8sEventsLister interface {
-	ListEvents(ctx context.Context, namespace, kind, name string, limit int) ([]K8sEvent, error)
+	ListEvents(ctx context.Context, namespace, apiGroup, kind, name string, limit int) ([]K8sEvent, error)
 }
 
 // ServiceBackendsLister resolves Service selectors against cluster state.
@@ -272,8 +290,16 @@ type Match struct {
 	// SubjectName / SubjectNamespace come from obj.metadata.
 	SubjectName      string
 	SubjectNamespace string
-	SubjectKind      string // lowercased; "pod" | "deployment" | etc.
+	SubjectKind      string // lowercased; "pod" | "deployment" | "certificate.cert-manager.io" | etc.
 	SubjectNode      string // obj.spec.nodeName when present
+
+	// SubjectDisplayKind is the Kind for user-facing text ("Certificate")
+	// when it differs from SubjectKind; empty for built-in kinds.
+	SubjectDisplayKind string
+
+	// Unattributed marks a Finding that must not be linked to a workload:
+	// a custom-resource change. The builder sends it with no service key.
+	Unattributed bool
 
 	// ExtraBlocks is populated from MatcherSpec.EnrichBlocks (when set).
 	// The Finding builder appends each one as a structured-data block

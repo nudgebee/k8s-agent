@@ -39,6 +39,29 @@ var secretBearingAPIResources = map[string]struct{}{
 	"secretstores":          {},
 }
 
+// secretBearingGroupResources are custom resources that carry credentials
+// inline in their spec, by API group. Unlike the kinds above they are not
+// refused for kubectl (their names are not distinctive enough to match
+// without the group); they are refused where the group is known: the runner's
+// custom-resource watch. runner.customResourceRead leaves the same two out of
+// its default grant for the same reason.
+var secretBearingGroupResources = map[string]map[string]struct{}{
+	"operator.victoriametrics.com": {"vmusers": {}, "vmalertmanagers": {}},
+}
+
+// IsSecretBearingResource reports whether objects of group/resource (the
+// plural resource name) hold credentials: a secret-bearing resource name in
+// any group — matched without the group, so a miss cannot leak — or a
+// group-qualified one from secretBearingGroupResources.
+func IsSecretBearingResource(group, resource string) bool {
+	r := strings.ToLower(resource)
+	if _, ok := secretBearingAPIResources[r]; ok {
+		return true
+	}
+	_, ok := secretBearingGroupResources[strings.ToLower(group)][r]
+	return ok
+}
+
 // resourceTakingVerbs are the subcommands whose positional arguments name
 // resource kinds. Read and write verbs both: write mode must not create, edit
 // or delete Secrets through this path either.

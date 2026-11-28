@@ -231,6 +231,26 @@ runner:
     enabled: false
     # workers: 8          # workers matching changes; one object is never matched by two at once
     # maxPending: 10000   # objects with changes waiting; updates to one object coalesce; beyond it changes are shed and counted
+    # Custom resources whose changes are reported as configuration changes,
+    # with a before/after diff, like a Deployment edit. Needs enabled=true.
+    # The chart grants the runner get/list/watch on exactly these.
+    #
+    # What is sent: each object's metadata (minus managedFields and the
+    # last-applied copy) and the fields in diffPaths. Nothing else is cached
+    # or sent, so leave out any field that holds credentials. Kinds that can
+    # hold credentials (Secret-store and VictoriaMetrics user kinds) are
+    # refused by the runner.
+    #
+    # These changes are not linked to any workload: a Certificate named
+    # "web" is not tied to a Deployment named "web".
+    #
+    # Each entry is resolved when the runner starts: a CRD installed later is
+    # watched from the next runner restart.
+    customResources: []
+    #  - group: cert-manager.io
+    #    resource: certificates   # plural resource name
+    #    version: ""              # optional; default: the API server's preferred version
+    #    diffPaths: [spec]        # optional; top-level fields to diff and send; default [spec]
   tolerations: []
   annotations: {}
   nodeSelector: ~

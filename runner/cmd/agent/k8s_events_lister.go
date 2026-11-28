@@ -39,7 +39,7 @@ func newK8sEventsLister(cs kubernetes.Interface) triggers.K8sEventsLister {
 	return &k8sEventsLister{cs: cs}
 }
 
-func (l *k8sEventsLister) ListEvents(ctx context.Context, namespace, kind, name string, limit int) ([]triggers.K8sEvent, error) {
+func (l *k8sEventsLister) ListEvents(ctx context.Context, namespace, apiGroup, kind, name string, limit int) ([]triggers.K8sEvent, error) {
 	if l.cs == nil {
 		return nil, nil
 	}
@@ -72,6 +72,12 @@ func (l *k8sEventsLister) ListEvents(ctx context.Context, namespace, kind, name 
 	}
 	events := make([]triggers.K8sEvent, 0, len(list.Items))
 	for i := range list.Items {
+		// The group is filtered here, not in the field selector: the
+		// selector only matches the exact apiVersion, and controllers stamp
+		// whichever version they use.
+		if !inAPIGroup(list.Items[i].InvolvedObject.APIVersion, apiGroup) {
+			continue
+		}
 		events = append(events, toAgentEvent(&list.Items[i]))
 	}
 	// Sort by LastSeen descending so the most-recent events survive the
@@ -124,4 +130,14 @@ func pickEventTime(candidates ...time.Time) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// inAPIGroup reports whether apiVersion ("cert-manager.io/v1", or "v1" for the
+// core group) is in group; an empty group matches every apiVersion.
+func inAPIGroup(apiVersion, group string) bool {
+	if group == "" {
+		return true
+	}
+	g, _, found := strings.Cut(apiVersion, "/")
+	return found && strings.EqualFold(g, group)
 }

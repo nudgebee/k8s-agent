@@ -1,0 +1,64 @@
+{{- /*
+get/list/watch on exactly the custom resources listed in
+runner.k8sWatch.customResources, for the runner's change tracking. A Role in
+kubewatch.config.namespace when the watch is limited to one namespace (a
+cluster-scoped custom resource cannot be watched then), else a ClusterRole.
+The entries are validated where they are rendered into the runner's env
+(nudgebee-agent.k8sWatchCustomResources).
+*/}}
+{{- $w := .Values.runner.k8sWatch }}
+{{- if and $w.enabled $w.customResources }}
+{{- $_ := include "nudgebee-agent.k8sWatchCustomResources" . }}
+{{- $ns := "" }}
+{{- with .Values.kubewatch.config }}{{ $ns = default "" .namespace }}{{ end }}
+{{- $byGroup := dict }}
+{{- range $w.customResources }}
+{{- $g := lower (toString .group) }}
+{{- $_ := set $byGroup $g (append (default list (get $byGroup $g)) (lower (toString .resource)) | uniq) }}
+{{- end }}
+kind: {{ if $ns }}Role{{ else }}ClusterRole{{ end }}
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-k8s-watch-custom-resources
+  {{- if $ns }}
+  namespace: {{ $ns }}
+  {{- end }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+rules:
+  {{- range $group, $resources := $byGroup }}
+  - apiGroups:
+      - {{ $group | quote }}
+    resources:
+      {{- range $resources }}
+      - {{ . | quote }}
+      {{- end }}
+    verbs:
+      - get
+      - list
+      - watch
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ if $ns }}RoleBinding{{ else }}ClusterRoleBinding{{ end }}
+metadata:
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-k8s-watch-custom-resources
+  {{- if $ns }}
+  namespace: {{ $ns }}
+  {{- end }}
+  labels:
+    {{- include "nudgebee-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ if $ns }}Role{{ else }}ClusterRole{{ end }}
+  name: {{ include "nudgebee-agent.fullname" . }}-runner-k8s-watch-custom-resources
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-service-account
+    namespace: {{ .Release.Namespace }}
+  {{- if .Values.runner.splitIdentities }}
+  - kind: ServiceAccount
+    name: {{ include "nudgebee-agent.fullname" . }}-runner-reader
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
+{{- end }}

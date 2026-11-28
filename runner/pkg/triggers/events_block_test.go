@@ -18,7 +18,7 @@ type stubLister struct {
 
 type listCall struct{ namespace, kind, name string }
 
-func (s *stubLister) ListEvents(_ context.Context, ns, kind, name string, _ int) ([]K8sEvent, error) {
+func (s *stubLister) ListEvents(_ context.Context, ns, _, kind, name string, _ int) ([]K8sEvent, error) {
 	s.calls = append(s.calls, listCall{ns, kind, name})
 	return s.events, s.err
 }

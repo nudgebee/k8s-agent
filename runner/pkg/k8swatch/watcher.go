@@ -240,20 +240,30 @@ func (w *Watcher) register(defs ...sourceDef) {
 		if !w.handlesKind(d.kind) {
 			continue
 		}
-		s := source{kind: d.kind, apiVersion: d.apiVersion, informer: d.informer()}
-		// Resync period 0: this handler never receives the factory's periodic
-		// resync, which would replay every cached object as an update.
-		_, err := s.informer.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(obj any) { w.onAdd(s, obj) },
-			UpdateFunc: func(oldObj, newObj any) { w.onUpdate(s, oldObj, newObj) },
-			DeleteFunc: func(obj any) { w.onDelete(s, obj) },
-		}, 0)
-		if err != nil {
-			w.logger.Warn("k8s watch: handler not registered", "kind", s.kind, "err", err)
-			continue
-		}
-		w.synced = append(w.synced, syncedKind{s.kind, s.informer.HasSynced})
+		w.registerSource(d)
 	}
+}
+
+// registerSource builds d's informer and adds the change handlers. A nil
+// informer (one that could not be set up) is skipped.
+func (w *Watcher) registerSource(d sourceDef) {
+	inf := d.informer()
+	if inf == nil {
+		return
+	}
+	s := source{kind: d.kind, apiVersion: d.apiVersion, informer: inf}
+	// Resync period 0: this handler never receives the factory's periodic
+	// resync, which would replay every cached object as an update.
+	_, err := s.informer.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { w.onAdd(s, obj) },
+		UpdateFunc: func(oldObj, newObj any) { w.onUpdate(s, oldObj, newObj) },
+		DeleteFunc: func(obj any) { w.onDelete(s, obj) },
+	}, 0)
+	if err != nil {
+		w.logger.Warn("k8s watch: handler not registered", "kind", s.kind, "err", err)
+		return
+	}
+	w.synced = append(w.synced, syncedKind{s.kind, s.informer.HasSynced})
 }
 
 func (w *Watcher) onAdd(s source, obj any) {

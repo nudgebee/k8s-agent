@@ -94,18 +94,20 @@ func (a *triggerAdapter) MatchK8sEvent(operation, kind string, obj, oldObj map[s
 			extras = append(extras, map[string]any(b))
 		}
 		out = append(out, alerts.MatchedTrigger{
-			AggregationKey:   m.Spec.AggregationKey,
-			Priority:         m.Spec.Priority,
-			FindingType:      m.Spec.FindingType,
-			Fingerprint:      m.Fingerprint,
-			OccurrenceKey:    m.OccurrenceKey,
-			Owner:            alerts.OwnerRef{Name: m.Owner.Name, Kind: m.Owner.Kind},
-			SubjectName:      m.SubjectName,
-			SubjectNamespace: m.SubjectNamespace,
-			SubjectKind:      m.SubjectKind,
-			SubjectNode:      m.SubjectNode,
-			MatcherName:      m.Spec.Name,
-			ExtraBlocks:      extras,
+			AggregationKey:     m.Spec.AggregationKey,
+			Priority:           m.Spec.Priority,
+			FindingType:        m.Spec.FindingType,
+			Fingerprint:        m.Fingerprint,
+			OccurrenceKey:      m.OccurrenceKey,
+			Owner:              alerts.OwnerRef{Name: m.Owner.Name, Kind: m.Owner.Kind},
+			SubjectName:        m.SubjectName,
+			SubjectNamespace:   m.SubjectNamespace,
+			SubjectKind:        m.SubjectKind,
+			SubjectNode:        m.SubjectNode,
+			SubjectDisplayKind: m.SubjectDisplayKind,
+			Unattributed:       m.Unattributed,
+			MatcherName:        m.Spec.Name,
+			ExtraBlocks:        extras,
 		})
 	}
 	return out
@@ -1102,6 +1104,36 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 				"namespaces", triggers.ConfigMapExcludedNamespaces)
 		}
 		specs := triggers.Builtins()
+		// Custom resources an operator listed get a change matcher each. They
+		// are resolved now, before the engine is built, because a matcher
+		// needs the Kind discovery reports and the engine's matchers are
+		// fixed once it is built.
+		var customResources []k8swatch.ResolvedCustomResource
+		if cfg.K8sWatchCustomResourcesErr != nil {
+			logger.Warn("K8S_WATCH_CUSTOM_RESOURCES ignored", "err", cfg.K8sWatchCustomResourcesErr)
+		}
+		if len(cfg.K8sWatchCustomResources) > 0 {
+			switch {
+			case !cfg.K8sWatchEnabled:
+				logger.Warn("K8S_WATCH_CUSTOM_RESOURCES ignored: it needs K8S_WATCH_ENABLED")
+			case typedKube == nil || dynamicKube == nil:
+				logger.Warn("K8S_WATCH_CUSTOM_RESOURCES ignored: no Kubernetes client")
+			default:
+				entries := make([]k8swatch.CustomResourceEntry, 0, len(cfg.K8sWatchCustomResources))
+				for _, e := range cfg.K8sWatchCustomResources {
+					entries = append(entries, k8swatch.CustomResourceEntry{
+						Group: e.Group, Resource: e.Resource, Version: e.Version, DiffPaths: e.DiffPaths,
+					})
+				}
+				customResources = k8swatch.ResolveCustomResources(gctx, rd.Typed.Discovery(), rd.Dynamic,
+					cfg.K8sWatchNamespace, entries, mreg, logger)
+				for _, r := range customResources {
+					specs = append(specs, triggers.CustomResourceChangeMatcher(r.Kind, r.GVR.Group, r.DiffPaths))
+					logger.Info("k8s watch: watching custom resource changes",
+						"kind", r.QualifiedKind(), "version", r.GVR.Version, "diff_paths", r.DiffPaths)
+				}
+			}
+		}
 		// TRIGGER_RATE_LIMITS lets an operator shorten a matcher's suppression
 		// window without a new image. Applied before NewEngine so the engine
 		// never sees the compiled-in default for an overridden matcher.
@@ -1157,6 +1189,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 			kw.RegisterShared(sharedFactory)
 			kw.RegisterOwn(rd.Typed)
 			kw.RegisterRollouts(gctx, rd.Typed, rd.Dynamic)
+			kw.RegisterCustomResources(rd.Dynamic, customResources)
 			g.Go(func() error {
 				logger.Info("starting k8s watch (kubewatch posts are ignored)")
 				if err := kw.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {

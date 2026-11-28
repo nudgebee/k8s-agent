@@ -157,6 +157,13 @@ func (b *Builder) FromMatchedTrigger(matchSpec MatchedTrigger, rawData []byte) (
 	if subjectOwner != "" {
 		serviceKey = matchSpec.SubjectNamespace + "/" + subjectOwner
 	}
+	if matchSpec.Unattributed {
+		// A service key is how alerts and changes are correlated; a custom
+		// resource named after a workload would otherwise be correlated
+		// with it by name alone.
+		serviceKey = ""
+		subjectOwner, subjectOwnerKind = "", ""
+	}
 
 	finding := Finding{
 		ID:               id,
@@ -208,6 +215,13 @@ type MatchedTrigger struct {
 	SubjectNamespace string
 	SubjectKind      string
 	SubjectNode      string
+	// SubjectDisplayKind is the Kind for titles and descriptions when
+	// SubjectKind is group-qualified ("Certificate" for
+	// "certificate.cert-manager.io"); empty otherwise.
+	SubjectDisplayKind string
+	// Unattributed: a custom-resource change. Sent with an empty service key
+	// and no owner, so the backend never links it to a same-named workload.
+	Unattributed bool
 	// MatcherName is for log + metric labels; not emitted on the Finding.
 	MatcherName string
 
@@ -245,7 +259,7 @@ func (m MatchedTrigger) Title() string {
 		// model nothing to work with. Name the object instead — with more
 		// than one changed kind in play (a Deployment and the ConfigMap it
 		// mounts) the kind is the part that distinguishes them.
-		return fmt.Sprintf("%s %s was changed", kindDisplay(m.SubjectKind), m.subjectPath())
+		return fmt.Sprintf("%s %s was changed", m.displayKind(), m.subjectPath())
 	default:
 		return fmt.Sprintf("%s on %s/%s", m.AggregationKey, m.SubjectNamespace, m.SubjectName)
 	}
@@ -261,6 +275,14 @@ var kindDisplayNames = map[string]string{
 	"statefulset": "StatefulSet",
 	"ingress":     "Ingress",
 	"rollout":     "Rollout",
+}
+
+// displayKind is the Kind for user-facing text.
+func (m MatchedTrigger) displayKind() string {
+	if m.SubjectDisplayKind != "" {
+		return m.SubjectDisplayKind
+	}
+	return kindDisplay(m.SubjectKind)
 }
 
 func kindDisplay(kind string) string {
@@ -299,6 +321,9 @@ func (m MatchedTrigger) Description() string {
 				"Workloads consuming these values via envFrom or a mounted file only pick them up when their pods restart."
 		}
 		kind := m.SubjectKind
+		if m.SubjectDisplayKind != "" {
+			kind = m.SubjectDisplayKind
+		}
 		if kind == "" {
 			kind = "resource"
 		}
