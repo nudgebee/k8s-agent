@@ -167,6 +167,36 @@ Before you upgrade:
 - **OpenShift.** The upgrade has been checked by rendering only; try it on a
   non-production OpenShift cluster first.
 
+### Renaming ClickHouse or using your own Secret
+
+The bundled OpenTelemetry collector finds ClickHouse by the release name. It
+does not follow `clickhouse.fullnameOverride`, `clickhouse.nameOverride`,
+`clickhouse.auth.existingSecret` or `existingSecretKey`, so set it to match, or
+the chart fails to render:
+
+```yaml
+opentelemetry-collector:
+  extraEnvs:
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: my-clickhouse-secret
+          key: admin-password
+  config:
+    exporters:
+      clickhouse:
+        # Only after a rename.
+        endpoint: "tcp://my-clickhouse:9000?dial_timeout=10s&compress=lz4&materialized_views_ignore_errors=1"
+```
+
+Upgrading from 0.1.32 or earlier:
+
+- The collector's defaults used to be the fixed name
+  `nudgebee-agent-clickhouse`. If your release has another name and you gave
+  ClickHouse or its Secret that name to match, set the values above.
+- `opentelemetry-collector.extraEnvs` and `extraEnvsFrom` are now rendered as
+  templates. Write a literal `{{` in them as `{{ "{{" }}`.
+
 ## Configuration
 
 All configurable values live in [`charts/nudgebee-agent/values.yaml`](charts/nudgebee-agent/values.yaml). Common overrides:

@@ -681,6 +681,29 @@ admin-password
 {{- end -}}
 
 {{/*
+<release>-<name>, or the release name alone when it already contains <name>, as
+the Bitnami subchart's common.names.fullname did. Takes (list <root> <name>).
+*/}}
+{{- define "nudgebee-agent.clickhouse.releaseName" -}}
+{{- $release := (index . 0).Release.Name -}}
+{{- $name := index . 1 -}}
+{{- if contains $name $release -}}
+{{- $release | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" $release $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The bundled ClickHouse's default name, from the release name alone. The
+collector's values use it: they render inside the subchart, which cannot see
+.Values.clickhouse and so cannot call clickhouse.servicename below.
+*/}}
+{{- define "nudgebee-agent.clickhouse.defaultName" -}}
+{{- include "nudgebee-agent.clickhouse.releaseName" (list . "clickhouse") -}}
+{{- end -}}
+
+{{/*
 ClickHouse fullname (Services, Secret, ConfigMaps, StatefulSet prefix). Same
 rules as the Bitnami subchart's common.names.fullname, so the names don't change.
 */}}
@@ -688,11 +711,37 @@ rules as the Bitnami subchart's common.names.fullname, so the names don't change
 {{- if .Values.clickhouse.fullnameOverride -}}
 {{- .Values.clickhouse.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- $name := default "clickhouse" .Values.clickhouse.nameOverride -}}
-{{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- include "nudgebee-agent.clickhouse.releaseName" (list . (default "clickhouse" .Values.clickhouse.nameOverride)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Fails the render when ClickHouse's name, Secret or Secret key is changed but the
+collector still has the settings for the defaults: it could not start, while the
+install or upgrade reported success. Settings of the operator's own are left
+alone.
+*/}}
+{{- define "nudgebee-agent.clickhouse.validateCollector" -}}
+{{- $collector := index .Values "opentelemetry-collector" -}}
+{{- $default := include "nudgebee-agent.clickhouse.defaultName" . -}}
+{{- $service := include "nudgebee-agent.clickhouse.servicename" . -}}
+{{- $secret := include "nudgebee-agent.clickhouse.secretName" . -}}
+{{- $key := include "nudgebee-agent.clickhouse.secretKey" . -}}
+{{- $marker := "nudgebee-agent.clickhouse.defaultName" -}}
+{{- if and (ne $service $default) (contains $marker (toString (dig "config" "exporters" "clickhouse" "endpoint" "" $collector))) -}}
+{{- fail (printf "ClickHouse is named %q, but the collector still connects to %q: set opentelemetry-collector.config.exporters.clickhouse.endpoint" $service $default) -}}
+{{- end -}}
+{{- range $collector.extraEnvs -}}
+{{- if eq .name "CLICKHOUSE_PASSWORD" -}}
+{{- $name := toString (dig "valueFrom" "secretKeyRef" "name" "" .) -}}
+{{- $refKey := toString (dig "valueFrom" "secretKeyRef" "key" "" .) -}}
+{{- $isDefault := contains $marker $name -}}
+{{- if and $isDefault (ne $secret $default) -}}
+{{- fail (printf "The ClickHouse password is in Secret %q, but the collector still reads %q: set the CLICKHOUSE_PASSWORD entry of opentelemetry-collector.extraEnvs to Secret %q, key %q" $secret $default $secret $key) -}}
+{{- end -}}
+{{- if and (or $isDefault (eq $name $secret)) (ne $refKey $key) -}}
+{{- fail (printf "The ClickHouse password is under key %q of Secret %q, but the collector reads key %q: set the key of the CLICKHOUSE_PASSWORD entry of opentelemetry-collector.extraEnvs" $key $secret $refKey) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -715,6 +764,15 @@ value is doubled to keep the rendered YAML valid.
 */}}
 {{- define "nudgebee-agent.collectorQuoted" -}}
 {{- replace "'" "''" (toString .) -}}
+{{- end -}}
+
+{{/*
+collectorQuoted for a value that may itself hold a {{ }} reference, which is
+filled in first. Takes (list <collector chart context> <value>). Separate from
+collectorQuoted, whose callers a --reuse-values upgrade keeps.
+*/}}
+{{- define "nudgebee-agent.collectorValue" -}}
+{{- include "nudgebee-agent.collectorQuoted" (tpl (toString (index . 1)) (index . 0)) -}}
 {{- end -}}
 
 {{/*

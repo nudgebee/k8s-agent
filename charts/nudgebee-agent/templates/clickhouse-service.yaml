@@ -4,6 +4,7 @@ rendered: the runner, the collector and the ServiceMonitor reach ClickHouse
 through them.
 */ -}}
 {{- if include "nudgebee-agent.clickhouse.installed" . }}
+{{- include "nudgebee-agent.clickhouse.validateCollector" . }}
 {{- $fullname := include "nudgebee-agent.clickhouse.servicename" . }}
 apiVersion: v1
 kind: Service

@@ -43,6 +43,6 @@ version: 0.1.33
 appVersion: 0.1.33
 dependencies:
 - name: opentelemetry-collector
-  version: 0.165.0
+  version: 0.171.1
   repository: https://open-telemetry.github.io/opentelemetry-helm-charts
   condition: opentelemetry-collector.enabled

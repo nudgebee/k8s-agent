@@ -218,6 +218,56 @@ jobs:
           expect Job nudgebee-agent-ch-schema-upgrade ci-map,ci-plain,ci-global
           echo 'ok: every pod carries its own and the global pull secrets'
 
+      # Red Hat's chart check installs under a random release name. The
+      # collector (both exporters, its wait for ClickHouse and its password)
+      # must follow it to the ClickHouse Service and Secret, and a renamed
+      # ClickHouse must fail the render until the collector is set to match.
+      - name: Assert the collector follows the release name to ClickHouse
+        run: |
+          cat > /tmp/check-collector.py <<'EOF'
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          clickhouse = lambda kind: [d for d in docs if d["kind"] == kind and d["metadata"].get("labels", {}).get("app.kubernetes.io/component") == "clickhouse"]
+          host = next(d["metadata"]["name"] for d in clickhouse("Service") if d["spec"].get("clusterIP") != "None")
+          secret = sys.argv[1] if len(sys.argv) > 1 else clickhouse("Secret")[0]["metadata"]["name"]
+          pod = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("opentelemetry-collector"))["spec"]["template"]["spec"]
+          env = lambda c, name: next(e for e in c["env"] if e["name"] == name)
+          ref = env(pod["containers"][0], "CLICKHOUSE_PASSWORD")["valueFrom"]["secretKeyRef"]
+          assert ref["name"] == secret, (ref, secret)
+          relay = next(yaml.safe_load(d["data"]["relay"]) for d in docs if d["kind"] == "ConfigMap" and "relay" in d.get("data", {}))
+          endpoints = [relay["exporters"][e]["endpoint"] for e in ("clickhouse", "clickhouse/logs")]
+          endpoints += [env(c, "CLICKHOUSE_ENDPOINT")["value"] for c in pod["initContainers"] if c["name"] == "wait-for-clickhouse"]
+          assert len(endpoints) == 3, endpoints
+          for endpoint in endpoints:
+              assert endpoint.split("//")[1].split(":")[0] == host, (endpoint, host)
+          EOF
+          render() { helm template "$1" charts/nudgebee-agent --namespace ci "${@:2}"; }
+          for release in nudgebee-agent other-name my-clickhouse-agent; do
+            render "$release" | python3 /tmp/check-collector.py
+          done
+
+          for rename in fullnameOverride=mych nameOverride=ch auth.existingSecret=mine; do
+            if out="$(render other-name --set clickhouse.$rename 2>&1)"; then
+              echo "clickhouse.$rename rendered with the collector left on the defaults"; exit 1
+            fi
+            grep -q 'the collector still' <<<"$out" || { echo "$out"; exit 1; }
+          done
+          if out="$(render other-name --set clickhouse.auth.existingSecret=mine --set clickhouse.auth.existingSecretKey=pw \
+              --set 'opentelemetry-collector.extraEnvs[0].name=CLICKHOUSE_PASSWORD' \
+              --set 'opentelemetry-collector.extraEnvs[0].valueFrom.secretKeyRef.name=mine' \
+              --set 'opentelemetry-collector.extraEnvs[0].valueFrom.secretKeyRef.key=admin-password' 2>&1)"; then
+            echo "a wrong Secret key rendered"; exit 1
+          fi
+          grep -q 'but the collector reads key' <<<"$out" || { echo "$out"; exit 1; }
+
+          render other-name --set clickhouse.fullnameOverride=mych \
+            --set 'opentelemetry-collector.extraEnvs[0].name=CLICKHOUSE_PASSWORD' \
+            --set 'opentelemetry-collector.extraEnvs[0].valueFrom.secretKeyRef.name=mych' \
+            --set 'opentelemetry-collector.extraEnvs[0].valueFrom.secretKeyRef.key=admin-password' \
+            --set 'opentelemetry-collector.config.exporters.clickhouse.endpoint=tcp://mych:9000' \
+            | python3 /tmp/check-collector.py
+          echo 'ok: the collector points at the ClickHouse of its own release'
+
       # The runner's ClickHouse logs check must look where the bundled exporter
       # writes. With the collector off nothing is set and the runner falls back
       # to otel_logs in CLICKHOUSE_DB; an operator's own env var wins.
